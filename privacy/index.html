@@ -22,27 +22,49 @@
   </header>
 
   <main class="site-shell legal-page">
-    <p class="eyebrow">Effective date: May 11, 2026</p>
+    <p class="eyebrow">Effective date: May 14, 2026</p>
     <h1>Privacy Policy</h1>
-    <p>Mergerino is a desktop chat client. It does not operate a hosted backend for YouTube login. When you sign in with Google, the app uses Google's OAuth flow and the YouTube Data API directly from your desktop device so YouTube chat features can work inside the app.</p>
+    <p>Mergerino is a Windows desktop chat client for viewing and participating in live chat across supported streaming platforms. Mergerino does not operate a hosted backend for Google or YouTube login. When you sign in with Google, the app opens Google's OAuth flow and uses the YouTube Data API directly from your desktop device so YouTube chat features can work inside the app.</p>
 
-    <h2>Google and YouTube access</h2>
-    <p>Mergerino requests YouTube access only for user-facing chat features, including:</p>
+    <h2>Google user data accessed</h2>
+    <p>Mergerino requests the <code>https://www.googleapis.com/auth/youtube.force-ssl</code> OAuth scope because YouTube requires an authenticated YouTube Data API scope for the live chat write and moderation actions Mergerino provides. This scope may allow broader YouTube account permissions, but Mergerino uses it only for the YouTube chat features described in this policy.</p>
+    <p>Depending on which YouTube features you use, Mergerino may access or process the following Google user data:</p>
     <ul>
-      <li>Showing YouTube live chat for channels you open in the app</li>
-      <li>Sending YouTube live chat messages as the signed-in Google account</li>
-      <li>Performing YouTube live chat moderation actions, such as deleting messages or hiding users, when the signed-in account is permitted to do so by YouTube</li>
-      <li>Displaying basic YouTube account or channel information needed to show which account is signed in</li>
+      <li>OAuth authorization data, including access tokens, refresh tokens, token expiration time, and the OAuth client ID used for sign-in</li>
+      <li>Your authenticated YouTube channel ID and channel display name, used to show which YouTube account is connected</li>
+      <li>Live stream and live chat identifiers needed to connect to the chat you open, including YouTube video IDs, live chat IDs, stream title, stream start time, viewer count, thumbnail or preview URL, and owner channel ID</li>
+      <li>Live chat content displayed in the app, including message IDs, author display names, author channel IDs, message text, timestamps, badges, emoji, membership events, Super Chat or sticker details, and other chat metadata returned by YouTube for the live chat you opened</li>
+      <li>Chat messages you choose to send through Mergerino as the signed-in YouTube account</li>
+      <li>Moderation data for actions you choose to perform, including the target message ID, target user's channel ID and display name, timeout duration, ban status, and ban IDs returned by YouTube</li>
     </ul>
 
-    <h2>Local token storage</h2>
-    <p>Mergerino stores YouTube OAuth tokens locally on your device so you do not have to sign in every time you open the app. The Mergerino developer does not receive, store, sell, rent, or share your Google OAuth tokens or Google user data.</p>
+    <h2>How Google user data is used</h2>
+    <p>Mergerino uses Google user data only to provide and improve the visible YouTube chat features in the desktop app. Specifically, Mergerino uses Google user data to:</p>
+    <ul>
+      <li>Connect your YouTube account and show the connected account in the app</li>
+      <li>Refresh OAuth access so you do not have to sign in every time you open Mergerino</li>
+      <li>Find the active live chat for a YouTube stream you open</li>
+      <li>Display YouTube live chat messages, author information, chat badges, emoji, membership events, Super Chats, stickers, stream status, and stream metadata in the app</li>
+      <li>Send chat messages that you type and submit through Mergerino</li>
+      <li>Perform moderation actions that you explicitly choose, such as deleting a live chat message, timing out a user, banning a user, or unbanning a user when YouTube permits the signed-in account to do so</li>
+      <li>Show YouTube error or status messages related to sign-in, chat, sending, and moderation</li>
+    </ul>
+    <p>Mergerino does not use Google user data for advertising, tracking, credit decisions, lending, data brokerage, selling user data, unrelated analytics, or training generalized AI or machine learning models. Mergerino does not intentionally access, upload, edit, or delete YouTube videos, ratings, comments outside live chat, captions, playlists, subscriptions, or analytics.</p>
 
-    <h2>Limited use</h2>
-    <p>Mergerino uses Google user data only to provide and improve the visible YouTube chat features in the app. It does not use Google user data for advertising, tracking, credit decisions, data brokerage, or unrelated analytics.</p>
+    <h2>Storage and retention</h2>
+    <p>Mergerino stores the connected YouTube account's display name, channel ID, OAuth client ID, access token, refresh token, and token expiration time locally in the app's settings on your device. This local storage is used to keep you signed in between app launches.</p>
+    <p>Live chat messages and stream metadata are displayed in the app while you use YouTube chat features. Mergerino does not upload those messages or metadata to a Mergerino server. Ban IDs returned by YouTube may be cached in memory during the current app session so Mergerino can unban users it banned during that same session.</p>
+    <p>If you remove a YouTube account from Mergerino, Mergerino removes the locally saved YouTube account fields for that account. You can also revoke Mergerino's Google access at any time from your Google Account permissions page: <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a>. Revoking access invalidates Mergerino's OAuth tokens for your Google account.</p>
+
+    <h2>Sharing and disclosure</h2>
+    <p>Google user data is sent directly between your desktop device and Google or YouTube services to provide the YouTube features you request. Mergerino does not operate a server that receives your Google OAuth tokens or Google user data. The Mergerino developer does not receive, store, sell, rent, or share your Google OAuth tokens or Google user data.</p>
+    <p>Mergerino does not transfer Google user data to advertising platforms, data brokers, information resellers, analytics providers, or other third parties. Mergerino does not allow humans to read your Google user data through any Mergerino backend because no such backend is operated for YouTube login or chat.</p>
+
+    <h2>Protection of Google user data</h2>
+    <p>Mergerino sends Google OAuth and YouTube Data API requests over HTTPS. OAuth token request bodies are hidden from Mergerino's network request logging. Google OAuth tokens are stored locally on your device and are not transmitted to the Mergerino developer. You are responsible for protecting your Windows account, local device, backups, and any copied Mergerino settings files.</p>
 
     <h2>Revoking access</h2>
-    <p>You can revoke Mergerino's Google access at any time from your Google Account permissions page: <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a></p>
+    <p>You can revoke Mergerino's Google access at any time from your Google Account permissions page: <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a>.</p>
 
     <h2>Contact</h2>
     <p>For privacy or support questions, open an issue on the <a href="https://github.com/Fixlation/Mergerino/issues">Mergerino GitHub repository</a> or contact the maintainer via Discord or Twitter/X.</p>
