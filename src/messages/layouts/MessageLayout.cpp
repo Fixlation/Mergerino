@@ -8,10 +8,14 @@
 #include "messages/layouts/MessageLayoutContainer.hpp"
 #include "messages/layouts/MessageLayoutContext.hpp"
 #include "messages/layouts/MessageLayoutElement.hpp"
+#include "messages/Image.hpp"
 #include "messages/Message.hpp"
 #include "messages/MessageElement.hpp"
 #include "messages/Selection.hpp"
 #include "providers/colors/ColorProvider.hpp"
+#include "providers/links/LinkInfo.hpp"
+#include "providers/links/LinkResolver.hpp"
+#include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
 #include "singletons/WindowManager.hpp"
@@ -21,6 +25,10 @@
 #include <QDebug>
 #include <QLinearGradient>
 #include <QPainter>
+#include <QPainterPath>
+#include <QSet>
+#include <QTextLayout>
+#include <QTextOption>
 #include <QtGlobal>
 #include <QThread>
 
@@ -39,6 +47,357 @@ QColor blendColors(const QColor &base, const QColor &apply)
                    base.blueF() * (1 - alpha) + apply.blueF() * alpha);
     return result;
 }
+
+QStringList wrapPreviewText(const QString &input, const QFont &font,
+                            qreal width, int maxLines)
+{
+    const auto text = input.simplified();
+    if (text.isEmpty() || width <= 0 || maxLines <= 0)
+    {
+        return {};
+    }
+
+    QTextLayout textLayout(text, font);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    textLayout.setTextOption(option);
+
+    const QFontMetricsF metrics(font);
+    QStringList lines;
+    textLayout.beginLayout();
+    for (int index = 0; index < maxLines; ++index)
+    {
+        auto line = textLayout.createLine();
+        if (!line.isValid())
+        {
+            break;
+        }
+        line.setLineWidth(width);
+
+        const auto start = line.textStart();
+        const auto length = line.textLength();
+        const bool isLastVisibleLine = index == maxLines - 1;
+        if (isLastVisibleLine && start + length < text.size())
+        {
+            lines.append(metrics.elidedText(text.mid(start).simplified(),
+                                            Qt::ElideRight, qFloor(width)));
+            break;
+        }
+        lines.append(text.mid(start, length).trimmed());
+    }
+    textLayout.endLayout();
+    return lines;
+}
+
+struct LinkPreviewCardLayout {
+    QSizeF size;
+    qreal contentLeft = 0;
+    qreal contentWidth = 0;
+    qreal siteTop = -1;
+    qreal titleTop = -1;
+    qreal subtitleTop = -1;
+    qreal imageTop = -1;
+    qreal imageHeight = 0;
+    QFont siteFont;
+    QFont titleFont;
+    QFont subtitleFont;
+    QStringList siteLines;
+    QStringList titleLines;
+    QStringList subtitleLines;
+};
+
+LinkPreviewCardLayout makeLinkPreviewCardLayout(
+    const QString &title, const QString &subtitle, const QString &siteName,
+    const ImagePtr &thumbnail, float scale, qreal width)
+{
+    LinkPreviewCardLayout layout;
+    layout.siteFont =
+        getApp()->getFonts()->getFont(FontStyle::ChatSmall, scale);
+    layout.titleFont =
+        getApp()->getFonts()->getFont(FontStyle::ChatMediumBold, scale);
+    layout.subtitleFont =
+        getApp()->getFonts()->getFont(FontStyle::ChatMediumSmall, scale);
+    layout.subtitleFont.setPointSizeF(
+        layout.subtitleFont.pointSizeF() * 0.95);
+
+    const qreal accentWidth = 4 * scale;
+    const qreal horizontalPadding = 12 * scale;
+    layout.contentLeft = accentWidth + horizontalPadding;
+    layout.contentWidth =
+        std::max<qreal>(0, width - layout.contentLeft - horizontalPadding);
+
+    layout.siteLines =
+        wrapPreviewText(siteName, layout.siteFont, layout.contentWidth, 1);
+    layout.titleLines =
+        wrapPreviewText(title, layout.titleFont, layout.contentWidth, 2);
+    layout.subtitleLines = wrapPreviewText(
+        subtitle, layout.subtitleFont, layout.contentWidth, 3);
+
+    const QFontMetricsF siteMetrics(layout.siteFont);
+    const QFontMetricsF titleMetrics(layout.titleFont);
+    const QFontMetricsF subtitleMetrics(layout.subtitleFont);
+
+    qreal y = 10 * scale;
+    if (!layout.siteLines.isEmpty())
+    {
+        layout.siteTop = y;
+        y += siteMetrics.lineSpacing() * layout.siteLines.size();
+    }
+    if (!layout.titleLines.isEmpty())
+    {
+        if (layout.siteTop >= 0)
+        {
+            y += 3 * scale;
+        }
+        layout.titleTop = y;
+        y += titleMetrics.lineSpacing() * layout.titleLines.size();
+    }
+    if (!layout.subtitleLines.isEmpty())
+    {
+        if (layout.siteTop >= 0 || layout.titleTop >= 0)
+        {
+            y += 6 * scale;
+        }
+        layout.subtitleTop = y;
+        y += subtitleMetrics.lineSpacing() * layout.subtitleLines.size();
+    }
+
+    if (thumbnail && !thumbnail->isEmpty())
+    {
+        y += 10 * scale;
+        layout.imageTop = y;
+        const auto sourceSize = thumbnail->size();
+        const qreal sourceRatio =
+            sourceSize.width() > 0 && sourceSize.height() > 0
+                ? sourceSize.width() / sourceSize.height()
+                : 16.0 / 9.0;
+        layout.imageHeight = std::clamp(
+            layout.contentWidth / std::max<qreal>(sourceRatio, 0.01),
+            qreal{110} * scale, qreal{280} * scale);
+        y += layout.imageHeight;
+    }
+
+    y += 12 * scale;
+    layout.size = {width, std::max<qreal>(y, 56 * scale)};
+    return layout;
+}
+
+void drawPreviewLines(QPainter &painter, const QStringList &lines,
+                      const QFont &font, const QColor &color, qreal x,
+                      qreal top)
+{
+    if (lines.isEmpty() || top < 0)
+    {
+        return;
+    }
+
+    const QFontMetricsF metrics(font);
+    painter.setFont(font);
+    painter.setPen(color);
+    qreal baseline = top + metrics.ascent();
+    for (const auto &line : lines)
+    {
+        painter.drawText(QPointF(x, baseline), line);
+        baseline += metrics.lineSpacing();
+    }
+}
+
+class LinkPreviewLayoutElement final : public MessageLayoutElement
+{
+public:
+    LinkPreviewLayoutElement(MessageElement &creator, QString title,
+                             QString subtitle, QString siteName,
+                             ImagePtr thumbnail, QColor accentColor,
+                             float scale, QSizeF size)
+        : MessageLayoutElement(creator, size)
+        , title_(std::move(title))
+        , subtitle_(std::move(subtitle))
+        , siteName_(std::move(siteName))
+        , thumbnail_(std::move(thumbnail))
+        , accentColor_(std::move(accentColor))
+        , scale_(scale)
+    {
+        this->setTrailingSpace(false);
+    }
+
+    static QSizeF calculateSize(const QString &title, const QString &subtitle,
+                                const QString &siteName,
+                                const ImagePtr &thumbnail, float scale,
+                                qreal width)
+    {
+        auto size = makeLinkPreviewCardLayout(
+                        title, subtitle, siteName, thumbnail, scale, width)
+                        .size;
+        size.rheight() += 6 * scale;
+        return size;
+    }
+
+    void addCopyTextToString(QString &, uint32_t, uint32_t) const override
+    {
+    }
+
+    size_t getSelectionIndexCount() const override
+    {
+        return 0;
+    }
+
+    void paint(QPainter &painter,
+               const MessageColors &messageColors) override
+    {
+        const auto rect = this->cardRect();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        auto background = messageColors.regularText;
+        background.setAlpha(22);
+        auto border = messageColors.regularText;
+        border.setAlpha(36);
+        painter.setPen(QPen(border, std::max<qreal>(1.0, this->scale_)));
+        painter.setBrush(background);
+        painter.drawRoundedRect(rect, 5 * this->scale_, 5 * this->scale_);
+
+        painter.save();
+        QPainterPath cardClip;
+        cardClip.addRoundedRect(rect, 5 * this->scale_, 5 * this->scale_);
+        painter.setClipPath(cardClip);
+        auto accent = this->accentColor_.isValid()
+                          ? this->accentColor_
+                          : messageColors.linkText;
+        accent.setAlpha(220);
+        painter.fillRect(QRectF(rect.left(), rect.top(), 4 * this->scale_,
+                               rect.height()),
+                         accent);
+        painter.restore();
+
+        const auto layout = makeLinkPreviewCardLayout(
+            this->title_, this->subtitle_, this->siteName_, this->thumbnail_,
+            this->scale_, rect.width());
+
+        auto secondary = messageColors.regularText;
+        secondary.setAlpha(178);
+        drawPreviewLines(painter, layout.siteLines, layout.siteFont, secondary,
+                         rect.left() + layout.contentLeft,
+                         rect.top() + layout.siteTop);
+        drawPreviewLines(painter, layout.titleLines, layout.titleFont,
+                         messageColors.linkText,
+                         rect.left() + layout.contentLeft,
+                         rect.top() + layout.titleTop);
+        drawPreviewLines(painter, layout.subtitleLines, layout.subtitleFont,
+                         messageColors.regularText,
+                         rect.left() + layout.contentLeft,
+                         rect.top() + layout.subtitleTop);
+
+        const auto thumbRect = this->thumbnailRect(rect);
+        if (!thumbRect.isEmpty() && this->thumbnail_)
+        {
+            const auto pixmap = this->thumbnail_->pixmapOrLoad();
+            if (pixmap && !this->thumbnail_->animated())
+            {
+                this->drawThumbnail(painter, *pixmap, thumbRect);
+            }
+        }
+    }
+
+    bool paintAnimated(QPainter &painter, qreal yOffset) override
+    {
+        if (!this->thumbnail_ || !this->thumbnail_->animated())
+        {
+            return false;
+        }
+
+        const auto pixmap = this->thumbnail_->pixmapOrLoad();
+        if (!pixmap)
+        {
+            return false;
+        }
+
+        auto thumbRect = this->thumbnailRect(this->cardRect());
+        if (thumbRect.isEmpty())
+        {
+            return false;
+        }
+        thumbRect.translate(0, yOffset);
+        this->drawThumbnail(painter, *pixmap, thumbRect);
+        return true;
+    }
+
+    int getMouseOverIndex(QPointF) const override
+    {
+        return 0;
+    }
+
+    qreal getXFromIndex(size_t index) override
+    {
+        return index == 0 ? this->getRect().left()
+                          : this->getRect().right();
+    }
+
+private:
+    QRectF cardRect() const
+    {
+        auto rect = this->getRect();
+        rect.setTop(rect.top() + 6 * this->scale_);
+        return rect;
+    }
+
+    QRectF thumbnailRect(const QRectF &cardRect) const
+    {
+        if (!this->thumbnail_ || this->thumbnail_->isEmpty())
+        {
+            return {};
+        }
+
+        const auto layout = makeLinkPreviewCardLayout(
+            this->title_, this->subtitle_, this->siteName_, this->thumbnail_,
+            this->scale_, cardRect.width());
+        if (layout.imageTop < 0 || layout.imageHeight <= 0)
+        {
+            return {};
+        }
+        return {cardRect.left() + layout.contentLeft,
+                cardRect.top() + layout.imageTop, layout.contentWidth,
+                layout.imageHeight};
+    }
+
+    void drawThumbnail(QPainter &painter, const QPixmap &pixmap,
+                       const QRectF &target) const
+    {
+        if (pixmap.isNull() || target.isEmpty())
+        {
+            return;
+        }
+
+        QRectF source(0, 0, pixmap.width(), pixmap.height());
+        const qreal sourceRatio = source.width() / source.height();
+        const qreal targetRatio = target.width() / target.height();
+        if (sourceRatio > targetRatio)
+        {
+            const qreal width = source.height() * targetRatio;
+            source.setLeft((source.width() - width) / 2);
+            source.setWidth(width);
+        }
+        else
+        {
+            const qreal height = source.width() / targetRatio;
+            source.setTop((source.height() - height) / 2);
+            source.setHeight(height);
+        }
+
+        painter.save();
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        QPainterPath clip;
+        clip.addRoundedRect(target, 4 * this->scale_, 4 * this->scale_);
+        painter.setClipPath(clip);
+        painter.drawPixmap(target, pixmap, source);
+        painter.restore();
+    }
+
+    QString title_;
+    QString subtitle_;
+    QString siteName_;
+    ImagePtr thumbnail_;
+    QColor accentColor_;
+    float scale_;
+};
 
 QColor defaultPlatformAccent(MessagePlatform platform)
 {
@@ -92,10 +451,21 @@ QColor activityPlatformHighlightColor(const Message &message)
     return popped;
 }
 
+bool isPlatformAlertMessage(const Message &message);
+
 QColor automaticEventHighlightColor(const Message &message,
                                     const QColor &highlightColor,
                                     const MessagePaintContext &ctx)
 {
+    const bool isAlert = isPlatformAlertMessage(message);
+    const auto style =
+        isAlert ? platformAlertHighlightStyleSetting().getEnum()
+                : getSettings()->platformEventHighlightStyle.getEnum();
+    if (style == PlatformEventHighlightStyle::None)
+    {
+        return {};
+    }
+
     if (ctx.forceFlatEventHighlights)
     {
         if (!mergedPlatformIndicatorShowsLineColor(ctx.platformIndicatorMode))
@@ -106,15 +476,12 @@ QColor automaticEventHighlightColor(const Message &message,
         return activityPlatformHighlightColor(message);
     }
 
-    const auto style = getSettings()->platformEventHighlightStyle.getEnum();
-    if (style == PlatformEventHighlightStyle::None)
-    {
-        return {};
-    }
-
     if (style == PlatformEventHighlightStyle::CustomColor)
     {
-        QColor custom(getSettings()->platformEventHighlightCustomColor);
+        QColor custom(
+            isAlert ? platformAlertHighlightCustomColorSetting().getValue()
+                    : getSettings()
+                          ->platformEventHighlightCustomColor.getValue());
         if (custom.isValid())
         {
             return custom;
@@ -139,15 +506,26 @@ QColor automaticEventHighlightColor(const Message &message,
     return fallbackPlatformHighlightColor(message, highlightColor);
 }
 
-bool automaticEventHighlightUsesGradient(const MessagePaintContext &ctx)
+bool automaticEventHighlightUsesGradient(const Message &message,
+                                         const MessagePaintContext &ctx)
 {
     if (ctx.forceFlatEventHighlights)
     {
         return false;
     }
 
-    return getSettings()->platformEventHighlightStyle.getEnum() ==
-           PlatformEventHighlightStyle::Gradient;
+    const auto style =
+        isPlatformAlertMessage(message)
+            ? platformAlertHighlightStyleSetting().getEnum()
+            : getSettings()->platformEventHighlightStyle.getEnum();
+    return style == PlatformEventHighlightStyle::Gradient;
+}
+
+bool shouldHideBlockedTermAutomodMessages()
+{
+    return getSettings()
+               ->showBlockedTermAutomodMessages.getValueCopy()
+               .compare(QStringLiteral("Never"), Qt::CaseInsensitive) == 0;
 }
 
 bool isPlatformAlertMessage(const Message &message)
@@ -262,7 +640,7 @@ bool applyAutomaticEventOverlay(const Message &message, const QColor &baseColor,
         return false;
     }
 
-    if (automaticEventHighlightUsesGradient(ctx))
+    if (automaticEventHighlightUsesGradient(message, ctx))
     {
         gradientOverlayColor =
             brightenGradient ? brightenGradientColor(resolvedColor)
@@ -386,7 +764,7 @@ void MessageLayout::paintBackground(QPainter &painter, const QRect &rect,
                                   ctx.forceFlatEventHighlights) &&
         ((ctx.forceFlatEventHighlights &&
           mergedPlatformIndicatorShowsLineColor(ctx.platformIndicatorMode)) ||
-         (automaticEventHighlightUsesGradient(ctx) &&
+         (automaticEventHighlightUsesGradient(*this->message_, ctx) &&
           (isWatchStreakEvent ||
            !automaticEventIncludesUserMessage(*this->message_))));
 
@@ -575,13 +953,18 @@ void MessageLayout::actuallyLayout(const MessageLayoutContext &ctx)
     bool hideModerated = getSettings()->hideModerated;
     bool hideModerationActions = getSettings()->hideModerationActions;
     bool hideBlockedTermAutomodMessages =
-        getSettings()->showBlockedTermAutomodMessages.getEnum() ==
-        ShowModerationState::Never;
+        shouldHideBlockedTermAutomodMessages();
     bool hideSimilar = getSettings()->hideSimilar;
     bool hideReplies = !ctx.flags.has(MessageElementFlag::RepliedMessage);
 
     this->container_.beginLayout(ctx.width, this->scale_, this->imageScale_,
                                  messageFlags);
+
+    const bool showLinkPreviews =
+        linkPreviewModeSetting().getEnum() != LinkPreviewMode::Disabled &&
+        !shouldSuppressLinkPreview(*this->message_);
+    std::vector<LinkElement *> previewLinks;
+    QSet<QString> seenPreviewUrls;
 
     for (const auto &element : this->message_->elements)
     {
@@ -633,6 +1016,60 @@ void MessageLayout::actuallyLayout(const MessageLayoutContext &ctx)
         }
 
         element->addToContainer(this->container_, ctx);
+
+        if (showLinkPreviews)
+        {
+            auto *linkElement = dynamic_cast<LinkElement *>(element.get());
+            if (linkElement)
+            {
+                auto *linkInfo = linkElement->linkInfo();
+                if (!shouldShowLinkPreview(linkInfo->originalUrl()))
+                {
+                    continue;
+                }
+                if (linkInfo->isPending())
+                {
+                    getApp()->getLinkResolver()->resolve(linkInfo);
+                }
+
+                const auto previewKey = linkInfo->originalUrl();
+                if (linkInfo->hasPreview() &&
+                    !seenPreviewUrls.contains(previewKey))
+                {
+                    seenPreviewUrls.insert(previewKey);
+                    previewLinks.push_back(linkElement);
+                }
+            }
+        }
+    }
+
+    const qreal previewWidth =
+        std::min<qreal>(300 * this->scale_,
+                        ctx.width - (32 * this->scale_));
+    if (previewWidth >= 220 * this->scale_)
+    {
+        for (auto *linkElement : previewLinks)
+        {
+            if (!this->container_.atStartOfLine())
+            {
+                this->container_.breakLine();
+            }
+
+            auto *linkInfo = linkElement->linkInfo();
+            ImagePtr thumbnail =
+                linkInfo->hasThumbnail() ? linkInfo->thumbnail() : nullptr;
+
+            const auto previewSize = LinkPreviewLayoutElement::calculateSize(
+                linkInfo->previewTitle(), linkInfo->previewSubtitle(),
+                linkInfo->previewSiteName(), thumbnail, this->scale_,
+                previewWidth);
+            this->container_.addElementNoLineBreak(new LinkPreviewLayoutElement(
+                *linkElement, linkInfo->previewTitle(),
+                linkInfo->previewSubtitle(), linkInfo->previewSiteName(),
+                std::move(thumbnail), linkInfo->previewAccentColor(),
+                this->scale_, previewSize));
+            this->container_.breakLine();
+        }
     }
 
     if (this->height_ != this->container_.getHeight())

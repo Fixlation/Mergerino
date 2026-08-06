@@ -11,6 +11,7 @@
 #include "util/Helpers.hpp"
 #include "util/ImageUploader.hpp"
 #include "util/StreamLink.hpp"
+#include "widgets/settingspages/ObsPage.hpp"
 #include "widgets/settingspages/SettingWidget.hpp"
 
 #include <QFormLayout>
@@ -115,6 +116,8 @@ bool ExternalToolsPage::filterElements(const QString &query)
 void ExternalToolsPage::initLayout(GeneralPageView &layout)
 {
     auto &s = *getSettings();
+
+    addObsSettings(layout);
 
     {
         auto *form = new QFormLayout;

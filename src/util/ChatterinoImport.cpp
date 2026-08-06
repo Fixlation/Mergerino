@@ -226,6 +226,7 @@ QJsonObject mergedSplitDataForTwitchChannel(const QString &channelName)
     data.insert("youtubeStreamUrl", QString{});
     data.insert("tiktokEnabled", false);
     data.insert("tiktokSource", QString{});
+    data.insert("tiktokShowJoinMessages", true);
     return data;
 }
 
@@ -437,6 +438,18 @@ ExpectedStr<void> patchImportedSettingsFile(const QString &path,
                    optionValueOrDefault(
                        options.platformEventHighlightCustomColor,
                        u"#5a9146ff"_s));
+    setNestedValue(root, {"appearance", "messages",
+                          "platformAlertHighlightStyle"},
+                   optionValueOrDefault(options.platformAlertHighlightStyle,
+                                        u"gradient"_s).toLower());
+    setNestedValue(root, {"appearance", "messages",
+                          "platformAlertHighlightCustomColor"},
+                   optionValueOrDefault(
+                       options.platformAlertHighlightCustomColor,
+                       u"#5a9146ff"_s));
+    setNestedValue(root, {"appearance", "messages",
+                          "platformHighlightStylesSplitMigrated"},
+                   true);
 
     document->setObject(root);
     return writeJsonFile(path, *document);
@@ -476,6 +489,16 @@ ExpectedStr<void> writePendingImport(const QString &path,
         object.insert("platformEventHighlightCustomColor",
                       *options.platformEventHighlightCustomColor);
     }
+    if (options.platformAlertHighlightStyle.has_value())
+    {
+        object.insert("platformAlertHighlightStyle",
+                      *options.platformAlertHighlightStyle);
+    }
+    if (options.platformAlertHighlightCustomColor.has_value())
+    {
+        object.insert("platformAlertHighlightCustomColor",
+                      *options.platformAlertHighlightCustomColor);
+    }
 
     return writeJsonFile(path, QJsonDocument(object));
 }
@@ -510,6 +533,16 @@ ImportOptions optionsFromPendingImport(const QJsonObject &object)
     {
         options.platformEventHighlightCustomColor =
             object.value("platformEventHighlightCustomColor").toString();
+    }
+    if (object.contains("platformAlertHighlightStyle"))
+    {
+        options.platformAlertHighlightStyle =
+            object.value("platformAlertHighlightStyle").toString();
+    }
+    if (object.contains("platformAlertHighlightCustomColor"))
+    {
+        options.platformAlertHighlightCustomColor =
+            object.value("platformAlertHighlightCustomColor").toString();
     }
     return options;
 }

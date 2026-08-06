@@ -42,6 +42,15 @@ public:
     virtual void paint(QPainter *painter, const QRect &rect) const = 0;
     virtual QSize sizeHint(const QRect &rect) const = 0;
 
+    /// Activates an item at a mouse position relative to its painted row.
+    /// Keyboard activation continues to use action().
+    virtual void actionAt(const QPoint &position, const QRect &rect)
+    {
+        Q_UNUSED(position);
+        Q_UNUSED(rect);
+        this->action();
+    }
+
 protected:
     QIcon icon_;
     static const QSize ICON_SIZE;

@@ -508,6 +508,7 @@ ManagePredictionDialog::ManagePredictionDialog(
     : BasePopup(
           {
               BaseWindow::EnableCustomFrame,
+              BaseWindow::CloseButtonOnly,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
           },

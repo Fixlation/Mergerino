@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 #include <functional>
 #include <optional>
@@ -18,14 +19,75 @@ struct HelixPrediction;
 struct HelixPredictions;
 struct HelixChatterGroups;
 
+struct TwitchResubNotification {
+    QString id;
+    int cumulativeTenureMonths = 0;
+    int months = 0;
+    int streakTenureMonths = 0;
+    QString token;
+    bool isGiftSubscription = false;
+    QString gifterDisplayName;
+};
+
+struct TwitchChannelModerationPermissions {
+    bool addModerator = false;
+    bool removeModerator = false;
+    bool addVip = false;
+    bool removeVip = false;
+    bool deleteModComments = false;
+};
+
+enum class TwitchChannelRoleAction {
+    AddModerator,
+    RemoveModerator,
+    AddVip,
+    RemoveVip,
+};
+
+struct TwitchModComment {
+    QString id;
+    QString timestamp;
+    QString text;
+    QString channelId;
+    QString channelLogin;
+    QString authorId;
+    QString authorLogin;
+    QString authorDisplayName;
+    bool isShareable = false;
+};
+
 class TwitchWebApi
 {
 public:
+    static void getChannelModerationPermissions(
+        const QString &channelId, const QString &userId,
+        const QString &oauthClient, const QString &oauthToken,
+        std::function<void(const TwitchChannelModerationPermissions &)>
+            successCallback,
+        std::function<void(const QString &)> failureCallback);
+
+    static void updateChannelRole(
+        TwitchChannelRoleAction action, const QString &channelId,
+        const QString &targetLogin, const QString &oauthClient,
+        const QString &oauthToken, std::function<void()> successCallback,
+        std::function<void(const QString &)> failureCallback);
+
+    static void getModComments(
+        const QString &channelId, const QString &targetId,
+        const QString &oauthClient, const QString &oauthToken,
+        std::function<void(const QVector<TwitchModComment> &)> successCallback,
+        std::function<void(const QString &)> failureCallback);
+
+    static void deleteModComment(
+        const QString &channelId, const QString &commentId,
+        const QString &oauthClient, const QString &oauthToken,
+        std::function<void()> successCallback,
+        std::function<void(const QString &)> failureCallback);
+
     static void startPoll(const QString &channelId, const QString &title,
                           const QStringList &choices, int durationSeconds,
                           std::optional<int> pointsPerVote,
-                          const QString &oauthClient,
-                          const QString &oauthToken,
+                          const QString &oauthClient, const QString &oauthToken,
                           std::function<void()> successCallback,
                           std::function<void(const QString &)> failureCallback);
 
@@ -35,6 +97,12 @@ public:
         const QString &oauthToken,
         std::function<void(const HelixPolls &)> successCallback,
         std::function<void(const QString &)> failureCallback);
+
+    static void endPoll(const QString &channelId, const QString &pollId,
+                        const QString &oauthClient,
+                        const QString &oauthToken,
+                        std::function<void()> successCallback,
+                        std::function<void(const QString &)> failureCallback);
 
     static void startPrediction(
         const QString &channelId, const QString &title,
@@ -63,6 +131,19 @@ public:
         const QString &oauthToken, const QString &clientIntegrity,
         const QString &deviceId,
         std::function<void(const HelixChatterGroups &)> successCallback,
+        std::function<void(const QString &)> failureCallback);
+
+    static void getResubNotification(
+        const QString &channelLogin, const QString &oauthClient,
+        const QString &oauthToken,
+        std::function<void(std::optional<TwitchResubNotification>)>
+            successCallback,
+        std::function<void(const QString &)> failureCallback);
+
+    static void shareResubNotification(
+        const QString &channelLogin, const QString &tokenID,
+        const QString &message, bool includeStreak, const QString &oauthClient,
+        const QString &oauthToken, std::function<void()> successCallback,
         std::function<void(const QString &)> failureCallback);
 
     static void getModeratorLogins(

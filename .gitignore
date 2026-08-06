@@ -55,6 +55,9 @@ activate-*
 # Local OAuth credentials for private development builds
 src/providers/youtube/YouTubeOAuthSecrets.local.hpp
 
+# Generated PostHog project token for release builds
+src/controllers/analytics/PostHogProjectToken.local.hpp
+
 .gdb_history
 
 ## Vim Swap

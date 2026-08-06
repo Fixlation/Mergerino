@@ -68,9 +68,13 @@ jobs:
         shell: pwsh
         env:
           MRAB: ${{ secrets.MRAB }}
+          PHGTK: ${{ secrets.PHGTK }}
         run: |
           if ([string]::IsNullOrWhiteSpace($Env:MRAB)) {
             throw "Repository secret MRAB is required for release builds."
+          }
+          if ([string]::IsNullOrWhiteSpace($Env:PHGTK)) {
+            throw "Repository secret PHGTK is required for release builds."
           }
 
           $secretBytes = [System.Text.Encoding]::UTF8.GetBytes($Env:MRAB.Trim())
@@ -105,6 +109,39 @@ jobs:
 
           }  // namespace chatterino::release_auth_blob
           "@ | Set-Content -Path src/providers/youtube/YouTubeOAuthSecrets.local.hpp -Encoding ascii
+
+          $posthogBytes = [System.Text.Encoding]::UTF8.GetBytes($Env:PHGTK.Trim())
+          $posthogKeyA = Get-Random -Minimum 1 -Maximum 256
+          $posthogKeyB = Get-Random -Minimum 1 -Maximum 256
+          $posthogKeyC = Get-Random -Minimum 1 -Maximum 256
+          $encodedPosthogToken = [System.Collections.Generic.List[string]]::new()
+
+          for ($i = 0; $i -lt $posthogBytes.Length; $i++) {
+            $mask = (($posthogKeyA + ($i * 31)) -bxor ($posthogKeyB + ($i * 17)) -bxor ($posthogKeyC + ($i * 13))) -band 0xff
+            $encodedPosthogToken.Add([string](($posthogBytes[$i] -bxor $mask) -band 0xff))
+          }
+
+          $encodedPosthogTokenText = $encodedPosthogToken -join ", "
+          @"
+          #pragma once
+
+          #include <array>
+          #include <cstddef>
+          #include <cstdint>
+
+          #define MERGERINO_POSTHOG_PROJECT_TOKEN_OBFUSCATED 1
+
+          namespace chatterino::posthog_token_blob {
+
+          inline constexpr std::uint8_t KEY_A = $posthogKeyA;
+          inline constexpr std::uint8_t KEY_B = $posthogKeyB;
+          inline constexpr std::uint8_t KEY_C = $posthogKeyC;
+          inline constexpr std::array<std::uint8_t, $($posthogBytes.Length)> DATA = {
+              $encodedPosthogTokenText
+          };
+
+          }  // namespace chatterino::posthog_token_blob
+          "@ | Set-Content -Path src/controllers/analytics/PostHogProjectToken.local.hpp -Encoding ascii
 
       - name: Install and setup Conan
         shell: bash
@@ -152,6 +189,7 @@ jobs:
           windeployqt bin/mergerino.exe --release --no-compiler-runtime --no-translations --no-opengl-sw --dir $packageDir --force-openssl
           Copy-Item bin/mergerino.exe $packageDir/
           Get-ChildItem bin -Filter '*.dll' | Copy-Item -Destination $packageDir -Force
+          Copy-Item bin/kick_onboarding $packageDir/kick_onboarding -Recurse -Force
           ..\.CI\deploy-crt.ps1 $packageDir
           if (Test-Path "Mergerino.zip") {
             Remove-Item "Mergerino.zip" -Force

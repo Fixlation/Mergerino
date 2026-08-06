@@ -1,12 +1,31 @@
 Patch Notes
 
+06/08/2026
+- Added 7TV account integration
+- Added channel-specific 7TV cosmetics feature
+- Added quick-edit 7TV emotes feature
+- Added the ability to hide features in the chatbox
+- Added Emote Bar feature
+- Added Giveaway feature
+- Added Kick polls and predictions
+- Added link embeds setting
+- Added Linux documentation
+- Added OBS Chat Overlay feature
+- Added pin Twitch/Kick message feature
+- Added share Twitch subscription feature
+- Added Show users joining setting to TikTok LIVE
+- Added Spoof Chat setting
+- Fixed a bug causing Kick onboarding images to not load
+- Fixed a bug causing 'Watching' tab to not work
+- General app bug fixes, additions and improvements
+
 26/06/2026
-- Added StreamDatabase live badge feed feature
-- Added Mergerino Discord links
-- Added Folders to tab options
-- Added Twitch chat identity menu
-- Added Kick level badges setting
 - Added chat mode indicator
+- Added Folders to tab options
+- Added Kick level badges setting
+- Added Mergerino Discord links
+- Added StreamDatabase live badge feed feature
+- Added Twitch chat identity menu
 - Fixed a bug causing F5 to not refresh Twitch and Kick chat
 - Improved Anonymous mode behaviour
 - Improved Kick chat performance
@@ -14,8 +33,8 @@ Patch Notes
 - QoL and general app improvements
 
 07/06/2026
-- Added global message animation setting
 - Added command autocomplete to the chatbox
+- Added global message animation setting
 - Added informational pictures to Kick sign in onboard process
 - Added manual check for update setting
 - Added Moderator and VIP categories to viewer list
@@ -25,14 +44,14 @@ Patch Notes
 - Fixed a bug causing YouTube chat to not display new messages
 
 05/06/2026
-- Added improved viewer count setting
-- Added improved prediction command
 - Added improved poll command
-- Updated YouTube chat from 'Top' to 'All' displayed messages
+- Added improved prediction command
+- Added improved viewer count setting
 - Fixed a bug where truncated links showed incomplete in YouTube chat
 - Improved Chatterino import functionality
 - Improved UI menu behaviour
 - Improved YouTube chat connectivity when channels go live
+- Updated YouTube chat from 'Top' to 'All' displayed messages
 
 22/05/2026
 - Added membership badges and colours to YouTube chat
@@ -42,91 +61,91 @@ Patch Notes
 - Fixed a bug causing split tab settings not showing
 
 17/05/2026
-- Added custom channel subscriber badges to Kick
 - Added 'None' to platform style options
+- Added custom channel subscriber badges to Kick
 - Added pin application option
+- Fixed a bug causing messages to not live-update in user cards
 - Improved platform swap chatbox hotkey behaviour
 - Disabled message animations when searching
-- Fixed a bug causing messages to not live-update in user cards
 
 11/05/2026
-- Added YouTube OAuth sign in
-- Added YouTube chatting support and moderation tools
+- Added bulk tab selection to drag or delete (Ctrl/Shift)
 - Added Chatterino import for settings, tabs, accounts etc
-- Added open stream in browser to tabs
-- Added multi-platform selector menu when 3+ platforms are live
+- Added default platform selection from the quick account menu
 - Added hotkey to swap platforms within chat (Ctrl + D)
 - Added local Twitch login flow
-- Added default platform selection from the quick account menu
-- Added bulk tab selection to drag or delete (Ctrl/Shift)
+- Added multi-platform selector menu when 3+ platforms are live
+- Added open stream in browser to tabs
+- Added YouTube chatting support and moderation tools
+- Added YouTube OAuth sign in
+- Fixed a bug causing logout to swap the user to anonymous
 - Improved UI elements and error messages
 - Updated default platform highlight to logos
-- Fixed a bug causing logout to swap the user to anonymous
 
 07/05/2026
 - Added Export Chat setting
-- Added patch notes popup after updating
 - Added log user setting
-- Added viewerlist for Moderators
-- Added Twitch predictions and polls (read only)
 - Added multi-search function to logs and viewerlist
+- Added patch notes popup after updating
+- Added Twitch predictions and polls (read only)
+- Added viewerlist for Moderators
 - Fixed a bug causing YouTube streams to show as live after ending
 - Improved YouTube chat performance
 
 29/04/2026
+- Added emoji rendering to YouTube chat
+- Added mod tools for Kick
+- Added multi-platform chat mode
 - Added recent message history
+- Added reply to message function
 - Added uptime to stream info preview
 - Added usercards for all platforms
-- Added mod tools for Kick
-- Added reply to message function
-- Added multi-platform chat mode
-- Added emoji rendering to YouTube chat
-- Improved YouTube livestream fetching
 - Improved emote menu
+- Improved YouTube livestream fetching
 
 27/04/2026
 - Added auto update
 - Added clear activity tab
-- Added stream info to tab preview
 - Added minimum bits/kicks setting in activity tab
 - Added quick platform toggle to chatbox
-- Improved Kick sign in process
+- Added stream info to tab preview
 - Improved account menu
+- Improved Kick sign in process
 - Improved YouTube chat performance
 
 25/04/2026
-- Simplified Kick login
-- Added First Message (Session) highlight
-- Improved YouTube chat stability
-- Fixed bug duplicating mod alerts
 - Added a simple OBS dock
+- Added First Message (Session) highlight
+- Fixed bug duplicating mod alerts
+- Improved YouTube chat stability
+- Simplified Kick login
 
 20/04/2026
-- Added TikTok live chat
 - Added informational tooltips
-- Added slower chat setting
 - Added message animations setting
+- Added slower chat setting
+- Added TikTok live chat
 
 19/04/2026
 - Added activity filter setting
 - Cleaned up UI
-- YouTube membership gifts now collapse to 1 message in activity tab
 - Reduced brightness of highlights in activity tab
+- YouTube membership gifts now collapse to 1 message in activity tab
 
 18/04/2026
-- Cleaned up activity tab to reduce noise
-- Alerts with a message attached now display first
-- Separated main chat and activity and added settings
-- Improved YouTube chat refresh rate
 - Fixed a bug where activity would get cleared when updating settings
 - Improved build pipeline
+- Improved YouTube chat refresh rate
+- Cleaned up activity tab to reduce noise
+- Separated main chat and activity and added settings
+- Alerts with a message attached now display first
 
 16/04/2026
 - Added Activity Tab to display subscriptions and donations separately
 - Improved YouTube chat connection stability
 
 11/04/2026
-- Added support for Kick and YouTube live chat
 - Added platform highlights and logos for messages
-- 7TV Badges and paints update in realtime
 - Added start-up disclaimer when opening for the first time
+- Added support for Kick and YouTube live chat
+- 7TV Badges and paints update in realtime

@@ -23,11 +23,15 @@
 
 class QPaintEvent;
 class QPainter;
+class QMouseEvent;
 
 namespace chatterino {
 
 struct HelixPoll;
 struct HelixPrediction;
+struct KickPoll;
+struct KickPrediction;
+class KickChannel;
 class TwitchChannel;
 
 class TwitchPollsAndPredictionsBar final : public BaseWidget
@@ -50,15 +54,24 @@ public:
 
     void setChannel(const ChannelPtr &channel);
     void refreshNow();
-    [[nodiscard]] bool hasActivePoll() const;
-    [[nodiscard]] bool hasOpenPrediction() const;
+    [[nodiscard]] bool hasActiveTwitchPoll() const;
+    [[nodiscard]] bool hasActiveKickPoll() const;
+    [[nodiscard]] bool hasOpenTwitchPrediction() const;
+    [[nodiscard]] bool hasOpenKickPrediction() const;
     [[nodiscard]] QString predictionButtonTooltip(bool canManage) const;
     [[nodiscard]] QString pollButtonTooltip(bool canManage) const;
+
+    pajlada::Signals::NoArgSignal pollClicked;
+    pajlada::Signals::NoArgSignal kickPollClicked;
+    pajlada::Signals::NoArgSignal predictionClicked;
+    pajlada::Signals::NoArgSignal kickPredictionClicked;
+    pajlada::Signals::NoArgSignal predictionStateChanged;
 
     QSize sizeHint() const override;
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
     void scaleChangedEvent(float scale) override;
     void themeChangedEvent() override;
 
@@ -66,6 +79,10 @@ private:
     enum class ItemKind {
         Poll,
         Prediction,
+    };
+    enum class ItemPlatform {
+        Twitch,
+        Kick,
     };
 
     struct Choice {
@@ -79,6 +96,7 @@ private:
 
     struct Item {
         ItemKind kind = ItemKind::Poll;
+        ItemPlatform platform = ItemPlatform::Twitch;
         QString title;
         QString status;
         std::vector<Choice> choices;
@@ -89,12 +107,18 @@ private:
     void refresh();
     void finishRequest(int generation);
     void updateItems();
+    void updateKickPollItem();
+    void updateKickPredictionItem();
     void updateFixedHeight();
 
     [[nodiscard]] static std::optional<Item> makePollItem(
         const HelixPoll &poll);
     [[nodiscard]] static std::optional<Item> makePredictionItem(
         const HelixPrediction &prediction);
+    [[nodiscard]] static std::optional<Item> makeKickPollItem(
+        const KickPoll &poll);
+    [[nodiscard]] static std::optional<Item> makeKickPredictionItem(
+        const KickPrediction &prediction);
     [[nodiscard]] static std::optional<Item> makeLocalPollItem(
         const QString &broadcasterID);
     [[nodiscard]] static std::optional<Item> makeLocalPredictionItem(
@@ -104,6 +128,7 @@ private:
     void drawItem(QPainter &painter, const Item &item, QRect rect) const;
 
     std::weak_ptr<TwitchChannel> twitchChannel_;
+    std::weak_ptr<KickChannel> kickChannel_;
     pajlada::Signals::SignalHolder channelSignalHolder_;
     pajlada::Signals::SignalHolder moderationAuthSignalHolder_;
     QTimer refreshTimer_;

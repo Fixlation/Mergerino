@@ -117,6 +117,7 @@ public:
      * @param message Message to scroll to.
      */
     void scrollToMessage(const MessagePtr &message);
+    void scrollToMessage(const MessagePtr &message, bool startReply);
 
     QRect emotePopupBounds() const;
     void setEmotePopupBounds(QRect bounds);
@@ -124,6 +125,7 @@ public:
     // Set up some final signals & actually show the windows
     void initialize();
     void save();
+    QJsonObject currentWindowLayoutJson() const;
     void closeAll();
 
     int getGeneration() const;
@@ -165,7 +167,7 @@ public:
 
     pajlada::Signals::Signal<Split *> selectSplit;
     pajlada::Signals::Signal<SplitContainer *> selectSplitContainer;
-    pajlada::Signals::Signal<const MessagePtr &> scrollToMessageSignal;
+    pajlada::Signals::Signal<const MessagePtr &, bool> scrollToMessageSignal;
     pajlada::Signals::Signal<ProviderId> activeAccountProviderChanged;
 
 private:

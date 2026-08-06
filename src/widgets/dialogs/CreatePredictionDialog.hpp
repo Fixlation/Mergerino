@@ -23,6 +23,7 @@ class QWidget;
 
 namespace chatterino {
 
+class KickChannel;
 class TwitchChannel;
 
 class CreatePredictionDialog final : public BasePopup
@@ -30,9 +31,12 @@ class CreatePredictionDialog final : public BasePopup
 public:
     static void showDialog(ChannelPtr channel,
                            const TwitchChannel &twitchChannel);
+    static void showKickDialog(ChannelPtr channel,
+                               const KickChannel &kickChannel);
 
     CreatePredictionDialog(ChannelPtr channel, QString broadcasterID,
-                           QWidget *parent = nullptr);
+                           QWidget *parent = nullptr, bool kick = false,
+                           QString kickChannelSlug = {});
 
 protected:
     void showEvent(QShowEvent *event) override;
@@ -73,6 +77,8 @@ private:
 
     ChannelPtr channel_;
     QString broadcasterID_;
+    bool kick_ = false;
+    QString kickChannelSlug_;
 
     QLineEdit *title_ = nullptr;
     QLabel *titleCount_ = nullptr;

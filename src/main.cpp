@@ -28,6 +28,8 @@
 #include <QtCore/QtPlugin>
 #ifdef Q_OS_WIN
 #    include <shobjidl_core.h>
+#    include <windows.h>
+#    include <dbghelp.h>
 #endif
 
 #include <memory>
@@ -38,8 +40,65 @@ Q_IMPORT_PLUGIN(QAVIFPlugin)
 
 using namespace chatterino;
 
+#ifdef Q_OS_WIN
+#    pragma comment(lib, "Dbghelp.lib")
+
+namespace {
+
+LONG WINAPI writeDiagnosticMinidump(EXCEPTION_POINTERS *exceptionInfo)
+{
+    if (!exceptionInfo || !exceptionInfo->ExceptionRecord ||
+        exceptionInfo->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    wchar_t modulePath[MAX_PATH] = {};
+    const auto pathLength =
+        GetModuleFileNameW(nullptr, modulePath, _countof(modulePath));
+    if (pathLength == 0 || pathLength >= _countof(modulePath))
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    for (wchar_t *it = modulePath + pathLength; it != modulePath; --it)
+    {
+        if (*it == L'\\' || *it == L'/')
+        {
+            *(it + 1) = L'\0';
+            break;
+        }
+    }
+
+    wcscat_s(modulePath, L"mergerino-crash.dmp");
+    HANDLE file = CreateFileW(modulePath, GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION dumpException = {
+        GetCurrentThreadId(),
+        exceptionInfo,
+        FALSE,
+    };
+    MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                      MiniDumpWithDataSegs, &dumpException, nullptr, nullptr);
+    CloseHandle(file);
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+}  // namespace
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef Q_OS_WIN
+    AddVectoredExceptionHandler(1, writeDiagnosticMinidump);
+#endif
+
     QApplication a(argc, argv);
 
     QCoreApplication::setApplicationName("mergerino");

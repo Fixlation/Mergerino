@@ -7,6 +7,9 @@
 #include "Application.hpp"
 #include "common/Channel.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "providers/kick/KickAccount.hpp"
+#include "providers/kick/KickApi.hpp"
+#include "providers/kick/KickChannel.hpp"
 #include "providers/merged/MergedChannel.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/api/TwitchModerationAuth.hpp"
@@ -15,7 +18,9 @@
 #include "providers/twitch/TwitchChannel.hpp"
 #include "singletons/Theme.hpp"
 #include "singletons/WindowManager.hpp"
+#include "util/Clipboard.hpp"
 #include "widgets/Window.hpp"
+#include "widgets/dialogs/KickPredictionDialog.hpp"
 #include "widgets/splits/TwitchPollsAndPredictionsBar.hpp"
 
 #include <QAbstractItemModel>
@@ -23,12 +28,14 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QCursor>
+#include <QDateTime>
 #include <QDir>
 #include <QEasingCurve>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPalette>
@@ -159,8 +166,13 @@ QLabel *sectionLabel(const QString &text, QWidget *parent)
     return label;
 }
 
-QString badgeFileName(size_t index, int outcomeCount)
+QString badgeFileName(size_t index, int outcomeCount, bool kick)
 {
+    if (kick && index < MIN_PREDICTION_OUTCOMES)
+    {
+        return QStringLiteral("kick-outcome-%1.svg").arg(index + 1);
+    }
+
     if (outcomeCount <= 2 && index == 1)
     {
         return QStringLiteral("pink-2.png");
@@ -169,21 +181,21 @@ QString badgeFileName(size_t index, int outcomeCount)
     return QStringLiteral("blue-%1.png").arg(index + 1);
 }
 
-QString badgeResource(size_t index, int outcomeCount)
+QString badgeResource(size_t index, int outcomeCount, bool kick)
 {
     return QStringLiteral(":/predictions/%1").arg(
-        badgeFileName(index, outcomeCount));
+        badgeFileName(index, outcomeCount, kick));
 }
 
-QPixmap loadBadgePixmap(size_t index, int outcomeCount)
+QPixmap loadBadgePixmap(size_t index, int outcomeCount, bool kick)
 {
-    QPixmap badge(badgeResource(index, outcomeCount));
+    QPixmap badge(badgeResource(index, outcomeCount, kick));
     if (!badge.isNull())
     {
         return badge;
     }
 
-    const auto fileName = badgeFileName(index, outcomeCount);
+    const auto fileName = badgeFileName(index, outcomeCount, kick);
     const QDir appDir(QCoreApplication::applicationDirPath());
     const QString sourcePath = QDir::cleanPath(appDir.filePath(
         QStringLiteral("../../MergerinoSource/resources/predictions/%1").arg(
@@ -214,6 +226,69 @@ std::shared_ptr<TwitchChannel> resolveTwitchChannel(const ChannelPtr &channel)
     return nullptr;
 }
 
+std::shared_ptr<KickChannel> resolveKickChannel(const ChannelPtr &channel)
+{
+    if (channel == nullptr)
+    {
+        return nullptr;
+    }
+
+    if (auto kick = std::dynamic_pointer_cast<KickChannel>(channel))
+    {
+        return kick;
+    }
+
+    if (auto merged = std::dynamic_pointer_cast<MergedChannel>(channel))
+    {
+        return std::dynamic_pointer_cast<KickChannel>(merged->kickChannel());
+    }
+
+    return nullptr;
+}
+
+bool kickPredictionAlreadyExistsError(const QString &error)
+{
+    const auto normalized = error.trimmed();
+    return normalized.contains(QStringLiteral("PREDICTION_ALREADY_EXISTS"),
+                               Qt::CaseInsensitive) ||
+           normalized.compare(QStringLiteral("Invalid request"),
+                              Qt::CaseInsensitive) == 0;
+}
+
+QString kickPredictionErrorText(const QString &error, bool broadcaster)
+{
+    if (error.contains(QStringLiteral("CHANNEL_POINTS_DISABLED"),
+                       Qt::CaseInsensitive))
+    {
+        constexpr auto channelPointsUrl =
+            "https://dashboard.kick.com/community/chat/channel-points";
+        const auto link =
+            QStringLiteral("<a style=\"color:#ffffff; text-decoration:underline;\" "
+                           "href=\"%1\">%2</a>");
+        return broadcaster
+                   ? QStringLiteral(
+                         "You need to enable channel points before starting a "
+                         "prediction. %1")
+                         .arg(link.arg(QString::fromLatin1(channelPointsUrl),
+                                       QStringLiteral("Enable channel points")))
+                   : QStringLiteral(
+                         "Channel points need to be enabled by the channel "
+                         "owner before you can start a prediction. They can "
+                         "enable them %1.")
+                         .arg(link.arg(QString::fromLatin1(channelPointsUrl),
+                                       QStringLiteral("here")));
+    }
+
+    if (kickPredictionAlreadyExistsError(error))
+    {
+        return QStringLiteral(
+            "You already have a Kick prediction running. Open it from the "
+            "prediction banner to manage it.");
+    }
+
+    return QStringLiteral("Failed to create Kick prediction - %1").arg(error);
+}
+
 void notifyPollsAndPredictionsChanged(const ChannelPtr &channel)
 {
     if (auto twitch = resolveTwitchChannel(channel))
@@ -236,20 +311,41 @@ void CreatePredictionDialog::showDialog(ChannelPtr channel,
     dialog->raise();
 }
 
+void CreatePredictionDialog::showKickDialog(ChannelPtr channel,
+                                            const KickChannel &kickChannel)
+{
+    auto *dialog = new CreatePredictionDialog(
+        std::move(channel), QString{},
+        static_cast<QWidget *>(&(getApp()->getWindows()->getMainWindow())),
+        true,
+        kickChannel.slug().trimmed().isEmpty() ? kickChannel.getName()
+                                              : kickChannel.slug());
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->show();
+    dialog->activateWindow();
+    dialog->raise();
+}
+
 CreatePredictionDialog::CreatePredictionDialog(ChannelPtr channel,
                                                QString broadcasterID,
-                                               QWidget *parent)
+                                               QWidget *parent, bool kick,
+                                               QString kickChannelSlug)
     : BasePopup(
           {
               BaseWindow::EnableCustomFrame,
+              BaseWindow::CloseButtonOnly,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
           },
           parent)
     , channel_(std::move(channel))
     , broadcasterID_(std::move(broadcasterID))
+    , kick_(kick)
+    , kickChannelSlug_(std::move(kickChannelSlug))
 {
-    this->setWindowTitle(QStringLiteral("Start a Prediction"));
+    this->setWindowTitle(this->kick_
+                             ? QStringLiteral("Start a Kick Prediction")
+                             : QStringLiteral("Start a Prediction"));
     this->setScaleIndependentSize(DIALOG_WIDTH, BASE_DIALOG_HEIGHT);
     this->setAutoFillBackground(true);
     this->getLayoutContainer()->setObjectName(
@@ -373,14 +469,24 @@ CreatePredictionDialog::CreatePredictionDialog(ChannelPtr channel,
     this->duration_ = new PredictionDurationComboBox(this);
     this->duration_->setCursor(Qt::PointingHandCursor);
     this->duration_->setFixedWidth(58);
-    this->duration_->addItem(QStringLiteral("30s"), 30);
-    this->duration_->addItem(QStringLiteral("1m"), 60);
-    this->duration_->addItem(QStringLiteral("2m"), 120);
-    this->duration_->addItem(QStringLiteral("5m"), 300);
-    this->duration_->addItem(QStringLiteral("10m"), 600);
-    this->duration_->addItem(QStringLiteral("15m"), 900);
-    this->duration_->addItem(QStringLiteral("20m"), 1200);
-    this->duration_->addItem(QStringLiteral("30m"), 1800);
+    if (this->kick_)
+    {
+        this->duration_->addItem(QStringLiteral("1m"), 60);
+        this->duration_->addItem(QStringLiteral("5m"), 300);
+        this->duration_->addItem(QStringLiteral("10m"), 600);
+        this->duration_->addItem(QStringLiteral("30m"), 1800);
+    }
+    else
+    {
+        this->duration_->addItem(QStringLiteral("30s"), 30);
+        this->duration_->addItem(QStringLiteral("1m"), 60);
+        this->duration_->addItem(QStringLiteral("2m"), 120);
+        this->duration_->addItem(QStringLiteral("5m"), 300);
+        this->duration_->addItem(QStringLiteral("10m"), 600);
+        this->duration_->addItem(QStringLiteral("15m"), 900);
+        this->duration_->addItem(QStringLiteral("20m"), 1200);
+        this->duration_->addItem(QStringLiteral("30m"), 1800);
+    }
     this->duration_->view()->setCursor(Qt::ArrowCursor);
     this->duration_->view()->viewport()->setCursor(Qt::ArrowCursor);
     root->addWidget(this->duration_, 0, Qt::AlignLeft);
@@ -388,6 +494,26 @@ CreatePredictionDialog::CreatePredictionDialog(ChannelPtr channel,
     this->errorLabel_ = new QLabel(this);
     this->errorLabel_->setObjectName(QStringLiteral("PredictionErrorLabel"));
     this->errorLabel_->setWordWrap(true);
+    this->errorLabel_->setOpenExternalLinks(true);
+    this->errorLabel_->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    this->errorLabel_->setContextMenuPolicy(Qt::CustomContextMenu);
+    QObject::connect(
+        this->errorLabel_, &QWidget::customContextMenuRequested, this,
+        [this](const QPoint &position) {
+            const auto channelPointsUrl = QStringLiteral(
+                "https://dashboard.kick.com/community/chat/channel-points");
+            if (!this->errorLabel_->text().contains(channelPointsUrl))
+            {
+                return;
+            }
+
+            QMenu menu(this->errorLabel_);
+            auto *copyLink = menu.addAction(QStringLiteral("Copy link"));
+            if (menu.exec(this->errorLabel_->mapToGlobal(position)) == copyLink)
+            {
+                crossPlatformCopy(channelPointsUrl);
+            }
+        });
     this->errorLabel_->hide();
     root->addWidget(this->errorLabel_);
 
@@ -631,12 +757,15 @@ void CreatePredictionDialog::updateOutcomeRows(bool animated)
         !this->outcomeRows_[0].input->text().trimmed().isEmpty() &&
         !this->outcomeRows_[1].input->text().trimmed().isEmpty();
 
-    auto visibleCount = MIN_PREDICTION_OUTCOMES + 1;
-    if (firstTwoComplete)
+    auto visibleCount =
+        this->kick_ ? MIN_PREDICTION_OUTCOMES : MIN_PREDICTION_OUTCOMES + 1;
+    if (!this->kick_ && firstTwoComplete)
     {
         visibleCount = std::max(visibleCount, lastFilled + 2);
     }
-    visibleCount = std::clamp(visibleCount, 0, MAX_PREDICTION_OUTCOMES);
+    visibleCount = std::clamp(
+        visibleCount, 0,
+        this->kick_ ? MIN_PREDICTION_OUTCOMES : MAX_PREDICTION_OUTCOMES);
 
     this->updateDialogHeight(visibleCount, animated);
 
@@ -658,7 +787,7 @@ void CreatePredictionDialog::updateOutcomeRows(bool animated)
 
         if (shouldShow && (i < MIN_PREDICTION_OUTCOMES || hasText))
         {
-            const auto badge = loadBadgePixmap(i, outcomeCount);
+            const auto badge = loadBadgePixmap(i, outcomeCount, this->kick_);
             row.badge->setPixmap(
                 badge.scaled(BADGE_SIZE, BADGE_SIZE, Qt::KeepAspectRatio,
                              Qt::SmoothTransformation));
@@ -762,7 +891,8 @@ int CreatePredictionDialog::dialogHeightForVisibleOutcomes(
 {
     const auto extraRows =
         std::max(0, visibleCount - BASE_VISIBLE_OUTCOMES);
-    return BASE_DIALOG_HEIGHT +
+    return BASE_DIALOG_HEIGHT -
+           (this->kick_ ? OUTCOME_INPUT_HEIGHT + OUTCOME_ROW_GAP : 0) +
            extraRows * (OUTCOME_INPUT_HEIGHT + OUTCOME_ROW_GAP) +
            this->errorLabelHeight();
 }
@@ -849,6 +979,13 @@ void CreatePredictionDialog::submit()
             QStringLiteral("At least two outcomes are required."));
         return;
     }
+    if (outcomeTitles.at(0).compare(outcomeTitles.at(1),
+                                    Qt::CaseInsensitive) == 0)
+    {
+        this->showError(QStringLiteral(
+            "The two prediction outcomes must have different names."));
+        return;
+    }
 
     this->clearError();
     this->submitting_ = true;
@@ -870,6 +1007,107 @@ void CreatePredictionDialog::submit()
             }
         });
     };
+
+    if (this->kick_)
+    {
+        auto kickAccount = getApp()->getAccounts()->kick.current();
+        if (kickAccount == nullptr || kickAccount->isAnonymous())
+        {
+            scheduleFailure(QStringLiteral(
+                "You must be logged in to Kick to create a prediction."));
+            return;
+        }
+        const auto websiteToken = kickAccount->chatIdentityToken().trimmed();
+        if (websiteToken.isEmpty())
+        {
+            scheduleFailure(QStringLiteral(
+                "Connect Kick’s website session under Settings > Accounts "
+                "before creating predictions."));
+            return;
+        }
+
+        const auto kickChannel = resolveKickChannel(this->channel_);
+        const bool kickBroadcaster =
+            kickChannel != nullptr && kickChannel->isBroadcaster();
+        const std::weak_ptr<KickChannel> kickChannelWeak = kickChannel;
+        auto requestSlug = this->kickChannelSlug_.trimmed();
+        if (kickChannel != nullptr)
+        {
+            const auto liveSlug = kickChannel->slug().trimmed();
+            requestSlug = liveSlug.isEmpty()
+                              ? kickChannel->getName().trimmed()
+                              : liveSlug;
+        }
+        getKickApi()->createPrediction(
+            requestSlug, websiteToken, title, outcomeTitles,
+            durationSeconds,
+            [channel = this->channel_, title, outcomeTitles, durationSeconds,
+             self, kickBroadcaster,
+             kickChannelWeak](ExpectedStr<void> result) {
+                if (self == nullptr)
+                {
+                    return;
+                }
+                QTimer::singleShot(
+                    0, self.data(),
+                    [channel, title, outcomeTitles, durationSeconds, self,
+                     kickBroadcaster, kickChannelWeak,
+                     result = std::move(result)] {
+                        if (self == nullptr)
+                        {
+                            return;
+                        }
+                        if (!result)
+                        {
+                            if (kickPredictionAlreadyExistsError(
+                                    result.error()))
+                            {
+                                if (auto kickChannel = kickChannelWeak.lock();
+                                    kickChannel != nullptr &&
+                                    kickChannel->activePrediction())
+                                {
+                                    self->close();
+                                    KickPredictionDialog::showDialog(
+                                        kickChannel, channel);
+                                    return;
+                                }
+                            }
+
+                            self->finishSubmitFailure(kickPredictionErrorText(
+                                result.error(), kickBroadcaster));
+                            return;
+                        }
+                        if (auto kickChannel = kickChannelWeak.lock();
+                            kickChannel != nullptr &&
+                            (!kickChannel->activePrediction() ||
+                             kickChannel->activePrediction()->title != title))
+                        {
+                            KickPrediction prediction{
+                                .title = title,
+                                .state = QStringLiteral("ACTIVE"),
+                                .durationSeconds = durationSeconds,
+                                .createdAt = QDateTime::currentDateTimeUtc(),
+                                .updatedAt = QDateTime::currentDateTimeUtc(),
+                            };
+                            prediction.outcomes.reserve(outcomeTitles.size());
+                            for (const auto &outcomeTitle : outcomeTitles)
+                            {
+                                prediction.outcomes.push_back(
+                                    {.title = outcomeTitle});
+                            }
+                            kickChannel->updatePrediction(std::move(prediction));
+                        }
+                        if (channel != nullptr)
+                        {
+                            channel->addSystemMessage(
+                                QStringLiteral("Created Kick prediction: '%1'")
+                                    .arg(title));
+                        }
+                        self->close();
+                    });
+            });
+        return;
+    }
 
     auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
     if (currentUser == nullptr || currentUser->isAnon() ||

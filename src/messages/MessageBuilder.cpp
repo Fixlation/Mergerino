@@ -1712,8 +1712,10 @@ std::pair<MessagePtrMut, HighlightAlert> MessageBuilder::makeIrcMessage(
         parseTwitchEmotes(tags, content, static_cast<int>(messageOffset));
 
     // This runs through all ignored phrases and runs its replacements on content
-    processIgnorePhrases(*getSettings()->ignoredMessages.readOnly(), content,
-                         twitchEmotes);
+    if (const auto ignoredMessages = getSettings()->ignoredMessages.readOnly())
+    {
+        processIgnorePhrases(*ignoredMessages, content, twitchEmotes);
+    }
 
     std::ranges::sort(twitchEmotes, [](const auto &a, const auto &b) {
         return a.start < b.start;

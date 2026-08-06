@@ -56,6 +56,7 @@ struct SplitDescriptor {
     std::optional<bool> filterActivity_;
     std::optional<bool> filterActivityExplicit_;
     qreal activityMessageScale_{0.9};
+    bool collapseGiftedSubscriptions_{true};
     std::optional<ActivityTimeDisplayMode> activityTimeDisplayMode_;
     bool slowerChatEnabled_{false};
     qreal slowerChatMessagesPerSecond_{5.0};
@@ -89,6 +90,7 @@ struct SplitDescriptor {
     QString mergedYoutubeStreamUrl_;
     bool mergedTikTokEnabled = false;
     QString mergedTikTokSource_;
+    bool mergedTikTokShowJoinMessages = true;
 
     static void loadFromJSON(SplitDescriptor &descriptor,
                              const QJsonObject &root, const QJsonObject &data);

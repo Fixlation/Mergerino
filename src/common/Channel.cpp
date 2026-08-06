@@ -100,6 +100,11 @@ namespace chatterino {
 //
 // Channel
 //
+pajlada::Signals::Signal<Channel *, size_t, const MessagePtr &>
+    Channel::messageRemoved;
+pajlada::Signals::Signal<Channel *, const MessagePtr &>
+    Channel::messageFlagsChanged;
+
 Channel::Channel(const QString &name, Type type)
     : completionModel(new TabCompletionModel(*this, nullptr))
     , lastDate_(QDate::currentDate())
@@ -247,6 +252,17 @@ void Channel::addSystemMessage(const QString &contents)
 {
     auto msg = makeSystemMessage(contents);
     this->addMessage(msg, MessageContext::Original);
+}
+
+const std::optional<PinnedChatMessage> &Channel::pinnedMessage() const
+{
+    return this->pinnedMessage_;
+}
+
+void Channel::setPinnedMessage(std::optional<PinnedChatMessage> message)
+{
+    this->pinnedMessage_ = std::move(message);
+    this->pinnedMessageChanged.invoke(this->pinnedMessage_);
 }
 
 void Channel::addOrReplaceTimeout(MessagePtr message, const QDateTime &now)
@@ -461,13 +477,32 @@ void Channel::replaceMessage(size_t hint, const MessagePtr &message,
     }
 }
 
-void Channel::disableMessage(const QString &messageID)
+void Channel::removeMessage(const MessagePtr &message)
+{
+    RecursionGuard g{&this->recursionCount_};
+    if (!this->canRecurse() || message == nullptr)
+    {
+        return;
+    }
+
+    size_t index = 0;
+    if (this->messages_.removeItem(message, &index))
+    {
+        Channel::messageRemoved.invoke(this, index, message);
+    }
+}
+
+MessagePtr Channel::disableMessage(const QString &messageID,
+                                   MessageFlags additionalFlags)
 {
     auto msg = this->findMessageByID(messageID);
     if (msg != nullptr)
     {
         msg->flags.set(MessageFlag::Disabled);
+        msg->flags.set(additionalFlags);
+        Channel::messageFlagsChanged.invoke(this, msg);
     }
+    return msg;
 }
 
 void Channel::clearMessages()
@@ -659,6 +694,11 @@ void Channel::upsertPersonalSeventvEmotes(
     // added emotes are inserted where appropriate.
 
     assertInGuiThread();
+    if (userLogin.isEmpty() || !emoteMap)
+    {
+        return;
+    }
+
     auto snapshot = this->getMessageSnapshot(5);
     if (snapshot.empty())
     {
@@ -675,6 +715,10 @@ void Channel::upsertPersonalSeventvEmotes(
         for (qsizetype i = size - 1; i >= end; i--)
         {
             const auto &message = snapshot[i];
+            if (!message)
+            {
+                continue;
+            }
             if (message->loginName == userLogin)
             {
                 return message;
@@ -685,7 +729,7 @@ void Channel::upsertPersonalSeventvEmotes(
     };
 
     const auto message = findMessage();
-    if (!message)
+    if (!message || !*message)
     {
         return;
     }
@@ -705,6 +749,10 @@ void Channel::upsertPersonalSeventvEmotes(
         ///
         /// @pre @a words must not be empty
         const auto flush = [&]() {
+            if (words.empty())
+            {
+                return;
+            }
             elements.emplace_back(std::make_unique<TextElement>(
                 std::move(words), textElement->getFlags(), textElement->color(),
                 textElement->fontStyle()));
@@ -764,6 +812,11 @@ void Channel::upsertPersonalSeventvEmotes(
         {
             auto emoteIt = emoteMap->find(EmoteName{word});
             if (emoteIt == emoteMap->end())
+            {
+                words.emplace_back(word);
+                continue;
+            }
+            if (!emoteIt->second)
             {
                 words.emplace_back(word);
                 continue;

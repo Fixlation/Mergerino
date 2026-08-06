@@ -101,6 +101,12 @@ void Button::setMenu(std::unique_ptr<QMenu> menu)
     }
 
     this->menu_ = std::move(menu);
+    if (!this->menu_)
+    {
+        this->menuVisible_ = false;
+        this->update();
+        return;
+    }
 
     this->menu_->installEventFilter(
         new FunctionEventFilter(this, [this](QObject *, QEvent *event) {
@@ -108,6 +114,7 @@ void Button::setMenu(std::unique_ptr<QMenu> menu)
             {
                 QTimer::singleShot(20, this, [this] {
                     this->menuVisible_ = false;
+                    this->update();
                 });
             }
             return false;
@@ -217,6 +224,17 @@ void Button::mousePressEvent(QMouseEvent *event)
     switch (event->button())
     {
         case Qt::MouseButton::LeftButton: {
+            if (this->menu_ && this->menuVisible_)
+            {
+                this->menu_->close();
+                this->menuVisible_ = false;
+                this->leftMouseButtonDown_ = false;
+                this->mouseOver_ = false;
+                this->update();
+                event->accept();
+                return;
+            }
+
             this->leftMouseButtonDown_ = true;
 
             this->addClickEffect(event->pos());
@@ -366,8 +384,11 @@ void Button::showMenu()
     }
 
     auto menuSizeHint = this->menu_->sizeHint();
+    const bool opensAbove =
+        this->property("mergerinoMenuOpensAbove").toBool();
     auto point = this->mapToGlobal(
-        QPoint(this->width() - menuSizeHint.width(), this->height()));
+        QPoint(this->width() - menuSizeHint.width(),
+               opensAbove ? -menuSizeHint.height() : this->height()));
 
     auto *screen = QApplication::screenAt(point);
     if (screen == nullptr)
@@ -376,14 +397,19 @@ void Button::showMenu()
     }
     auto bounds = screen->availableGeometry();
 
-    if (point.y() + menuSizeHint.height() > bounds.bottom())
+    if (!opensAbove && point.y() + menuSizeHint.height() > bounds.bottom())
     {
         // Menu doesn't fit going down, flip it to go up instead
         point.setY(point.y() - menuSizeHint.height() - this->height());
     }
+    else if (opensAbove && point.y() < bounds.top())
+    {
+        point.setY(bounds.top());
+    }
 
     this->menu_->popup(point);
     this->menuVisible_ = true;
+    this->update();
 }
 
 void Button::paintButton(QPainter &painter)
@@ -451,6 +477,12 @@ void Button::fancyPaint(QPainter &painter)
     {
         c = this->theme->isLightTheme() ? QColor(0, 0, 0)
                                         : QColor(255, 255, 255);
+    }
+
+    if (this->menuVisible_)
+    {
+        painter.fillRect(this->rect(),
+                         QColor(c.red(), c.green(), c.blue(), 55));
     }
 
     if (this->hoverMultiplier_ > 0)

@@ -8,6 +8,8 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/CommandContext.hpp"
 #include "providers/twitch/api/Helix.hpp"
+#include "providers/twitch/api/TwitchModerationAuth.hpp"
+#include "providers/twitch/api/TwitchWebApi.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "util/Twitch.hpp"
@@ -30,8 +32,9 @@ QString addModerator(const CommandContext &ctx)
     if (ctx.words.size() < 2)
     {
         ctx.channel->addSystemMessage(
-            "Usage: \"/mod <username>\" - Grant moderator status to a "
-            "user. Use \"/mods\" to list the moderators of this channel.");
+            "Usage: \"/mod <username>\" - Add a regular moderator "
+            "(Broadcaster or Lead Moderator). Use \"/mods\" to list this "
+            "channel's moderators.");
         return "";
     }
 
@@ -45,10 +48,64 @@ QString addModerator(const CommandContext &ctx)
     auto target = ctx.words.at(1);
     stripChannelName(target);
 
+    const bool isBroadcaster = ctx.twitchChannel->isBroadcaster();
+    TwitchModerationAuth::Account moderationAccount;
+    if (!isBroadcaster)
+    {
+        QString authError;
+        moderationAccount = TwitchModerationAuth::resolveForCurrentUser(
+            currentUser->getUserId(), &authError);
+        if (!moderationAccount.supportsWebGql())
+        {
+            ctx.channel->addSystemMessage(
+                "Lead Moderator access for /mod requires Twitch mod actions "
+                "to be connected in Settings -> Accounts. " +
+                authError);
+            return "";
+        }
+    }
+
     getHelix()->getUserByName(
         target,
-        [twitchChannel{ctx.twitchChannel},
-         channel{ctx.channel}](const HelixUser &targetUser) {
+        [twitchChannel{ctx.twitchChannel}, channel{ctx.channel},
+         currentUserId{currentUser->getUserId()}, isBroadcaster,
+         moderationAccount](const HelixUser &targetUser) {
+            if (!isBroadcaster)
+            {
+                TwitchWebApi::getChannelModerationPermissions(
+                    twitchChannel->roomId(), currentUserId,
+                    moderationAccount.clientId, moderationAccount.oauthToken,
+                    [=](const TwitchChannelModerationPermissions &permissions) {
+                        if (!permissions.addModerator)
+                        {
+                            channel->addSystemMessage(
+                                "/mod can only be used by the broadcaster or "
+                                "a Lead Moderator in this channel.");
+                            return;
+                        }
+
+                        TwitchWebApi::updateChannelRole(
+                            TwitchChannelRoleAction::AddModerator,
+                            twitchChannel->roomId(), targetUser.login,
+                            moderationAccount.clientId,
+                            moderationAccount.oauthToken,
+                            [] {},
+                            [channel](const QString &error) {
+                                channel->addSystemMessage(
+                                    "Failed to add channel moderator using "
+                                    "Lead Moderator access - " +
+                                    error);
+                            });
+                    },
+                    [channel](const QString &error) {
+                        channel->addSystemMessage(
+                            "Failed to check Lead Moderator permission for "
+                            "/mod - " +
+                            error);
+                    });
+                return;
+            }
+
             getHelix()->addChannelModerator(
                 twitchChannel->roomId(), targetUser.id,
                 [channel, targetUser] {

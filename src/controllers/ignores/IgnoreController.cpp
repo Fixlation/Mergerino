@@ -141,14 +141,17 @@ bool isIgnoredMessage(IgnoredMessageParameters &&params)
     {
         // TODO(pajlada): Do we need to check if the phrase is valid first?
         auto phrases = getSettings()->ignoredMessages.readOnly();
-        for (const auto &phrase : *phrases)
+        if (phrases)
         {
-            if (phrase.isBlock() && phrase.isMatch(params.message))
+            for (const auto &phrase : *phrases)
             {
-                qCDebug(chatterinoMessage)
-                    << "Blocking message because it contains ignored phrase"
-                    << phrase.getPattern();
-                return true;
+                if (phrase.isBlock() && phrase.isMatch(params.message))
+                {
+                    qCDebug(chatterinoMessage)
+                        << "Blocking message because it contains ignored phrase"
+                        << phrase.getPattern();
+                    return true;
+                }
             }
         }
     }

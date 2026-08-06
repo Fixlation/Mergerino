@@ -46,6 +46,11 @@ public:
 
         /// special flag that enables the Qt::Popup flag on Linux
         LinuxPopup = 1 << 10,
+        /// Keep only the close control in the title bar.
+        CloseButtonOnly = 1 << 11,
+        /// Host the custom title bar in a native frameless window. Intended
+        /// for fixed-size dialogs which must not retain a resize frame.
+        FixedSizeCustomFrame = 1 << 12,
     };
 
     explicit BaseWindow(FlagsEnum<Flags> flags_ = None,

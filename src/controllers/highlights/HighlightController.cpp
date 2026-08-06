@@ -222,10 +222,13 @@ void rebuildMessageHighlights(Settings &settings,
         checks.emplace_back(highlightPhraseCheck(highlight));
     }
 
-    auto messageHighlights = settings.highlightedMessages.readOnly();
-    for (const auto &highlight : *messageHighlights)
+    const auto messageHighlights = settings.highlightedMessages.readOnly();
+    if (messageHighlights)
     {
-        checks.emplace_back(highlightPhraseCheck(highlight));
+        for (const auto &highlight : *messageHighlights)
+        {
+            checks.emplace_back(highlightPhraseCheck(highlight));
+        }
     }
 
     if (settings.enableAutomodHighlight)
@@ -269,7 +272,7 @@ void rebuildMessageHighlights(Settings &settings,
 void rebuildUserHighlights(Settings &settings,
                            std::vector<HighlightCheck> &checks)
 {
-    auto userHighlights = settings.highlightedUsers.readOnly();
+    const auto userHighlights = settings.highlightedUsers.readOnly();
 
     if (settings.enableSelfMessageHighlight)
     {
@@ -301,81 +304,87 @@ void rebuildUserHighlights(Settings &settings,
             }});
     }
 
-    for (const auto &highlight : *userHighlights)
+    if (userHighlights)
     {
-        checks.emplace_back(HighlightCheck{
-            [highlight](const auto &args, const auto &twitchBadges,
-                        const auto &senderName, const auto &originalMessage,
-                        const auto &flags,
-                        const auto self) -> std::optional<HighlightResult> {
-                (void)args;             // unused
-                (void)twitchBadges;     // unused
-                (void)originalMessage;  // unused
-                (void)flags;            // unused
-                (void)self;             // unused
+        for (const auto &highlight : *userHighlights)
+        {
+            checks.emplace_back(HighlightCheck{
+                [highlight](const auto &args, const auto &twitchBadges,
+                            const auto &senderName,
+                            const auto &originalMessage, const auto &flags,
+                            const auto self) -> std::optional<HighlightResult> {
+                    (void)args;             // unused
+                    (void)twitchBadges;     // unused
+                    (void)originalMessage;  // unused
+                    (void)flags;            // unused
+                    (void)self;             // unused
 
-                if (!highlight.isMatch(senderName))
-                {
-                    return std::nullopt;
-                }
+                    if (!highlight.isMatch(senderName))
+                    {
+                        return std::nullopt;
+                    }
 
-                std::optional<QUrl> highlightSoundUrl;
-                if (highlight.hasCustomSound())
-                {
-                    highlightSoundUrl = highlight.getSoundUrl();
-                }
+                    std::optional<QUrl> highlightSoundUrl;
+                    if (highlight.hasCustomSound())
+                    {
+                        highlightSoundUrl = highlight.getSoundUrl();
+                    }
 
-                return HighlightResult{
-                    highlight.hasAlert(),        //
-                    highlight.hasSound(),        //
-                    highlightSoundUrl,           //
-                    highlight.getColor(),        //
-                    highlight.showInMentions(),  //
-                };
-            }});
+                    return HighlightResult{
+                        highlight.hasAlert(),        //
+                        highlight.hasSound(),        //
+                        highlightSoundUrl,           //
+                        highlight.getColor(),        //
+                        highlight.showInMentions(),  //
+                    };
+                }});
+        }
     }
 }
 
 void rebuildBadgeHighlights(Settings &settings,
                             std::vector<HighlightCheck> &checks)
 {
-    auto badgeHighlights = settings.highlightedBadges.readOnly();
+    const auto badgeHighlights = settings.highlightedBadges.readOnly();
 
-    for (const auto &highlight : *badgeHighlights)
+    if (badgeHighlights)
     {
-        checks.emplace_back(HighlightCheck{
-            [highlight](const auto &args, const auto &twitchBadges,
-                        const auto &senderName, const auto &originalMessage,
-                        const auto &flags,
-                        const auto self) -> std::optional<HighlightResult> {
-                (void)args;             // unused
-                (void)senderName;       // unused
-                (void)originalMessage;  // unused
-                (void)flags;            // unused
-                (void)self;             // unused
+        for (const auto &highlight : *badgeHighlights)
+        {
+            checks.emplace_back(HighlightCheck{
+                [highlight](const auto &args, const auto &twitchBadges,
+                            const auto &senderName,
+                            const auto &originalMessage, const auto &flags,
+                            const auto self) -> std::optional<HighlightResult> {
+                    (void)args;             // unused
+                    (void)senderName;       // unused
+                    (void)originalMessage;  // unused
+                    (void)flags;            // unused
+                    (void)self;             // unused
 
-                for (const TwitchBadge &badge : twitchBadges)
-                {
-                    if (highlight.isMatch(badge))
+                    for (const TwitchBadge &badge : twitchBadges)
                     {
-                        std::optional<QUrl> highlightSoundUrl;
-                        if (highlight.hasCustomSound())
+                        if (highlight.isMatch(badge))
                         {
-                            highlightSoundUrl = highlight.getSoundUrl();
+                            std::optional<QUrl> highlightSoundUrl;
+                            if (highlight.hasCustomSound())
+                            {
+                                highlightSoundUrl = highlight.getSoundUrl();
+                            }
+
+                            return HighlightResult{
+                                highlight.hasAlert(),        //
+                                highlight.hasSound(),        //
+                                highlightSoundUrl,           //
+                                highlight.getColor(),        //
+                                highlight.showInMentions(),  //
+                            };
                         }
-
-                        return HighlightResult{
-                            highlight.hasAlert(),        //
-                            highlight.hasSound(),        //
-                            highlightSoundUrl,           //
-                            highlight.getColor(),        //
-                            highlight.showInMentions(),  //
-                        };
                     }
-                }
 
-                return std::nullopt;
-            }});
+                    return std::nullopt;
+                }});
+        }
     }
 }
 

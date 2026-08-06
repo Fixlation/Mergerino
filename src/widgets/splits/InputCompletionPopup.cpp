@@ -76,7 +76,8 @@ std::unique_ptr<completion::Source> InputCompletionPopup::getSource() const
         case CompletionKind::Command:
             return std::make_unique<completion::CommandSource>(
                 std::make_unique<completion::CommandStrategy>(true),
-                this->callback_, this->currentChannel_.get(), true);
+                this->callback_, this->currentChannel_.get(), true,
+                this->currentPlatformFilter_, this->platformCallback_);
         case CompletionKind::Emote:
             if (getSettings()->useSmartEmoteCompletion)
             {
@@ -120,6 +121,12 @@ void InputCompletionPopup::endCompletion()
 void InputCompletionPopup::setInputAction(ActionCallback callback)
 {
     this->callback_ = std::move(callback);
+}
+
+void InputCompletionPopup::setPlatformInputAction(
+    PlatformActionCallback callback)
+{
+    this->platformCallback_ = std::move(callback);
 }
 
 bool InputCompletionPopup::eventFilter(QObject *watched, QEvent *event)

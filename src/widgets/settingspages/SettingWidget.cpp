@@ -246,6 +246,12 @@ template SettingWidget *SettingWidget::dropdown<SoundBackend>(
     const QString &label, EnumStringSetting<SoundBackend> &setting);
 template SettingWidget *SettingWidget::dropdown<EmoteTooltipScale>(
     const QString &label, EnumStringSetting<EmoteTooltipScale> &setting);
+template SettingWidget *SettingWidget::dropdown<EmoteBarMode>(
+    const QString &label, EnumStringSetting<EmoteBarMode> &setting);
+template SettingWidget *SettingWidget::dropdown<EmoteBarScope>(
+    const QString &label, EnumStringSetting<EmoteBarScope> &setting);
+template SettingWidget *SettingWidget::dropdown<LinkPreviewMode>(
+    const QString &label, EnumStringSetting<LinkPreviewMode> &setting);
 template SettingWidget *SettingWidget::dropdown<PlatformIndicatorMode>(
     const QString &label, EnumStringSetting<PlatformIndicatorMode> &setting);
 template SettingWidget *SettingWidget::dropdown<SplitHeaderViewerCountMode>(

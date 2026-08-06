@@ -23,8 +23,12 @@
 #include "providers/kick/KickApi.hpp"
 #include "providers/kick/KickChatServer.hpp"
 #include "providers/merged/MergedChannel.hpp"
+#include "providers/tiktok/TikTokLiveChat.hpp"
 #include "providers/twitch/api/Helix.hpp"
+#include "providers/twitch/api/TwitchModerationAuth.hpp"
+#include "providers/twitch/api/TwitchWebApi.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
+#include "providers/twitch/TwitchBadge.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/youtube/YouTubeAccount.hpp"
@@ -42,6 +46,7 @@
 #include "widgets/buttons/LabelButton.hpp"
 #include "widgets/buttons/PixmapButton.hpp"
 #include "widgets/dialogs/EditUserNotesDialog.hpp"
+#include "widgets/dialogs/TwitchModCommentsDialog.hpp"
 #include "widgets/helper/ChannelView.hpp"
 #include "widgets/helper/InvisibleSizeGrip.hpp"
 #include "widgets/helper/Line.hpp"
@@ -268,8 +273,8 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                          .arg(target);
                  }
 
-                 const auto &timeoutButtons =
-                     getSettings()->timeoutButtons.getValue();
+                 const auto timeoutButtons =
+                     getSettings()->timeoutButtons.getValueCopy();
                  if (static_cast<int>(timeoutButtons.size()) < buttonNum ||
                      0 >= buttonNum)
                  {
@@ -494,7 +499,8 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
     layout.emplace<Line>(false);
 
     // second line
-    auto user = layout.emplace<QHBoxLayout>().withoutMargin();
+    auto user =
+        layout.emplace<QHBoxLayout>().withoutMargin().withoutSpacing();
     {
         user->addStretch(1);
 
@@ -506,20 +512,18 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
 
         user.emplace<LabelButton>("Add notes", this)
             .assign(&this->ui_.notesAdd);
+        user.emplace<LabelButton>("Mod comments", this)
+            .assign(&this->ui_.modComments);
+        this->ui_.modComments->setToolTip(
+            "View and delete Twitch moderator comments - available to the "
+            "broadcaster and Lead Moderators");
         auto usercard = user.emplace<LabelButton>("Usercard", this)
                             .assign(&this->ui_.usercardLabel);
-        auto mod = user.emplace<PixmapButton>(this);
-        mod->setPixmap(getResources().buttons.mod);
-        mod->setScaleIndependentSize(30, 30);
-        auto unmod = user.emplace<PixmapButton>(this);
-        unmod->setPixmap(getResources().buttons.unmod);
-        unmod->setScaleIndependentSize(30, 30);
-        auto vip = user.emplace<PixmapButton>(this);
-        vip->setPixmap(getResources().buttons.vip);
-        vip->setScaleIndependentSize(30, 30);
-        auto unvip = user.emplace<PixmapButton>(this);
-        unvip->setPixmap(getResources().buttons.unvip);
-        unvip->setScaleIndependentSize(30, 30);
+        auto moderatorToggle =
+            user.emplace<LabelButton>("Mod", this, QSize{4, 0})
+                .assign(&this->ui_.moderatorToggle);
+        auto vipToggle = user.emplace<LabelButton>("VIP", this, QSize{4, 0})
+                             .assign(&this->ui_.vipToggle);
 
         user->addStretch(1);
 
@@ -554,39 +558,60 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
             this->updateLogUserButton();
         });
 
-        QObject::connect(mod.getElement(), &Button::leftClicked, [this] {
-            this->sendModerationCommand("/mod " + this->userName_);
+        QObject::connect(moderatorToggle.getElement(), &Button::leftClicked,
+                         [this] {
+            this->sendModerationCommand(
+                (this->targetIsModerator_ ? "/unmod " : "/mod ") +
+                this->userName_);
+            this->targetIsModerator_ = !this->targetIsModerator_;
+            this->userStateChanged_.invoke();
         });
-        QObject::connect(unmod.getElement(), &Button::leftClicked, [this] {
-            this->sendModerationCommand("/unmod " + this->userName_);
+        QObject::connect(vipToggle.getElement(), &Button::leftClicked, [this] {
+            this->sendModerationCommand(
+                (this->targetIsVip_ ? "/unvip " : "/vip ") +
+                this->userName_);
+            this->targetIsVip_ = !this->targetIsVip_;
+            this->userStateChanged_.invoke();
         });
-        QObject::connect(vip.getElement(), &Button::leftClicked, [this] {
-            this->sendModerationCommand("/vip " + this->userName_);
-        });
-        QObject::connect(unvip.getElement(), &Button::leftClicked, [this] {
-            this->sendModerationCommand("/unvip " + this->userName_);
-        });
+        QObject::connect(this->ui_.modComments, &LabelButton::clicked, this,
+                         &UserInfoPopup::openModComments);
 
         // userstate
         // We can safely ignore this signal connection since this is a private signal, and
         // we only connect once
-        std::ignore = this->userStateChanged_.connect([this, mod, unmod, vip,
-                                                       unvip]() mutable {
+        std::ignore = this->userStateChanged_.connect(
+            [this, moderatorToggle, vipToggle]() mutable {
             TwitchChannel *twitchChannel =
                 dynamic_cast<TwitchChannel *>(this->underlyingChannel_.get());
 
-            bool visibilityModButtons = false;
+            const bool canEditTarget =
+                twitchChannel != nullptr && !this->isCurrentPlatformUser() &&
+                !this->targetIsBroadcaster_;
 
-            if (twitchChannel)
-            {
-                visibilityModButtons =
-                    twitchChannel->isBroadcaster() &&
-                    !this->isCurrentPlatformUser();
-            }
-            mod->setVisible(visibilityModButtons);
-            unmod->setVisible(visibilityModButtons);
-            vip->setVisible(visibilityModButtons);
-            unvip->setVisible(visibilityModButtons);
+            moderatorToggle->setText(this->targetIsModerator_ ? "Unmod"
+                                                              : "Mod");
+            moderatorToggle->setToolTip(
+                this->targetIsModerator_
+                    ? "Remove this user as a regular moderator"
+                    : "Add this user as a regular moderator");
+            moderatorToggle->setVisible(
+                canEditTarget &&
+                (this->targetIsModerator_
+                     ? this->channelModerationPermissions_.removeModerator
+                     : this->channelModerationPermissions_.addModerator));
+
+            vipToggle->setText(this->targetIsVip_ ? "UnVIP" : "VIP");
+            vipToggle->setToolTip(this->targetIsVip_
+                                      ? "Remove this user's VIP status"
+                                      : "Give this user VIP status");
+            vipToggle->setVisible(
+                canEditTarget &&
+                (this->targetIsVip_
+                     ? this->channelModerationPermissions_.removeVip
+                     : this->channelModerationPermissions_.addVip));
+            this->ui_.modComments->setVisible(
+                twitchChannel != nullptr && !this->userId_.isEmpty() &&
+                this->channelModerationPermissions_.deleteModComments);
         });
     }
 
@@ -670,6 +695,133 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
     this->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Policy::Ignored);
 }
 
+void UserInfoPopup::updateTargetRoleStateFromMessages()
+{
+    this->targetIsModerator_ = false;
+    this->targetIsVip_ = false;
+    this->targetIsBroadcaster_ = false;
+
+    if (this->platform_ != MessagePlatform::AnyOrTwitch ||
+        !this->underlyingChannel_ || this->userName_.isEmpty())
+    {
+        return;
+    }
+
+    const auto messages = this->underlyingChannel_->getMessageSnapshot();
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it)
+    {
+        const auto &message = *it;
+        if (message == nullptr ||
+            message->platform != MessagePlatform::AnyOrTwitch ||
+            message->loginName.compare(this->userName_, Qt::CaseInsensitive) !=
+                0)
+        {
+            continue;
+        }
+
+        for (const auto &badge : message->twitchBadges)
+        {
+            if (badge.key_ == QStringLiteral("moderator"))
+            {
+                this->targetIsModerator_ = true;
+            }
+            else if (badge.key_ == QStringLiteral("vip"))
+            {
+                this->targetIsVip_ = true;
+            }
+            else if (badge.key_ == QStringLiteral("broadcaster"))
+            {
+                this->targetIsBroadcaster_ = true;
+            }
+        }
+        return;
+    }
+}
+
+void UserInfoPopup::refreshChannelModerationPermissions()
+{
+    auto *twitchChannel =
+        dynamic_cast<TwitchChannel *>(this->underlyingChannel_.get());
+    if (twitchChannel == nullptr || twitchChannel->roomId().isEmpty())
+    {
+        return;
+    }
+
+    if (twitchChannel->isBroadcaster())
+    {
+        this->channelModerationPermissions_ = {
+            .addModerator = true,
+            .removeModerator = true,
+            .addVip = true,
+            .removeVip = true,
+            .deleteModComments = true,
+        };
+        this->userStateChanged_.invoke();
+        return;
+    }
+
+    auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
+    if (currentUser == nullptr || currentUser->isAnon())
+    {
+        return;
+    }
+
+    const auto account = TwitchModerationAuth::resolveForCurrentUser(
+        currentUser->getUserId());
+    if (!account.supportsWebGql())
+    {
+        return;
+    }
+
+    const auto generation = this->channelModerationPermissionsGeneration_;
+    const auto roomId = twitchChannel->roomId();
+    TwitchWebApi::getChannelModerationPermissions(
+        roomId, currentUser->getUserId(), account.clientId, account.oauthToken,
+        [self = QPointer(this), generation,
+         roomId](const TwitchChannelModerationPermissions &permissions) {
+            if (self == nullptr || self->preparedForClose_ ||
+                generation !=
+                    self->channelModerationPermissionsGeneration_)
+            {
+                return;
+            }
+            auto *currentChannel =
+                dynamic_cast<TwitchChannel *>(self->underlyingChannel_.get());
+            if (currentChannel == nullptr ||
+                currentChannel->roomId() != roomId)
+            {
+                return;
+            }
+
+            self->channelModerationPermissions_ = permissions;
+            self->userStateChanged_.invoke();
+        },
+        [](const QString &) {
+            // The role buttons stay hidden if Twitch cannot verify access.
+        });
+}
+
+void UserInfoPopup::openModComments()
+{
+    auto *twitchChannel =
+        dynamic_cast<TwitchChannel *>(this->underlyingChannel_.get());
+    if (twitchChannel == nullptr || this->userId_.isEmpty() ||
+        !this->channelModerationPermissions_.deleteModComments)
+    {
+        return;
+    }
+
+    if (this->twitchModCommentsDialog_.isNull())
+    {
+        this->twitchModCommentsDialog_ = new TwitchModCommentsDialog(
+            twitchChannel->roomId(), twitchChannel->getName(), this->userId_,
+            this->userName_, this);
+    }
+    this->twitchModCommentsDialog_->show();
+    this->twitchModCommentsDialog_->raise();
+    this->twitchModCommentsDialog_->activateWindow();
+}
+
 void UserInfoPopup::prepareForClose()
 {
     if (this->preparedForClose_)
@@ -680,6 +832,12 @@ void UserInfoPopup::prepareForClose()
 
     this->refreshConnection_.reset();
     this->userDataUpdatedConnection_.reset();
+    if (!this->twitchModCommentsDialog_.isNull())
+    {
+        this->twitchModCommentsDialog_->close();
+        this->twitchModCommentsDialog_->deleteLater();
+        this->twitchModCommentsDialog_ = nullptr;
+    }
 
     // The view is owned by this popup and will be destroyed with it. Only clear
     // the source channel here; rebuilding the embedded view during focus-loss
@@ -750,6 +908,11 @@ void UserInfoPopup::windowDeactivationEvent()
 {
     if (!this->editUserNotesDialog_.isNull() &&
         this->editUserNotesDialog_->isVisible())
+    {
+        return;
+    }
+    if (!this->twitchModCommentsDialog_.isNull() &&
+        this->twitchModCommentsDialog_->isVisible())
     {
         return;
     }
@@ -963,6 +1126,13 @@ void UserInfoPopup::setData(const QString &name,
                             MessagePlatform platform,
                             const QString &platformUserID)
 {
+    if (!this->twitchModCommentsDialog_.isNull())
+    {
+        this->twitchModCommentsDialog_->close();
+        this->twitchModCommentsDialog_->deleteLater();
+        this->twitchModCommentsDialog_ = nullptr;
+    }
+
     const QStringView idPrefix = u"id:";
     bool isId = name.startsWith(idPrefix);
     if (isId)
@@ -996,6 +1166,9 @@ void UserInfoPopup::setData(const QString &name,
                     this->underlyingChannel_->getType() == Channel::Type::Kick;
     this->isGenericPlatform_ = platform == MessagePlatform::YouTube ||
                                platform == MessagePlatform::TikTok;
+    ++this->channelModerationPermissionsGeneration_;
+    this->channelModerationPermissions_ = {};
+    this->updateTargetRoleStateFromMessages();
     this->ui_.timeoutWidget->setMinTimeout(this->isKick_ ? 60 : 1);
     this->youtubeModerationConnection_.reset();
     if (this->platform_ == MessagePlatform::YouTube)
@@ -1030,6 +1203,7 @@ void UserInfoPopup::setData(const QString &name,
     }
     else
     {
+        this->refreshChannelModerationPermissions();
         this->updateUserData();
     }
 
@@ -1081,7 +1255,8 @@ void UserInfoPopup::updateGenericPlatformUserData(
     }
     else if (this->platform_ == MessagePlatform::TikTok)
     {
-        auto profileName = this->userName_;
+        auto profileName = platformUserID.isEmpty() ? this->userName_
+                                                    : platformUserID;
         if (profileName.startsWith(u"@"))
         {
             profileName = profileName.mid(1);
@@ -1094,6 +1269,20 @@ void UserInfoPopup::updateGenericPlatformUserData(
     }
 
     this->ui_.avatarButton->setPixmap(QPixmap());
+    if (this->platform_ == MessagePlatform::TikTok)
+    {
+        const auto avatarUrl = TikTokLiveChat::cachedAvatarUrl(
+            this->userName_, platformUserID);
+        if (getApp()->getStreamerMode()->isEnabled() &&
+            getSettings()->streamerModeHideUsercardAvatars)
+        {
+            this->ui_.avatarButton->setPixmap(getResources().streamerMode);
+        }
+        else if (!avatarUrl.isEmpty())
+        {
+            this->loadAvatar(this->userId_, avatarUrl, false, false);
+        }
+    }
     this->ui_.switchAvatars->hide();
     this->ui_.liveIndicator->hide();
     this->ui_.localizedNameLabel->setVisible(false);
@@ -1177,6 +1366,8 @@ void UserInfoPopup::updateLatestMessages()
                     filteredChannel->addMessage(
                         message, MessageContext::Repost,
                         doNotLogFlags(message, overridingFlags));
+                    self->updateTargetRoleStateFromMessages();
+                    self->userStateChanged_.invoke();
                     if (!hadMessages)
                     {
                         self->ui_.latestMessages->setVisible(true);
@@ -1383,6 +1574,8 @@ void UserInfoPopup::updateUserData()
         }
 
         this->userId_ = user.id;
+        this->updateTargetRoleStateFromMessages();
+        this->userStateChanged_.invoke();
         this->helixAvatarUrl_ = user.profileImageUrl;
         this->updateAvatarUrl();
         this->updateNotes();
@@ -1566,7 +1759,7 @@ void UserInfoPopup::updateUserData()
 }
 
 void UserInfoPopup::loadAvatar(const QString &userID, const QString &pictureURL,
-                               bool isKick)
+                               bool isKick, bool loadSevenTV)
 {
     auto filename =
         getApp()->getPaths().cacheDirectory() + "/" + hashUrl(pictureURL);
@@ -1616,7 +1809,7 @@ void UserInfoPopup::loadAvatar(const QString &userID, const QString &pictureURL,
     this->helixAvatarUrl_ = pictureURL;
     this->updateAvatarUrl();
 
-    if (getSettings()->displaySevenTVAnimatedProfile)
+    if (loadSevenTV && getSettings()->displaySevenTVAnimatedProfile)
     {
         this->loadSevenTVAvatar(userID, isKick);
     }
@@ -2171,7 +2364,8 @@ UserInfoPopup::TimeoutWidget::TimeoutWidget()
     auto addTimeouts = [&](const QString &title) {
         auto hbox = addLayout(title);
 
-        for (const auto &item : getSettings()->timeoutButtons.getValue())
+        const auto timeoutButtons = getSettings()->timeoutButtons.getValueCopy();
+        for (const auto &item : timeoutButtons)
         {
             auto a = hbox.emplace<LabelButton>();
             a->setPadding({0, 0});

@@ -103,7 +103,7 @@ QString doKickTimeout(const CommandContext &ctx)
     QString reason;
     if (ctx.words.size() >= 3)
     {
-        auto seconds = parseDurationToSeconds(ctx.words.at(2), 60);
+        auto seconds = parseDurationToSeconds(ctx.words.at(2));
         if (seconds <= 0)
         {
             ctx.channel->addSystemMessage(u"Invalid duration."_s);

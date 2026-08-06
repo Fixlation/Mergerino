@@ -179,7 +179,33 @@ public:
     Type
     getValueCopy() const
     {
-        return this->getValue();
+        std::unique_lock<std::mutex> lock(this->valueMutex);
+
+        auto lockedSetting = this->data.lock();
+
+        if (!lockedSetting) {
+            if (this->value) {
+                return *this->value;
+            }
+
+            return this->defaultValue;
+        }
+
+        auto currentUpdateIteration = lockedSetting->getUpdateIteration();
+        if (this->updateIteration != currentUpdateIteration) {
+            this->updateIteration = currentUpdateIteration;
+
+            auto p = lockedSetting->template unmarshal<Type>();
+            if (p) {
+                this->value = std::move(p);
+            }
+        }
+
+        if (this->value) {
+            return *this->value;
+        }
+
+        return this->defaultValue;
     }
 
     const Type &

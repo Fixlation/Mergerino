@@ -37,7 +37,8 @@ EmotePtr KickEmotes::emoteForID(QStringView id, QStringView name)
     auto emote = std::make_shared<const Emote>(Emote{
         .name = {std::move(nameStr)},
         .images = ImageSet(Image::fromAutoscaledUrl(
-            {u"https://files.kick.com/emotes/" % id % u"/fullsize"}, 28)),
+            {u"https://files.kick.com/emotes/" % id % u"/fullsize"},
+            {56, 28}, {28, 28})),
         .tooltip = {std::move(tooltip)},
         .id = {idStr},
     });

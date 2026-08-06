@@ -14,6 +14,7 @@ class Channel;
 using ChannelPtr = std::shared_ptr<Channel>;
 class TwitchChannel;
 class KickChannel;
+struct Message;
 
 struct CommandContext {
     QStringList words;
@@ -26,6 +27,9 @@ struct CommandContext {
 
     // Can be null if `channel` is null or if `channel` is not a Kick channel
     KickChannel *kickChannel;
+
+    // The replied-to or context-menu message, when command execution has one.
+    const Message *message = nullptr;
 };
 
 }  // namespace chatterino

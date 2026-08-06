@@ -58,11 +58,30 @@ inline std::vector<ChannelLog> normalizeLoggedUsers(
     return normalizedUsers;
 }
 
+inline std::vector<ChannelLog> loggedUsersSettingSnapshot(Settings &settings)
+{
+    return settings.loggedUsersSetting.getValueCopy();
+}
+
+inline std::vector<ChannelLog> loggedUsersVectorSnapshot(Settings &settings)
+{
+    const auto users = settings.loggedUsers.readOnly();
+    if (!users)
+    {
+        return {};
+    }
+
+    return *users;
+}
+
 inline std::vector<ChannelLog> mergedLoggedUsers()
 {
     auto *settings = getSettings();
-    auto users = normalizeLoggedUsers(settings->loggedUsersSetting.getValue());
-    appendNormalizedLoggedUsers(users, *settings->loggedUsers.readOnly());
+    const auto settingUsers = loggedUsersSettingSnapshot(*settings);
+    const auto vectorUsers = loggedUsersVectorSnapshot(*settings);
+
+    auto users = normalizeLoggedUsers(settingUsers);
+    appendNormalizedLoggedUsers(users, vectorUsers);
 
     return users;
 }
@@ -70,9 +89,14 @@ inline std::vector<ChannelLog> mergedLoggedUsers()
 inline void initLoggedUsers()
 {
     auto *settings = getSettings();
-    const auto normalized = mergedLoggedUsers();
-    if (normalized != normalizeLoggedUsers(settings->loggedUsersSetting.getValue()) ||
-        normalized != normalizeLoggedUsers(*settings->loggedUsers.readOnly()))
+    const auto settingUsers = loggedUsersSettingSnapshot(*settings);
+    const auto vectorUsers = loggedUsersVectorSnapshot(*settings);
+
+    auto normalized = normalizeLoggedUsers(settingUsers);
+    appendNormalizedLoggedUsers(normalized, vectorUsers);
+
+    if (normalized != normalizeLoggedUsers(settingUsers) ||
+        normalized != normalizeLoggedUsers(vectorUsers))
     {
         replaceLoggedUsers(normalized);
     }
@@ -99,7 +123,7 @@ inline void replaceLoggedUsers(const std::vector<ChannelLog> &users)
 
 inline std::vector<ChannelLog> loggedUsersSnapshot()
 {
-    return normalizeLoggedUsers(*getSettings()->loggedUsers.readOnly());
+    return normalizeLoggedUsers(loggedUsersVectorSnapshot(*getSettings()));
 }
 
 inline bool isLoggedUser(const QString &userName)

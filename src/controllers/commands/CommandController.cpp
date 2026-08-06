@@ -10,6 +10,7 @@
 #include "controllers/commands/builtin/chatterino/Debugging.hpp"
 #include "controllers/commands/builtin/kick/KickRawEvent.hpp"
 #include "controllers/commands/builtin/Misc.hpp"
+#include "controllers/commands/builtin/PinMessage.hpp"
 #include "controllers/commands/builtin/twitch/AddModerator.hpp"
 #include "controllers/commands/builtin/twitch/AddVIP.hpp"
 #include "controllers/commands/builtin/twitch/Announce.hpp"
@@ -426,6 +427,7 @@ CommandController::CommandController(const Paths &paths)
     this->registerCommand("/popup", &commands::popup);
 
     this->registerCommand("/clearmessages", &commands::clearmessages);
+    this->registerCommand("/giveaway", &commands::giveaway);
 
     this->registerCommand("/settitle", &commands::setTitle);
 
@@ -450,6 +452,8 @@ CommandController::CommandController(const Paths &paths)
     this->registerCommand("/clear", &commands::deleteAllMessages);
 
     this->registerCommand("/delete", &commands::deleteOneMessage);
+
+    this->registerCommand("/pin", &commands::pinChatMessageCommand);
 
     this->registerCommand("/mod", &commands::addModerator);
 
@@ -574,6 +578,14 @@ CommandModel *CommandController::createModel(QObject *parent)
 QString CommandController::execCommand(const QString &textNoEmoji,
                                        ChannelPtr channel, bool dryRun)
 {
+    return this->execCommand(textNoEmoji, std::move(channel), dryRun,
+                             nullptr);
+}
+
+QString CommandController::execCommand(const QString &textNoEmoji,
+                                       ChannelPtr channel, bool dryRun,
+                                       const Message *message)
+{
     QString text =
         getApp()->getEmotes()->getEmojis()->replaceShortCodes(textNoEmoji);
     QStringList words = text.split(' ', Qt::SkipEmptyParts);
@@ -591,7 +603,8 @@ QString CommandController::execCommand(const QString &textNoEmoji,
         if (it != this->userCommands_.end())
         {
             text = getApp()->getEmotes()->getEmojis()->replaceShortCodes(
-                this->execCustomCommand(words, it.value(), dryRun, channel));
+                this->execCustomCommand(words, it.value(), dryRun, channel,
+                                        message));
 
             words = text.split(' ', Qt::SkipEmptyParts);
 
@@ -622,6 +635,7 @@ QString CommandController::execCommand(const QString &textNoEmoji,
                     channel,
                     twitchChannelForCommandContext(channel),
                     kickChannelForCommandContext(channel),
+                    message,
                 };
                 return (*command)(ctx);
             }
@@ -639,7 +653,8 @@ QString CommandController::execCommand(const QString &textNoEmoji,
         const auto it = this->userCommands_.find(commandName);
         if (it != this->userCommands_.end())
         {
-            return this->execCustomCommand(words, it.value(), dryRun, channel);
+            return this->execCustomCommand(words, it.value(), dryRun, channel,
+                                           message);
         }
     }
 

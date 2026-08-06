@@ -34,6 +34,8 @@ public:
 
     QString execCommand(const QString &text, std::shared_ptr<Channel> channel,
                         bool dryRun);
+    QString execCommand(const QString &text, std::shared_ptr<Channel> channel,
+                        bool dryRun, const Message *message);
     QStringList getDefaultChatterinoCommandList();
 
     CommandController(const Paths &paths);

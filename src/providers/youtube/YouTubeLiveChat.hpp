@@ -12,7 +12,9 @@
 #include <QElapsedTimer>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -33,6 +35,7 @@ public:
 
     void start();
     void stop();
+    void setDiscoveryForeground(bool foreground);
     void sendMessage(const QString &message);
     void deleteMessage(const QString &messageId);
     void banUser(const QString &channelId, const QString &displayName = {});
@@ -55,6 +58,7 @@ public:
     pajlada::Signals::Signal<MessagePtr> systemMessageReceived;
     pajlada::Signals::NoArgSignal liveStatusChanged;
     pajlada::Signals::NoArgSignal moderationStatusChanged;
+    pajlada::Signals::Signal<int> sendWaitUpdate;
 
 private:
     using ActiveLiveChatIdCallback =
@@ -83,7 +87,19 @@ private:
                                        std::function<void(QString)> onResolved);
     void bootstrapInnertubeContext(std::function<void()> onReady,
                                    QString failureText);
+    void bootstrapInnertubeContextFromUrls(
+        QStringList urls, int index, std::shared_ptr<std::function<void()>> onReady,
+        QString failureText, QString blockedText = {});
     void fetchLiveChatPage(bool skipInitialBacklog = true);
+    void fetchLiveChatPopoutPage(bool skipInitialBacklog,
+                                 bool activeLiveRefresh,
+                                 const QString &requestedVideoId);
+    void handleMissingLiveChatContinuation(const QString &requestedVideoId,
+                                           bool skipInitialBacklog,
+                                           bool activeLiveRefresh);
+    void beginLiveChatSession(QString continuation, bool skipInitialBacklog,
+                              bool activeLiveRefresh,
+                              const QJsonObject &nextResponse = {});
     void ensureActiveLiveChatId(std::shared_ptr<YouTubeAccount> account,
                                 ActiveLiveChatIdCallback callback,
                                 QString operationName);
@@ -102,11 +118,19 @@ private:
     void schedulePoll(int delayMs);
     void scheduleHealthCheck(int delayMs);
     void scheduleResolve(int delayMs);
+    int liveDiscoveryRetryDelayMs() const;
+    QStringList innertubeBootstrapUrls() const;
+    bool updateInnertubeContextFromHtml(const QString &html);
+    void finishInnertubeBootstrapFailure(QString failureText,
+                                         QString blockedText);
+    void invalidateLiveChatSession();
     void recoverLiveChat(QString text, int retryDelayMs,
                          bool notifyAsSystemMessage = true);
     void waitForNextLive(QString text, int retryDelayMs);
     void resetInnertubeContext();
     void resetModeratorPrivileges();
+    void setSendWait(std::chrono::milliseconds waitTime);
+    void emitSendWait();
     bool moderationToolsDisabledForCurrentAccount() const;
     void reportModerationToolsUnavailable();
     void reportModerationActionFailure(const QString &action,
@@ -164,11 +188,16 @@ private:
     bool hasModeratorPrivileges_{false};
     bool failureReported_{false};
     bool skipInitialBacklog_{false};
+    bool discoveryForeground_{false};
     int activePollStreak_{0};
     int pollRefreshFallbackCount_{0};
+    int resolveGeneration_{0};
+    int chatSessionGeneration_{0};
     uint64_t liveViewerCount_{0};
     QElapsedTimer liveChatSessionRefreshTimer_;
     QElapsedTimer liveChatProgressTimer_;
+    QTimer sendWaitTimer_;
+    std::optional<std::chrono::steady_clock::time_point> sendWaitEnd_;
 
     std::shared_ptr<bool> lifetimeGuard_;
     std::unordered_set<QString> seenMessageIds_;

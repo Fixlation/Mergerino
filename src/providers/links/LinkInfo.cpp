@@ -6,9 +6,28 @@
 
 #include "debug/AssertInGuiThread.hpp"
 
+#include <QHash>
 #include <QString>
 
 namespace chatterino {
+
+namespace {
+
+struct PreviewMetadata {
+    QString title;
+    QString subtitle;
+    QString siteName;
+    QColor accentColor;
+};
+
+QHash<const LinkInfo *, PreviewMetadata> &previewMetadata()
+{
+    static auto *metadata =
+        new QHash<const LinkInfo *, PreviewMetadata>;
+    return *metadata;
+}
+
+}  // namespace
 
 LinkInfo::LinkInfo(QString url)
     : QObject(nullptr)
@@ -18,7 +37,10 @@ LinkInfo::LinkInfo(QString url)
 {
 }
 
-LinkInfo::~LinkInfo() = default;
+LinkInfo::~LinkInfo()
+{
+    previewMetadata().remove(this);
+}
 
 LinkInfo::State LinkInfo::state() const
 {
@@ -65,6 +87,32 @@ bool LinkInfo::hasThumbnail() const
     return this->thumbnail_ && !this->thumbnail_->url().string.isEmpty();
 }
 
+bool LinkInfo::hasPreview() const
+{
+    const auto it = previewMetadata().constFind(this);
+    return it != previewMetadata().cend() && !it->title.isEmpty();
+}
+
+QString LinkInfo::previewTitle() const
+{
+    return previewMetadata().value(this).title;
+}
+
+QString LinkInfo::previewSubtitle() const
+{
+    return previewMetadata().value(this).subtitle;
+}
+
+QString LinkInfo::previewSiteName() const
+{
+    return previewMetadata().value(this).siteName;
+}
+
+QColor LinkInfo::previewAccentColor() const
+{
+    return previewMetadata().value(this).accentColor;
+}
+
 QString LinkInfo::tooltip() const
 {
     return this->tooltip_;
@@ -105,6 +153,17 @@ void LinkInfo::setThumbnail(ImagePtr thumbnail)
 {
     assertInGuiThread();
     this->thumbnail_ = std::move(thumbnail);
+}
+
+void LinkInfo::setPreview(QString title, QString subtitle, QString siteName,
+                          QColor accentColor)
+{
+    assertInGuiThread();
+    previewMetadata().insert(
+        this, {.title = std::move(title),
+               .subtitle = std::move(subtitle),
+               .siteName = std::move(siteName),
+               .accentColor = std::move(accentColor)});
 }
 
 }  // namespace chatterino

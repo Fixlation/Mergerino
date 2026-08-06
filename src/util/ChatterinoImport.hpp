@@ -24,6 +24,8 @@ struct ImportOptions {
     std::optional<QString> mergedPlatformIndicatorMode;
     std::optional<QString> platformEventHighlightStyle;
     std::optional<QString> platformEventHighlightCustomColor;
+    std::optional<QString> platformAlertHighlightStyle;
+    std::optional<QString> platformAlertHighlightCustomColor;
 };
 
 struct ImportSummary {

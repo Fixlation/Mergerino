@@ -89,6 +89,9 @@ ModerationAction::ModerationAction(const QString &action, const QUrl &iconPath)
             }
             this->line2_ = "w";
         }
+
+        this->line1_ += this->line2_;
+        this->line2_.clear();
     }
     else if (action.startsWith("/ban "))
     {

@@ -10,6 +10,7 @@
 #include "common/ProviderId.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "providers/kick/KickAccount.hpp"
+#include "providers/seventv/SeventvAccountManager.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/youtube/YouTubeAccount.hpp"
 #include "singletons/Settings.hpp"
@@ -165,6 +166,18 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
     this->ui_.youtubeProviderButton->setFocusPolicy(Qt::NoFocus);
     this->ui_.youtubeProviderButton->setFixedSize(PROVIDER_BUTTON_SIZE);
     providerHbox->addWidget(this->ui_.youtubeProviderButton);
+
+    this->ui_.sevenTVProviderButton = new QPushButton(this);
+    this->ui_.sevenTVProviderButton->setObjectName("providerButton");
+    this->ui_.sevenTVProviderButton->setIcon(
+        QIcon(QStringLiteral(":/buttons/seventv.svg")));
+    this->ui_.sevenTVProviderButton->setIconSize(PROVIDER_BUTTON_ICON_SIZE);
+    this->ui_.sevenTVProviderButton->setCheckable(true);
+    this->ui_.sevenTVProviderButton->setFocusPolicy(Qt::NoFocus);
+    this->ui_.sevenTVProviderButton->setFixedSize(PROVIDER_BUTTON_SIZE);
+    this->ui_.sevenTVProviderButton->setToolTip(
+        QStringLiteral("7TV account"));
+    providerHbox->addWidget(this->ui_.sevenTVProviderButton);
     providerHbox->addStretch(1);
     vbox->addLayout(providerHbox);
 
@@ -190,9 +203,50 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
     this->ui_.youtubeAccountSwitcher->setFocusPolicy(Qt::NoFocus);
     youtubeAccountLayout->addWidget(this->ui_.youtubeAccountSwitcher, 1);
 
+    this->ui_.sevenTVAccountPage = new QWidget(this);
+    auto *sevenTVAccountLayout =
+        new QVBoxLayout(this->ui_.sevenTVAccountPage);
+    sevenTVAccountLayout->setContentsMargins(14, 14, 14, 14);
+    this->ui_.sevenTVDescription = new QLabel(
+        QStringLiteral(
+            "Connect your 7TV account to manage cosmetics, emotes, and "
+            "editor channels from Mergerino."),
+        this->ui_.sevenTVAccountPage);
+    this->ui_.sevenTVDescription->setAlignment(Qt::AlignCenter);
+    this->ui_.sevenTVDescription->setWordWrap(true);
+
+    this->ui_.sevenTVProfile = new QWidget(this->ui_.sevenTVAccountPage);
+    auto *sevenTVProfileLayout = new QVBoxLayout(this->ui_.sevenTVProfile);
+    sevenTVProfileLayout->setContentsMargins(0, 0, 0, 0);
+    sevenTVProfileLayout->setSpacing(6);
+    sevenTVProfileLayout->setAlignment(Qt::AlignCenter);
+    this->ui_.sevenTVProfileIcon = new QLabel(this->ui_.sevenTVProfile);
+    this->ui_.sevenTVProfileIcon->setAlignment(Qt::AlignCenter);
+    this->ui_.sevenTVProfileIcon->setFixedHeight(48);
+    sevenTVProfileLayout->addWidget(this->ui_.sevenTVProfileIcon);
+    this->ui_.sevenTVProfileName = new QLabel(this->ui_.sevenTVProfile);
+    this->ui_.sevenTVProfileName->setAlignment(Qt::AlignCenter);
+    auto sevenTVNameFont = this->ui_.sevenTVProfileName->font();
+    sevenTVNameFont.setBold(true);
+    sevenTVNameFont.setPointSize(sevenTVNameFont.pointSize() + 2);
+    this->ui_.sevenTVProfileName->setFont(sevenTVNameFont);
+    sevenTVProfileLayout->addWidget(this->ui_.sevenTVProfileName);
+    this->ui_.sevenTVProfileHandle = new QLabel(this->ui_.sevenTVProfile);
+    this->ui_.sevenTVProfileHandle->setAlignment(Qt::AlignCenter);
+    this->ui_.sevenTVProfileHandle->setStyleSheet(
+        QStringLiteral("QLabel { color: #9aa0a6; }"));
+    sevenTVProfileLayout->addWidget(this->ui_.sevenTVProfileHandle);
+    this->ui_.sevenTVProfile->hide();
+
+    sevenTVAccountLayout->addStretch(1);
+    sevenTVAccountLayout->addWidget(this->ui_.sevenTVDescription);
+    sevenTVAccountLayout->addWidget(this->ui_.sevenTVProfile);
+    sevenTVAccountLayout->addStretch(1);
+
     this->ui_.accountStack->addWidget(this->ui_.accountSwitchWidget);
     this->ui_.accountStack->addWidget(this->ui_.kickAccountSwitcher);
     this->ui_.accountStack->addWidget(this->ui_.youtubeAccountPage);
+    this->ui_.accountStack->addWidget(this->ui_.sevenTVAccountPage);
 
     this->ui_.statusLabel = new QLabel(this);
     this->ui_.statusLabel->setWordWrap(true);
@@ -211,6 +265,26 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
 
     QObject::connect(this->ui_.loginButton, &QPushButton::clicked, this,
                      [this]() {
+                         if (this->sevenTVPageSelected_)
+                         {
+                             auto &sevenTV = SeventvAccountManager::instance();
+                             if (sevenTV.isBusy())
+                             {
+                                 return;
+                             }
+                             if (sevenTV.isLoggedIn())
+                             {
+                                 sevenTV.logout();
+                                 this->refresh();
+                             }
+                             else
+                             {
+                                 sevenTV.beginSignIn();
+                                 this->hide();
+                             }
+                             return;
+                         }
+
                          const auto provider =
                              getApp()->getWindows()->activeAccountProvider();
                          if (provider == ProviderId::YouTube)
@@ -283,20 +357,28 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
                      });
     QObject::connect(this->ui_.twitchProviderButton, &QPushButton::clicked,
                      this, [this]() {
+                         this->sevenTVPageSelected_ = false;
                          getApp()->getWindows()->setActiveAccountProvider(
                              ProviderId::Twitch);
                          this->refresh();
                      });
     QObject::connect(this->ui_.kickProviderButton, &QPushButton::clicked,
                      this, [this]() {
+                         this->sevenTVPageSelected_ = false;
                          getApp()->getWindows()->setActiveAccountProvider(
                              ProviderId::Kick);
                          this->refresh();
                      });
     QObject::connect(this->ui_.youtubeProviderButton, &QPushButton::clicked,
                      this, [this]() {
+                         this->sevenTVPageSelected_ = false;
                          getApp()->getWindows()->setActiveAccountProvider(
                              ProviderId::YouTube);
+                         this->refresh();
+                     });
+    QObject::connect(this->ui_.sevenTVProviderButton, &QPushButton::clicked,
+                     this, [this]() {
+                         this->sevenTVPageSelected_ = true;
                          this->refresh();
                      });
     QObject::connect(this->ui_.youtubeAccountSwitcher, &QListWidget::clicked,
@@ -345,6 +427,11 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
     this->signalHolder_.managedConnect(
         getApp()->getAccounts()->twitch.userListUpdated,
         [this]() { this->refresh(); });
+    auto &sevenTV = SeventvAccountManager::instance();
+    this->signalHolder_.managedConnect(sevenTV.stateChanged,
+                                       [this]() { this->refresh(); });
+    this->signalHolder_.managedConnect(
+        sevenTV.busyChanged, [this](bool) { this->refresh(); });
 
     this->setScaleIndependentSize(300, 300);
     this->refresh();
@@ -368,6 +455,15 @@ void AccountSwitchPopup::themeChangedEvent()
     BaseWindow::themeChangedEvent();
 
     auto *t = getTheme();
+    const auto sevenTVIconPath =
+        t->isLightTheme() ? QStringLiteral(":/buttons/seventvDark.svg")
+                          : QStringLiteral(":/buttons/seventv.svg");
+    this->ui_.sevenTVProviderButton->setIcon(QIcon(sevenTVIconPath));
+    if (this->ui_.sevenTVProfileIcon != nullptr)
+    {
+        this->ui_.sevenTVProfileIcon->setPixmap(
+            QIcon(sevenTVIconPath).pixmap(QSize(44, 44)));
+    }
     auto color = [](const QColor &c) {
         return c.name(QColor::HexArgb);
     };
@@ -461,6 +557,50 @@ void AccountSwitchPopup::paintEvent(QPaintEvent *)
 void AccountSwitchPopup::updateCurrentPage()
 {
     const auto provider = getApp()->getWindows()->activeAccountProvider();
+    auto setProviderButtonSelected = [](QPushButton *button, bool selected) {
+        button->setChecked(selected);
+        button->setProperty("selectedProvider", selected);
+        button->style()->unpolish(button);
+        button->style()->polish(button);
+        button->update();
+    };
+
+    if (this->sevenTVPageSelected_)
+    {
+        this->ui_.accountStack->setCurrentWidget(this->ui_.sevenTVAccountPage);
+        setProviderButtonSelected(this->ui_.twitchProviderButton, false);
+        setProviderButtonSelected(this->ui_.kickProviderButton, false);
+        setProviderButtonSelected(this->ui_.youtubeProviderButton, false);
+        setProviderButtonSelected(this->ui_.sevenTVProviderButton, true);
+
+        const auto &sevenTV = SeventvAccountManager::instance();
+        const bool loggedIn = sevenTV.isLoggedIn();
+        this->ui_.loginButton->setEnabled(!sevenTV.isBusy());
+        this->ui_.loginButton->setText(
+            loggedIn ? QStringLiteral("Sign out of 7TV")
+                     : QStringLiteral("Connect 7TV"));
+        this->ui_.manageAccountsButton->setText(
+            QStringLiteral("Manage 7TV account"));
+        this->ui_.sevenTVDescription->setVisible(!loggedIn);
+        this->ui_.sevenTVProfile->setVisible(loggedIn);
+        if (loggedIn)
+        {
+            const auto displayName =
+                sevenTV.displayName().isEmpty()
+                    ? (sevenTV.username().isEmpty()
+                           ? QStringLiteral("7TV")
+                           : sevenTV.username())
+                    : sevenTV.displayName();
+            this->ui_.sevenTVProfileName->setText(displayName);
+            const auto username = sevenTV.username().trimmed();
+            this->ui_.sevenTVProfileHandle->setText(
+                username.isEmpty() ? QString{}
+                                   : QStringLiteral("@%1").arg(username));
+            this->ui_.sevenTVProfileHandle->setVisible(!username.isEmpty());
+        }
+        return;
+    }
+
     QWidget *accountWidget = this->ui_.accountSwitchWidget;
     switch (provider)
     {
@@ -474,20 +614,16 @@ void AccountSwitchPopup::updateCurrentPage()
             break;
     }
     this->ui_.accountStack->setCurrentWidget(accountWidget);
-    auto setProviderButtonSelected = [](QPushButton *button, bool selected) {
-        button->setChecked(selected);
-        button->setProperty("selectedProvider", selected);
-        button->style()->unpolish(button);
-        button->style()->polish(button);
-        button->update();
-    };
+    this->ui_.manageAccountsButton->setText(QStringLiteral("Manage accounts"));
     setProviderButtonSelected(this->ui_.twitchProviderButton,
                               provider == ProviderId::Twitch);
     setProviderButtonSelected(this->ui_.kickProviderButton,
                               provider == ProviderId::Kick);
     setProviderButtonSelected(this->ui_.youtubeProviderButton,
                               provider == ProviderId::YouTube);
+    setProviderButtonSelected(this->ui_.sevenTVProviderButton, false);
 
+    this->ui_.loginButton->setEnabled(true);
     bool loggedIn = false;
     switch (provider)
     {
@@ -510,6 +646,32 @@ void AccountSwitchPopup::updateCurrentPage()
 
 void AccountSwitchPopup::updateStatusText()
 {
+    if (this->sevenTVPageSelected_)
+    {
+        const auto &sevenTV = SeventvAccountManager::instance();
+        if (sevenTV.isLoggedIn())
+        {
+            const auto name =
+                sevenTV.displayName().isEmpty()
+                    ? (sevenTV.username().isEmpty()
+                           ? QStringLiteral("7TV")
+                           : sevenTV.username())
+                    : sevenTV.displayName();
+            this->ui_.statusLabel->setText(
+                sevenTV.isBusy()
+                    ? QStringLiteral("Connected 7TV account: %1 — working…")
+                          .arg(name)
+                    : QStringLiteral("Connected 7TV account: %1").arg(name));
+        }
+        else
+        {
+            this->ui_.statusLabel->setText(
+                QStringLiteral(
+                    "No 7TV account connected. Click below to sign in."));
+        }
+        return;
+    }
+
     const auto provider = getApp()->getWindows()->activeAccountProvider();
     if (provider == ProviderId::Kick)
     {

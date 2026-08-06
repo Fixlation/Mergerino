@@ -643,6 +643,11 @@ std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
         }
 
         auto ty = badgeTypeFromObject(obj);
+        if (ty == "bot" &&
+            !builder->externalBadges.contains(QStringLiteral("kick:bot")))
+        {
+            builder->externalBadges.append(QStringLiteral("kick:bot"));
+        }
         if (isKickLevelBadgeObject(obj, ty))
         {
             if (!levelBadge)
@@ -819,6 +824,7 @@ std::pair<MessagePtrMut, HighlightAlert> KickMessageBuilder::makeChatMessage(
 
     KickMessageBuilder builder(kickChannel);
     builder->channelName = kickChannel->getName();
+    builder->kickMessageJson = data.toJson();
     builder->id = id;
     builder->serverReceivedTime =
         QDateTime::fromString(createdAt, Qt::DateFormat::ISODate).toLocalTime();

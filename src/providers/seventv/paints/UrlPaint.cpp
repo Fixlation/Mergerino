@@ -20,6 +20,11 @@ bool UrlPaint::animated() const
     return image_->animated();
 }
 
+QString UrlPaint::animationUrl() const
+{
+    return this->image_->url().string;
+}
+
 QBrush UrlPaint::asBrush(const QColor userColor, const QRectF drawingRect) const
 {
     if (auto paintPixmap = this->image_->pixmapOrLoad())

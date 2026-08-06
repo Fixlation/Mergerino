@@ -30,6 +30,15 @@ Modes::Modes()
         {
             this->isExternallyPackaged = true;
         }
+        else if (line.startsWith(QStringLiteral("data-root=")))
+        {
+            auto dataRoot =
+                line.sliced(QStringLiteral("data-root=").size()).trimmed();
+            if (!dataRoot.isEmpty())
+            {
+                this->dataRoot = dataRoot;
+            }
+        }
     }
 }
 

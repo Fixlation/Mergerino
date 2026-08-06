@@ -338,7 +338,7 @@ public:
 
     pajlada::Signals::NoArgSignal destroyed;
 
-    pajlada::Signals::Signal<const QString &> sendWaitUpdate;
+    pajlada::Signals::Signal<int> sendWaitUpdate;
 
     // Channel point rewards
     void addQueuedRedemption(const QString &rewardId,

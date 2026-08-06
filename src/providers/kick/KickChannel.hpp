@@ -7,6 +7,8 @@
 
 #include <pajlada/signals/signal.hpp>
 
+#include <QDateTime>
+
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -38,6 +40,62 @@ struct KickChannelInfo;
 struct KickPrivateChannelInfo;
 struct KickPrivateSubscriberBadgeInfo;
 struct KickPrivateUserInChannelInfo;
+
+struct KickPredictionOutcome {
+    QString id;
+    QString title;
+    int totalVoteAmount = 0;
+    int voteCount = 0;
+
+    bool operator==(const KickPredictionOutcome &other) const = default;
+};
+
+struct KickPrediction {
+    QString id;
+    QString title;
+    QString state;
+    std::vector<KickPredictionOutcome> outcomes;
+    int durationSeconds = 0;
+    QDateTime createdAt;
+    QDateTime updatedAt;
+    QDateTime lockedAt;
+    QString winningOutcomeID;
+
+    [[nodiscard]] bool isOpen() const
+    {
+        return this->state == QStringLiteral("ACTIVE") ||
+               this->state == QStringLiteral("LOCKED");
+    }
+
+    bool operator==(const KickPrediction &other) const = default;
+};
+
+struct KickPollOption {
+    QString id;
+    QString title;
+    int votes = 0;
+
+    bool operator==(const KickPollOption &other) const = default;
+};
+
+struct KickPoll {
+    QString id;
+    QString title;
+    QString state;
+    std::vector<KickPollOption> options;
+    QDateTime createdAt;
+    QDateTime endsAt;
+    QDateTime hideAt;
+
+    [[nodiscard]] bool isVisible() const
+    {
+        return (this->state == QStringLiteral("ACTIVE") ||
+                this->state == QStringLiteral("RESULTS")) &&
+               !this->title.isEmpty() && !this->options.empty();
+    }
+
+    bool operator==(const KickPoll &other) const = default;
+};
 
 class KickChannel : public Channel, public ChannelChatters
 {
@@ -117,6 +175,9 @@ public:
 
     bool canSendMessage() const override;
     void sendMessage(const QString &message) override;
+    using SentMessageCallback = std::function<void(const MessagePtr &)>;
+    void sendMessageAndWaitForEcho(const QString &message,
+                                   SentMessageCallback callback);
     void sendReply(const QString &message, const QString &replyToID);
 
     bool tryReplacePendingSentMessage(const MessagePtr &message);
@@ -169,7 +230,12 @@ public:
     void updateRoomModes(const RoomModes &modes);
     pajlada::Signals::NoArgSignal roomModesChanged;
 
-    pajlada::Signals::Signal<const QString &> sendWaitUpdate;
+    const std::optional<KickPrediction> &activePrediction() const;
+    void refreshPrediction();
+    void updatePrediction(KickPrediction prediction);
+    const std::optional<KickPoll> &activePoll() const;
+    void updatePoll(std::optional<KickPoll> poll);
+    pajlada::Signals::Signal<int> sendWaitUpdate;
     void setSendWait(std::chrono::seconds waitTime);
 
     friend QDebug operator<<(QDebug dbg, const KickChannel &chan);
@@ -198,6 +264,8 @@ private:
     bool checkMessageRatelimit();
 
     QString prepareMessage(const QString &message) const;
+    void sendReply(const QString &message, const QString &replyToID,
+                   SentMessageCallback callback);
     void updateSevenTVActivity();
     void prunePendingSentMessages(const QDateTime &now);
     void markPendingSentMessageFailed(const QString &localID);
@@ -250,6 +318,7 @@ private:
         QString localID;
         QString messageText;
         QDateTime createdAt;
+        SentMessageCallback confirmedCallback;
     };
     std::deque<PendingSentMessage> pendingSentMessages_;
     std::optional<CachedOwnIdentity> ownIdentity_;
@@ -261,12 +330,15 @@ private:
     std::atomic_flag loadingRecentMessages_ = ATOMIC_FLAG_INIT;
 
     RoomModes roomModes_;
-
     bool isMod_ = false;
     bool isVip_ = false;
 
     StreamData streamData_;
     QString currentStreamID_;
+    std::optional<KickPrediction> activePrediction_;
+
+public:
+    pajlada::Signals::NoArgSignal predictionChanged;
 };
 
 }  // namespace chatterino

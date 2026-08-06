@@ -89,6 +89,7 @@ private:
         QLineEdit *youtubeUrl{};
         QCheckBox *enableTikTok{};
         QLineEdit *tiktokSource{};
+        QCheckBox *tiktokShowJoinMessages{};
         QComboBox *indicatorMode{};
         QCheckBox *filterActivity{};
         QCheckBox *slowerChat{};

@@ -453,7 +453,8 @@ SplitSettingsDialog::SplitSettingsDialog(bool isActivityPane,
 
         this->ui_.slowerChat = new QCheckBox("Slower chat");
         const auto slowerChatTooltip = QStringLiteral(
-            "Queue messages and release them at a fixed rate.");
+            "Queue messages and release them at a fixed rate. (This is not "
+            "slow mode and does not affect viewers.)");
         appearanceLayout->addRow(createCheckboxRow(this->ui_.slowerChat,
                                                    slowerChatTooltip, this));
 
@@ -518,44 +519,29 @@ SplitSettingsDialog::SplitSettingsDialog(bool isActivityPane,
                                 this),
             this->ui_.activityTimeDisplayMode);
 
-        if (this->showTwitchBitsMinimum_)
+        if (this->showTwitchBitsMinimum_ || this->showKickKicksMinimum_ ||
+            this->showTikTokGiftMinimum_)
         {
-            this->ui_.twitchBitsMinimum = new QSpinBox();
-            this->ui_.twitchBitsMinimum->setRange(0, 1000000);
-            this->ui_.twitchBitsMinimum->setSingleStep(1);
-            const auto twitchBitsMinimumTooltip = QStringLiteral(
-                "Only show Twitch bit alerts at or above this bit count.");
-            appearanceLayout->addRow(createLabelWithInfo(
-                                         "Twitch min bits",
-                                         twitchBitsMinimumTooltip, this),
-                                     this->ui_.twitchBitsMinimum);
+            this->ui_.activityMinimum = new QSpinBox();
+            this->ui_.activityMinimum->setRange(0, 1000000);
+            this->ui_.activityMinimum->setSingleStep(1);
+            const auto activityMinimumTooltip = QStringLiteral(
+                "Only show activity gifts at or above this amount. This "
+                "applies to Twitch Bits, Kick Kicks, and TikTok Diamonds.");
+            appearanceLayout->addRow(
+                createLabelWithInfo("Minimum bits (incl. Kick & TikTok)",
+                                    activityMinimumTooltip, this),
+                this->ui_.activityMinimum);
         }
 
-        if (this->showKickKicksMinimum_)
-        {
-            this->ui_.kickKicksMinimum = new QSpinBox();
-            this->ui_.kickKicksMinimum->setRange(0, 1000000);
-            this->ui_.kickKicksMinimum->setSingleStep(1);
-            const auto kickKicksMinimumTooltip = QStringLiteral(
-                "Only show Kick Kicks gifts at or above this Kicks amount.");
-            appearanceLayout->addRow(createLabelWithInfo(
-                                         "Kick min Kicks",
-                                         kickKicksMinimumTooltip, this),
-                                     this->ui_.kickKicksMinimum);
-        }
-
-        if (this->showTikTokGiftMinimum_)
-        {
-            this->ui_.tiktokGiftMinimum = new QSpinBox();
-            this->ui_.tiktokGiftMinimum->setRange(0, 1000000);
-            this->ui_.tiktokGiftMinimum->setSingleStep(1);
-            const auto tiktokGiftMinimumTooltip = QStringLiteral(
-                "Only show TikTok gifts at or above this diamond count.");
-            appearanceLayout->addRow(createLabelWithInfo(
-                                         "TikTok min diamonds",
-                                         tiktokGiftMinimumTooltip, this),
-                                     this->ui_.tiktokGiftMinimum);
-        }
+        this->ui_.collapseGiftedSubscriptions =
+            new QCheckBox("Collapse gifted subscriptions");
+        const auto collapseGiftedSubscriptionsTooltip = QStringLiteral(
+            "Combine gifted subscriptions into a single activity entry. "
+            "Turn this off to show each recipient.");
+        appearanceLayout->addRow(createCheckboxRow(
+            this->ui_.collapseGiftedSubscriptions,
+            collapseGiftedSubscriptionsTooltip, this));
     }
 
     rootLayout->addWidget(appearanceGroup);
@@ -632,6 +618,20 @@ qreal SplitSettingsDialog::activityMessageScale() const
     }
 
     return this->ui_.activityScale->currentData().toDouble();
+}
+
+void SplitSettingsDialog::setCollapseGiftedSubscriptions(bool enabled)
+{
+    if (this->ui_.collapseGiftedSubscriptions)
+    {
+        this->ui_.collapseGiftedSubscriptions->setChecked(enabled);
+    }
+}
+
+bool SplitSettingsDialog::collapseGiftedSubscriptions() const
+{
+    return this->ui_.collapseGiftedSubscriptions == nullptr ||
+           this->ui_.collapseGiftedSubscriptions->isChecked();
 }
 
 void SplitSettingsDialog::setActivityTimeDisplayMode(
@@ -714,58 +714,22 @@ bool SplitSettingsDialog::streamDatabaseBadgeFeedVisible() const
            this->ui_.streamDatabaseBadgeFeed->isChecked();
 }
 
-void SplitSettingsDialog::setTwitchActivityMinimumBits(uint32_t value)
+void SplitSettingsDialog::setActivityMinimum(uint32_t value)
 {
-    if (this->ui_.twitchBitsMinimum)
+    if (this->ui_.activityMinimum)
     {
-        this->ui_.twitchBitsMinimum->setValue(static_cast<int>(value));
+        this->ui_.activityMinimum->setValue(static_cast<int>(value));
     }
 }
 
-uint32_t SplitSettingsDialog::twitchActivityMinimumBits() const
+uint32_t SplitSettingsDialog::activityMinimum() const
 {
-    if (this->ui_.twitchBitsMinimum == nullptr)
+    if (this->ui_.activityMinimum == nullptr)
     {
         return 100;
     }
 
-    return static_cast<uint32_t>(this->ui_.twitchBitsMinimum->value());
-}
-
-void SplitSettingsDialog::setKickActivityMinimumKicks(uint32_t value)
-{
-    if (this->ui_.kickKicksMinimum)
-    {
-        this->ui_.kickKicksMinimum->setValue(static_cast<int>(value));
-    }
-}
-
-uint32_t SplitSettingsDialog::kickActivityMinimumKicks() const
-{
-    if (this->ui_.kickKicksMinimum == nullptr)
-    {
-        return 100;
-    }
-
-    return static_cast<uint32_t>(this->ui_.kickKicksMinimum->value());
-}
-
-void SplitSettingsDialog::setTikTokActivityMinimumDiamonds(uint32_t value)
-{
-    if (this->ui_.tiktokGiftMinimum)
-    {
-        this->ui_.tiktokGiftMinimum->setValue(static_cast<int>(value));
-    }
-}
-
-uint32_t SplitSettingsDialog::tiktokActivityMinimumDiamonds() const
-{
-    if (this->ui_.tiktokGiftMinimum == nullptr)
-    {
-        return 0;
-    }
-
-    return static_cast<uint32_t>(this->ui_.tiktokGiftMinimum->value());
+    return static_cast<uint32_t>(this->ui_.activityMinimum->value());
 }
 
 bool SplitSettingsDialog::hasAcceptedChanges() const
@@ -808,6 +772,10 @@ void SplitSettingsDialog::scaleChangedEvent(float newScale)
     {
         this->ui_.activityTimeDisplayMode->setFont(uiFont);
     }
+    if (this->ui_.collapseGiftedSubscriptions)
+    {
+        this->ui_.collapseGiftedSubscriptions->setFont(uiFont);
+    }
     if (this->ui_.slowerChat)
     {
         this->ui_.slowerChat->setFont(uiFont);
@@ -824,17 +792,9 @@ void SplitSettingsDialog::scaleChangedEvent(float newScale)
     {
         this->ui_.streamDatabaseBadgeFeed->setFont(uiFont);
     }
-    if (this->ui_.twitchBitsMinimum)
+    if (this->ui_.activityMinimum)
     {
-        this->ui_.twitchBitsMinimum->setFont(uiFont);
-    }
-    if (this->ui_.kickKicksMinimum)
-    {
-        this->ui_.kickKicksMinimum->setFont(uiFont);
-    }
-    if (this->ui_.tiktokGiftMinimum)
-    {
-        this->ui_.tiktokGiftMinimum->setFont(uiFont);
+        this->ui_.activityMinimum->setFont(uiFont);
     }
 
     this->applySlowerChatRateVisibilityProgress(

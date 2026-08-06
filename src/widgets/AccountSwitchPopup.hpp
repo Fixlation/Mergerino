@@ -44,16 +44,24 @@ private:
         QPushButton *twitchProviderButton = nullptr;
         QPushButton *kickProviderButton = nullptr;
         QPushButton *youtubeProviderButton = nullptr;
+        QPushButton *sevenTVProviderButton = nullptr;
         AccountSwitchWidget *accountSwitchWidget = nullptr;
         KickAccountSwitchWidget *kickAccountSwitcher = nullptr;
         QWidget *youtubeAccountPage = nullptr;
         QWidget *youtubeReviewNotice = nullptr;
         QListWidget *youtubeAccountSwitcher = nullptr;
+        QWidget *sevenTVAccountPage = nullptr;
+        QLabel *sevenTVDescription = nullptr;
+        QWidget *sevenTVProfile = nullptr;
+        QLabel *sevenTVProfileIcon = nullptr;
+        QLabel *sevenTVProfileName = nullptr;
+        QLabel *sevenTVProfileHandle = nullptr;
         QLabel *statusLabel = nullptr;
         QPushButton *loginButton = nullptr;
         QPushButton *manageAccountsButton = nullptr;
     } ui_;
 
+    bool sevenTVPageSelected_ = false;
     std::vector<boost::signals2::scoped_connection> bSignals_;
     QElapsedTimer lastHideTimer_;
 };

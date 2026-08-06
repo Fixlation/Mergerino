@@ -661,7 +661,7 @@ void TextIconLayoutElement::paint(QPainter &painter,
     painter.setFont(font);
 
     QTextOption option;
-    option.setAlignment(Qt::AlignHCenter);
+    option.setAlignment(Qt::AlignCenter);
 
     if (this->line2.isEmpty())
     {

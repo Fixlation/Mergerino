@@ -6,6 +6,7 @@
 
 #include "Application.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "providers/kick/KickChannel.hpp"
 #include "providers/merged/MergedChannel.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/api/TwitchModerationAuth.hpp"
@@ -20,6 +21,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QJsonArray>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
@@ -238,6 +240,26 @@ QString pollDetailText(const QString &votes, int value, int total)
     }
 
     return percentText(value, total) + QStringLiteral("  ") + votes;
+}
+
+std::shared_ptr<KickChannel> resolveKickChannel(const ChannelPtr &channel)
+{
+    if (!channel)
+    {
+        return nullptr;
+    }
+
+    if (auto kick = std::dynamic_pointer_cast<KickChannel>(channel))
+    {
+        return kick;
+    }
+
+    if (auto merged = std::dynamic_pointer_cast<MergedChannel>(channel))
+    {
+        return std::dynamic_pointer_cast<KickChannel>(merged->kickChannel());
+    }
+
+    return nullptr;
 }
 
 std::shared_ptr<TwitchChannel> resolveTwitchChannel(const ChannelPtr &channel)
@@ -572,7 +594,21 @@ void TwitchPollsAndPredictionsBar::setChannel(const ChannelPtr &channel)
     this->refreshTimer_.stop();
     this->channelSignalHolder_.clear();
     this->twitchChannel_ = resolveTwitchChannel(channel);
+    this->kickChannel_ = resolveKickChannel(channel);
     this->clearItems();
+
+    if (auto kick = this->kickChannel_.lock())
+    {
+        this->channelSignalHolder_.managedConnect(
+            kick->predictionChanged, [this] {
+                this->updateKickPollItem();
+                this->updateKickPredictionItem();
+                this->predictionStateChanged.invoke();
+            });
+        this->updateKickPollItem();
+        this->updateKickPredictionItem();
+        kick->refreshPrediction();
+    }
 
     if (auto twitch = this->twitchChannel_.lock())
     {
@@ -608,11 +644,12 @@ void TwitchPollsAndPredictionsBar::refreshNow()
     }
 }
 
-bool TwitchPollsAndPredictionsBar::hasActivePoll() const
+bool TwitchPollsAndPredictionsBar::hasActiveTwitchPoll() const
 {
     for (const auto &item : this->items_)
     {
-        if (item.kind == ItemKind::Poll)
+        if (item.kind == ItemKind::Poll &&
+            item.platform == ItemPlatform::Twitch)
         {
             return true;
         }
@@ -621,11 +658,40 @@ bool TwitchPollsAndPredictionsBar::hasActivePoll() const
     return false;
 }
 
-bool TwitchPollsAndPredictionsBar::hasOpenPrediction() const
+bool TwitchPollsAndPredictionsBar::hasActiveKickPoll() const
 {
     for (const auto &item : this->items_)
     {
-        if (item.kind == ItemKind::Prediction)
+        if (item.kind == ItemKind::Poll &&
+            item.platform == ItemPlatform::Kick)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool TwitchPollsAndPredictionsBar::hasOpenTwitchPrediction() const
+{
+    for (const auto &item : this->items_)
+    {
+        if (item.kind == ItemKind::Prediction &&
+            item.platform == ItemPlatform::Twitch)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool TwitchPollsAndPredictionsBar::hasOpenKickPrediction() const
+{
+    for (const auto &item : this->items_)
+    {
+        if (item.kind == ItemKind::Prediction &&
+            item.platform == ItemPlatform::Kick)
         {
             return true;
         }
@@ -644,7 +710,8 @@ QString TwitchPollsAndPredictionsBar::predictionButtonTooltip(
 
     for (const auto &item : this->items_)
     {
-        if (item.kind != ItemKind::Prediction)
+        if (item.kind != ItemKind::Prediction ||
+            item.platform != ItemPlatform::Twitch)
         {
             continue;
         }
@@ -673,7 +740,8 @@ QString TwitchPollsAndPredictionsBar::pollButtonTooltip(bool canManage) const
 
     for (const auto &item : this->items_)
     {
-        if (item.kind == ItemKind::Poll)
+        if (item.kind == ItemKind::Poll &&
+            item.platform == ItemPlatform::Twitch)
         {
             return QStringLiteral("Poll already active");
         }
@@ -705,6 +773,46 @@ void TwitchPollsAndPredictionsBar::paintEvent(QPaintEvent * /*event*/)
         this->drawItem(painter, item, QRect{0, y, this->width(), height});
         y += height;
     }
+}
+
+void TwitchPollsAndPredictionsBar::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton)
+    {
+        int y = 0;
+        for (const auto &item : this->items_)
+        {
+            const auto height = this->itemHeight(item);
+            if (QRect{0, y, this->width(), height}.contains(
+                    event->position().toPoint()))
+            {
+                if (item.kind == ItemKind::Poll)
+                {
+                    if (item.platform == ItemPlatform::Kick)
+                    {
+                        this->kickPollClicked.invoke();
+                    }
+                    else
+                    {
+                        this->pollClicked.invoke();
+                    }
+                }
+                else if (item.platform == ItemPlatform::Kick)
+                {
+                    this->kickPredictionClicked.invoke();
+                }
+                else
+                {
+                    this->predictionClicked.invoke();
+                }
+                event->accept();
+                return;
+            }
+            y += height;
+        }
+    }
+
+    BaseWidget::mousePressEvent(event);
 }
 
 void TwitchPollsAndPredictionsBar::scaleChangedEvent(float scale)
@@ -742,14 +850,18 @@ void TwitchPollsAndPredictionsBar::refresh()
     auto twitch = this->twitchChannel_.lock();
     if (!twitch)
     {
-        this->clearItems();
+        this->pendingPoll_.reset();
+        this->pendingPrediction_.reset();
+        this->updateItems();
         return;
     }
 
     auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
     if (currentUser == nullptr || currentUser->isAnon())
     {
-        this->clearItems();
+        this->pendingPoll_.reset();
+        this->pendingPrediction_.reset();
+        this->updateItems();
         this->scheduleRefresh(REFRESH_WHEN_IDLE_MS);
         return;
     }
@@ -757,7 +869,9 @@ void TwitchPollsAndPredictionsBar::refresh()
     const auto roomId = twitch->roomId();
     if (roomId.isEmpty())
     {
-        this->clearItems();
+        this->pendingPoll_.reset();
+        this->pendingPrediction_.reset();
+        this->updateItems();
         this->scheduleRefresh(REFRESH_WAIT_FOR_ROOM_ID_MS);
         return;
     }
@@ -936,6 +1050,69 @@ void TwitchPollsAndPredictionsBar::updateItems()
     this->pendingPoll_.reset();
     this->pendingPrediction_.reset();
 
+    if (auto kick = this->kickChannel_.lock(); kick != nullptr)
+    {
+        if (kick->activePoll())
+        {
+            if (auto item = TwitchPollsAndPredictionsBar::makeKickPollItem(
+                    *kick->activePoll()))
+            {
+                this->items_.push_back(std::move(*item));
+            }
+        }
+        if (kick->activePrediction())
+        {
+            if (auto item =
+                    TwitchPollsAndPredictionsBar::makeKickPredictionItem(
+                        *kick->activePrediction()))
+            {
+                this->items_.push_back(std::move(*item));
+            }
+        }
+    }
+
+    this->updateFixedHeight();
+    this->update();
+}
+
+void TwitchPollsAndPredictionsBar::updateKickPollItem()
+{
+    std::erase_if(this->items_, [](const Item &item) {
+        return item.kind == ItemKind::Poll &&
+               item.platform == ItemPlatform::Kick;
+    });
+
+    if (auto kick = this->kickChannel_.lock();
+        kick != nullptr && kick->activePoll())
+    {
+        if (auto item = TwitchPollsAndPredictionsBar::makeKickPollItem(
+                *kick->activePoll()))
+        {
+            this->items_.push_back(std::move(*item));
+        }
+    }
+
+    this->updateFixedHeight();
+    this->update();
+}
+
+void TwitchPollsAndPredictionsBar::updateKickPredictionItem()
+{
+    std::erase_if(this->items_, [](const Item &item) {
+        return item.kind == ItemKind::Prediction &&
+               item.platform == ItemPlatform::Kick;
+    });
+
+    if (auto kick = this->kickChannel_.lock();
+        kick != nullptr && kick->activePrediction())
+    {
+        if (auto item = TwitchPollsAndPredictionsBar::makeKickPredictionItem(
+                *kick->activePrediction()))
+        {
+            this->items_.push_back(std::move(*item));
+        }
+    }
+
     this->updateFixedHeight();
     this->update();
 }
@@ -944,11 +1121,13 @@ void TwitchPollsAndPredictionsBar::updateFixedHeight()
 {
     if (this->items_.empty())
     {
+        this->unsetCursor();
         this->setFixedHeight(0);
         this->hide();
         return;
     }
 
+    this->setCursor(Qt::PointingHandCursor);
     this->setFixedHeight(this->barHeight());
     this->show();
 }
@@ -1010,6 +1189,70 @@ std::optional<TwitchPollsAndPredictionsBar::Item>
                                       : std::max(outcome.users, 0),
             .points = std::max(outcome.channelPoints, 0),
             .users = std::max(outcome.users, 0),
+            .showPredictionMetrics = true,
+        });
+    }
+
+    return item;
+}
+
+std::optional<TwitchPollsAndPredictionsBar::Item>
+    TwitchPollsAndPredictionsBar::makeKickPollItem(const KickPoll &poll)
+{
+    if (!poll.isVisible() || poll.options.empty())
+    {
+        return std::nullopt;
+    }
+
+    Item item;
+    item.kind = ItemKind::Poll;
+    item.platform = ItemPlatform::Kick;
+    item.title = poll.title;
+    item.status = statusTitle(poll.state);
+    item.choices.reserve(poll.options.size());
+
+    for (const auto &option : poll.options)
+    {
+        item.choices.push_back({
+            .title = option.title,
+            .weight = std::max(option.votes, 0),
+            .detail = voteText(option.votes),
+        });
+    }
+
+    return item;
+}
+
+std::optional<TwitchPollsAndPredictionsBar::Item>
+    TwitchPollsAndPredictionsBar::makeKickPredictionItem(
+        const KickPrediction &prediction)
+{
+    if (!prediction.isOpen() || prediction.outcomes.empty())
+    {
+        return std::nullopt;
+    }
+
+    int totalPoints = 0;
+    for (const auto &outcome : prediction.outcomes)
+    {
+        totalPoints += std::max(outcome.totalVoteAmount, 0);
+    }
+
+    Item item;
+    item.kind = ItemKind::Prediction;
+    item.platform = ItemPlatform::Kick;
+    item.title = prediction.title;
+    item.status = statusTitle(prediction.state);
+    item.choices.reserve(prediction.outcomes.size());
+
+    for (const auto &outcome : prediction.outcomes)
+    {
+        item.choices.push_back({
+            .title = outcome.title,
+            .weight = totalPoints > 0 ? std::max(outcome.totalVoteAmount, 0)
+                                      : std::max(outcome.voteCount, 0),
+            .points = std::max(outcome.totalVoteAmount, 0),
+            .users = std::max(outcome.voteCount, 0),
             .showPredictionMetrics = true,
         });
     }
@@ -1121,8 +1364,10 @@ void TwitchPollsAndPredictionsBar::drawItem(QPainter &painter,
     const int headerGap = int(std::round(2 * scale));
     const int choiceGap = std::max(1, int(std::round(2 * scale)));
 
-    const QColor accent = item.kind == ItemKind::Poll ? QColor("#B15CFF")
-                                                      : QColor("#9146FF");
+    const QColor accent =
+        item.platform == ItemPlatform::Kick
+            ? QColor("#53FC18")
+            : QColor("#9146FF");
     const bool light = this->theme->isLightTheme();
     const QColor text = this->theme->messages.textColors.regular;
     const QColor mutedText = mutedFromTheme(this->theme, text);
@@ -1184,9 +1429,9 @@ void TwitchPollsAndPredictionsBar::drawItem(QPainter &painter,
 
     int y = itemRect.top() + paddingY;
 
-    const QString kindText =
-        item.kind == ItemKind::Poll ? QStringLiteral("POLL")
-                                    : QStringLiteral("PREDICTION");
+    const QString kindText = item.kind == ItemKind::Poll
+                                 ? QStringLiteral("POLL")
+                                 : QStringLiteral("PREDICTION");
     const QString statusText = item.status.toUpper();
     const int chipPaddingX = int(std::round(6 * scale));
     const int statusWidth =

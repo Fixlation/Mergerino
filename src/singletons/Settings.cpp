@@ -20,6 +20,8 @@
 
 #include <pajlada/signals/scoped-connection.hpp>
 
+#include <string_view>
+
 namespace {
 
 using namespace chatterino;
@@ -170,12 +172,159 @@ bool Settings::toggleMutedChannel(const QString &channelName)
 
 Settings *Settings::instance_ = nullptr;
 
+EnumStringSetting<PlatformEventHighlightStyle> &
+platformAlertHighlightStyleSetting()
+{
+    static auto *setting =
+        new EnumStringSetting<PlatformEventHighlightStyle>{
+            "/appearance/messages/platformAlertHighlightStyle",
+            PlatformEventHighlightStyle::Gradient,
+        };
+    return *setting;
+}
+
+QStringSetting &platformAlertHighlightCustomColorSetting()
+{
+    static auto *setting = new QStringSetting{
+        "/appearance/messages/platformAlertHighlightCustomColor",
+        "#5a9146ff",
+    };
+    return *setting;
+}
+
+namespace {
+
+BoolSetting &platformHighlightStylesSplitMigratedSetting()
+{
+    static auto *setting = new BoolSetting{
+        "/appearance/messages/platformHighlightStylesSplitMigrated", false};
+    return *setting;
+}
+
+}  // namespace
+
 EnumStringSetting<SplitHeaderViewerCountMode> &headerViewerCountModeSetting()
 {
     static auto *setting = new EnumStringSetting<SplitHeaderViewerCountMode>{
         "/appearance/splitheader/viewerCountMode",
         SplitHeaderViewerCountMode::Total,
     };
+    return *setting;
+}
+
+bool isExternallyCommittedSevenTVSetting(std::string_view path)
+{
+    return path == "/accounts/seventv/token" ||
+           path == "/accounts/seventv/userId" ||
+           path == "/accounts/seventv/username" ||
+           path == "/accounts/seventv/displayName" ||
+           path == "/accounts/seventv/emoteSetId" ||
+           path == "/accounts/seventv/defaultPaintId" ||
+           path == "/accounts/seventv/defaultBadgeId" ||
+           path == "/accounts/seventv/channelCosmetics" ||
+           path == "/accounts/seventv/updatedAt";
+}
+
+EnumStringSetting<EmoteBarMode> &emoteBarModeSetting()
+{
+    static auto *setting = new EnumStringSetting<EmoteBarMode>{
+        "/emotes/bar/mode",
+        EmoteBarMode::Combined,
+    };
+    return *setting;
+}
+
+EnumStringSetting<EmoteBarScope> &emoteBarScopeSetting()
+{
+    static auto *setting = new EnumStringSetting<EmoteBarScope>{
+        "/emotes/bar/scope",
+        EmoteBarScope::SevenTV,
+    };
+    return *setting;
+}
+
+IntSetting &emoteBarMaxEmotesSetting()
+{
+    static auto *setting =
+        new IntSetting{"/emotes/bar/maxEmotes", 6};
+    return *setting;
+}
+
+QStringSetting &emoteBarHistoryJsonSetting()
+{
+    static auto *setting = new QStringSetting{
+        "/emotes/bar/history",
+        R"({"version":1,"channels":[]})",
+    };
+    return *setting;
+}
+
+BoolSetting &emoteBarIntroductionDismissedSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/emotes/bar/introductionDismissed", false};
+    return *setting;
+}
+
+BoolSetting &disablePinnedMessagesSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/appearance/messages/disablePinnedMessages", false};
+    return *setting;
+}
+
+BoolSetting &showSeventvChatButtonSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/appearance/chatInput/showSeventvButton", true};
+    return *setting;
+}
+
+BoolSetting &showPredictionChatButtonSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/appearance/chatInput/showPredictionButton", true};
+    return *setting;
+}
+
+BoolSetting &showPollChatButtonSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/appearance/chatInput/showPollButton", true};
+    return *setting;
+}
+
+BoolSetting &showGiveawayChatButtonSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/appearance/chatInput/showGiveawayButton", true};
+    return *setting;
+}
+
+BoolSetting &obsOverlayMessageAnimationsSetting()
+{
+    static auto *setting =
+        new BoolSetting{"/obs/overlay/messageAnimations", true};
+    return *setting;
+}
+
+EnumStringSetting<LinkPreviewMode> &linkPreviewModeSetting()
+{
+    static auto *setting = new EnumStringSetting<LinkPreviewMode>{
+        "/links/linkPreviewMode",
+        LinkPreviewMode::Disabled,
+    };
+    return *setting;
+}
+
+EnumStringSetting<SeventvAddEmoteTargetScope> &
+seventvAddEmoteTargetScopeSetting()
+{
+    static auto *setting =
+        new EnumStringSetting<SeventvAddEmoteTargetScope>{
+            "/accounts/seventv/addEmoteTargetScope",
+            SeventvAddEmoteTargetScope::OpenTabs,
+        };
     return *setting;
 }
 
@@ -186,6 +335,22 @@ Settings::Settings(const Args &args, const QString &settingsDirectory,
 {
     QString settingsPath = settingsDirectory + "/settings.json";
     (void)headerViewerCountModeSetting();
+    (void)platformAlertHighlightStyleSetting();
+    (void)platformAlertHighlightCustomColorSetting();
+    (void)platformHighlightStylesSplitMigratedSetting();
+    (void)emoteBarModeSetting();
+    (void)emoteBarScopeSetting();
+    (void)emoteBarMaxEmotesSetting();
+    (void)emoteBarHistoryJsonSetting();
+    (void)emoteBarIntroductionDismissedSetting();
+    (void)disablePinnedMessagesSetting();
+    (void)showSeventvChatButtonSetting();
+    (void)showPredictionChatButtonSetting();
+    (void)showPollChatButtonSetting();
+    (void)showGiveawayChatButtonSetting();
+    (void)obsOverlayMessageAnimationsSetting();
+    (void)linkPreviewModeSetting();
+    (void)seventvAddEmoteTargetScopeSetting();
 
     // get global instance of the settings library
     auto settingsInstance = pajlada::Settings::SettingManager::getInstance();
@@ -231,6 +396,15 @@ Settings::Settings(const Args &args, const QString &settingsDirectory,
     if (isTest)
     {
         this->mergedPlatformIndicatorMode = "badge";
+    }
+
+    if (!platformHighlightStylesSplitMigratedSetting().getValue())
+    {
+        platformAlertHighlightStyleSetting() =
+            this->platformEventHighlightStyle.getValue();
+        platformAlertHighlightCustomColorSetting() =
+            this->platformEventHighlightCustomColor.getValue();
+        platformHighlightStylesSplitMigratedSetting() = true;
     }
 
     settingsInstance->setBackupEnabled(true);
@@ -350,6 +524,25 @@ void Settings::restoreSnapshot()
         return;
     }
 
+    // The 7TV account dialog commits independently of the parent Settings
+    // dialog. Preserve its live state across a Settings cancellation even if
+    // snapshot iteration or registration changes cause the path filter below
+    // to miss one of these settings.
+    const auto sevenTVAccountToken = this->sevenTVAccountToken.getValue();
+    const auto sevenTVAccountUserID = this->sevenTVAccountUserID.getValue();
+    const auto sevenTVAccountUsername =
+        this->sevenTVAccountUsername.getValue();
+    const auto sevenTVAccountDisplayName =
+        this->sevenTVAccountDisplayName.getValue();
+    const auto sevenTVAccountEmoteSetID =
+        this->sevenTVAccountEmoteSetID.getValue();
+    const auto sevenTVDefaultPaintID = this->sevenTVDefaultPaintID.getValue();
+    const auto sevenTVDefaultBadgeID = this->sevenTVDefaultBadgeID.getValue();
+    const auto sevenTVChannelCosmeticsJson =
+        this->sevenTVChannelCosmeticsJson.getValue();
+    const auto sevenTVAccountUpdatedAt =
+        this->sevenTVAccountUpdatedAt.getValue();
+
     for (const auto &weakSetting : _settings)
     {
         auto setting = weakSetting.lock();
@@ -359,6 +552,15 @@ void Settings::restoreSnapshot()
         }
 
         const char *path = setting->getPath().c_str();
+
+        // The 7TV account dialog commits these values immediately and lives
+        // outside the parent Settings dialog. Cancelling Settings must not
+        // roll a completed sign-in, sign-out, or cosmetic change back to the
+        // snapshot captured before the account dialog was opened.
+        if (isExternallyCommittedSevenTVSetting(path))
+        {
+            continue;
+        }
 
         if (!snapshot.HasMember(path))
         {
@@ -370,6 +572,17 @@ void Settings::restoreSnapshot()
 
         setting->marshalJSON(snapshot[path], std::move(args));
     }
+
+    this->sevenTVAccountToken = sevenTVAccountToken;
+    this->sevenTVAccountUserID = sevenTVAccountUserID;
+    this->sevenTVAccountUsername = sevenTVAccountUsername;
+    this->sevenTVAccountDisplayName = sevenTVAccountDisplayName;
+    this->sevenTVAccountEmoteSetID = sevenTVAccountEmoteSetID;
+    this->sevenTVDefaultPaintID = sevenTVDefaultPaintID;
+    this->sevenTVDefaultBadgeID = sevenTVDefaultBadgeID;
+    this->sevenTVChannelCosmeticsJson = sevenTVChannelCosmeticsJson;
+    this->sevenTVAccountUpdatedAt = sevenTVAccountUpdatedAt;
+    std::ignore = this->requestSave();
 }
 
 void Settings::disableSave()

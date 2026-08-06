@@ -1493,10 +1493,21 @@ void TwitchModerationElement::addToContainer(MessageLayoutContainer &container,
             }
             else
             {
+                auto textIconSize = size;
+                if (action.getType() == ModerationAction::Type::Timeout)
+                {
+                    const auto metrics = getApp()->getFonts()->getFontMetrics(
+                        FontStyle::Tiny, container.getScale());
+                    textIconSize.setWidth(
+                        metrics.horizontalAdvance(action.getLine1()) +
+                        container.getScale() * 2);
+                }
+
                 container.addElement(
                     (new TextIconLayoutElement(*this, action.getLine1(),
                                                action.getLine2(),
-                                               container.getScale(), size))
+                                               container.getScale(),
+                                               textIconSize))
                         ->setLink(Link(Link::UserAction, action.getAction())));
             }
         }

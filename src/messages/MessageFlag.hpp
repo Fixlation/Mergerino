@@ -78,6 +78,7 @@ enum class MessageFlag : std::int64_t {
     InvalidReplyTarget = (1LL << 42),
     WatchStreak = (1LL << 43),
     FirstMessageSession = (1LL << 44),
+    TikTokJoinMessage = (1LL << 45),
 };
 using MessageFlags = FlagsEnum<MessageFlag>;
 

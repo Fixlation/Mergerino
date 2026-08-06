@@ -9,6 +9,9 @@
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "providers/kick/KickAccount.hpp"
+#include "providers/kick/KickApi.hpp"
+#include "providers/kick/KickChannel.hpp"
 #include "providers/merged/MergedChannel.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/api/TwitchModerationAuth.hpp"
@@ -84,6 +87,23 @@ constexpr int POINTS_COLLAPSE_HEIGHT_DURATION_MS =
     POINTS_EXPAND_HEIGHT_DURATION_MS * 105 / 100;
 constexpr int POINTS_COLLAPSE_OPACITY_DURATION_MS =
     POINTS_EXPAND_OPACITY_DURATION_MS * 105 / 100;
+
+std::shared_ptr<KickChannel> resolveKickChannel(const ChannelPtr &channel)
+{
+    if (channel == nullptr)
+    {
+        return nullptr;
+    }
+    if (auto kick = std::dynamic_pointer_cast<KickChannel>(channel))
+    {
+        return kick;
+    }
+    if (auto merged = std::dynamic_pointer_cast<MergedChannel>(channel))
+    {
+        return std::dynamic_pointer_cast<KickChannel>(merged->kickChannel());
+    }
+    return nullptr;
+}
 
 class PollDurationComboBox final : public QComboBox
 {
@@ -359,11 +379,28 @@ void CreatePollDialog::showDialog(ChannelPtr channel,
     dialog->raise();
 }
 
+void CreatePollDialog::showKickDialog(ChannelPtr channel,
+                                      const KickChannel &kickChannel)
+{
+    auto *dialog = new CreatePollDialog(
+        std::move(channel), QString{},
+        kickChannel.slug().trimmed().isEmpty() ? kickChannel.getName()
+                                              : kickChannel.slug(),
+        static_cast<QWidget *>(&(getApp()->getWindows()->getMainWindow())),
+        true);
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->show();
+    dialog->activateWindow();
+    dialog->raise();
+}
+
 CreatePollDialog::CreatePollDialog(ChannelPtr channel, QString broadcasterID,
-                                   QString channelLogin, QWidget *parent)
+                                   QString channelLogin, QWidget *parent,
+                                   bool kick)
     : BasePopup(
           {
               BaseWindow::EnableCustomFrame,
+              BaseWindow::CloseButtonOnly,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
           },
@@ -371,8 +408,10 @@ CreatePollDialog::CreatePollDialog(ChannelPtr channel, QString broadcasterID,
     , channel_(std::move(channel))
     , broadcasterID_(std::move(broadcasterID))
     , channelLogin_(std::move(channelLogin))
+    , kick_(kick)
 {
-    this->setWindowTitle(QStringLiteral("Create a New Poll"));
+    this->setWindowTitle(this->kick_ ? QStringLiteral("Create a Kick Poll")
+                                     : QStringLiteral("Create a New Poll"));
     this->setScaleIndependentSize(DIALOG_WIDTH, BASE_DIALOG_HEIGHT);
     this->setAutoFillBackground(true);
     this->getLayoutContainer()->setObjectName(QStringLiteral("CreatePollRoot"));
@@ -465,7 +504,9 @@ CreatePollDialog::CreatePollDialog(ChannelPtr channel, QString broadcasterID,
                          });
     }
 
-    root->addWidget(sectionLabel(QStringLiteral("Settings"), this));
+    auto *settingsLabel = sectionLabel(QStringLiteral("Settings"), this);
+    settingsLabel->setVisible(!this->kick_);
+    root->addWidget(settingsLabel);
 
     auto *settingsContainer = new QWidget(this);
     auto *settingsLayout = new QVBoxLayout(settingsContainer);
@@ -505,6 +546,7 @@ CreatePollDialog::CreatePollDialog(ChannelPtr channel, QString broadcasterID,
     pointsRow->addWidget(this->channelPointsLabel_, 0, Qt::AlignVCenter);
     pointsRow->addStretch(1);
     settingsLayout->addWidget(this->pointsContainer_);
+    settingsContainer->setVisible(!this->kick_);
     root->addWidget(settingsContainer);
 
     this->pointsOpacityEffect_ =
@@ -551,11 +593,22 @@ CreatePollDialog::CreatePollDialog(ChannelPtr channel, QString broadcasterID,
     this->duration_ = new PollDurationComboBox(this);
     this->duration_->setCursor(Qt::PointingHandCursor);
     this->duration_->setFixedWidth(58);
-    this->duration_->addItem(QStringLiteral("1m"), 60);
-    this->duration_->addItem(QStringLiteral("2m"), 120);
-    this->duration_->addItem(QStringLiteral("3m"), 180);
-    this->duration_->addItem(QStringLiteral("5m"), 300);
-    this->duration_->addItem(QStringLiteral("10m"), 600);
+    if (this->kick_)
+    {
+        this->duration_->addItem(QStringLiteral("30s"), 30);
+        this->duration_->addItem(QStringLiteral("2m"), 120);
+        this->duration_->addItem(QStringLiteral("3m"), 180);
+        this->duration_->addItem(QStringLiteral("4m"), 240);
+        this->duration_->addItem(QStringLiteral("5m"), 300);
+    }
+    else
+    {
+        this->duration_->addItem(QStringLiteral("1m"), 60);
+        this->duration_->addItem(QStringLiteral("2m"), 120);
+        this->duration_->addItem(QStringLiteral("3m"), 180);
+        this->duration_->addItem(QStringLiteral("5m"), 300);
+        this->duration_->addItem(QStringLiteral("10m"), 600);
+    }
     this->duration_->view()->setCursor(Qt::ArrowCursor);
     this->duration_->view()->viewport()->setCursor(Qt::ArrowCursor);
     root->addWidget(this->duration_, 0, Qt::AlignLeft);
@@ -604,7 +657,10 @@ CreatePollDialog::CreatePollDialog(ChannelPtr channel, QString broadcasterID,
     this->updateResponseRows(false);
     this->updateStartButton();
     this->themeChangedEvent();
-    this->loadChannelPointsMetadata();
+    if (!this->kick_)
+    {
+        this->loadChannelPointsMetadata();
+    }
 }
 
 bool CreatePollDialog::eventFilter(QObject *object, QEvent *event)
@@ -1164,7 +1220,7 @@ int CreatePollDialog::dialogHeightForVisibleResponses(int visibleCount) const
 {
     const auto extraRows =
         std::max(0, visibleCount - BASE_VISIBLE_RESPONSES);
-    auto height = BASE_DIALOG_HEIGHT +
+    auto height = BASE_DIALOG_HEIGHT - (this->kick_ ? 58 : 0) +
                   extraRows * (RESPONSE_INPUT_HEIGHT + RESPONSE_ROW_GAP);
 
     if (this->allowAdditionalVotes_ != nullptr &&
@@ -1306,6 +1362,89 @@ void CreatePollDialog::submit()
             }
         });
     };
+
+    if (this->kick_)
+    {
+        auto kickAccount = getApp()->getAccounts()->kick.current();
+        if (kickAccount == nullptr || kickAccount->isAnonymous())
+        {
+            scheduleFailure(
+                QStringLiteral("You must be logged in to Kick to create a poll."));
+            return;
+        }
+        const auto websiteToken = kickAccount->chatIdentityToken().trimmed();
+        if (websiteToken.isEmpty())
+        {
+            scheduleFailure(QStringLiteral(
+                "Connect Kick’s website session under Settings > Accounts "
+                "before creating polls."));
+            return;
+        }
+
+        const auto kickChannel = resolveKickChannel(this->channel_);
+        const std::weak_ptr<KickChannel> kickChannelWeak = kickChannel;
+        auto requestSlug = this->channelLogin_.trimmed();
+        if (kickChannel != nullptr)
+        {
+            const auto liveSlug = kickChannel->slug().trimmed();
+            requestSlug = liveSlug.isEmpty()
+                              ? kickChannel->getName().trimmed()
+                              : liveSlug;
+        }
+        getKickApi()->createPoll(
+            requestSlug, websiteToken, title, choices, durationSeconds, 15,
+            [channel = this->channel_, title, choices, durationSeconds,
+             kickChannelWeak, self](ExpectedStr<void> result) {
+                if (self == nullptr)
+                {
+                    return;
+                }
+                QTimer::singleShot(
+                    0, self.data(),
+                    [channel, title, choices, durationSeconds, kickChannelWeak,
+                     self, result = std::move(result)] {
+                        if (self == nullptr)
+                        {
+                            return;
+                        }
+                        if (!result)
+                        {
+                            self->finishSubmitFailure(
+                                "Failed to create Kick poll - " +
+                                result.error());
+                            return;
+                        }
+                        if (auto kickChannel = kickChannelWeak.lock();
+                            kickChannel != nullptr &&
+                            (!kickChannel->activePoll() ||
+                             kickChannel->activePoll()->title != title))
+                        {
+                            const auto now = QDateTime::currentDateTimeUtc();
+                            KickPoll poll{
+                                .title = title,
+                                .state = QStringLiteral("ACTIVE"),
+                                .createdAt = now,
+                                .endsAt = now.addSecs(durationSeconds),
+                                .hideAt = now.addSecs(durationSeconds + 15),
+                            };
+                            poll.options.reserve(choices.size());
+                            for (const auto &choice : choices)
+                            {
+                                poll.options.push_back({.title = choice});
+                            }
+                            kickChannel->updatePoll(std::move(poll));
+                        }
+                        if (channel != nullptr)
+                        {
+                            channel->addSystemMessage(
+                                QStringLiteral("Created Kick poll: '%1'")
+                                    .arg(title));
+                        }
+                        self->close();
+                    });
+            });
+        return;
+    }
 
     auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
     if (currentUser == nullptr || currentUser->isAnon() ||

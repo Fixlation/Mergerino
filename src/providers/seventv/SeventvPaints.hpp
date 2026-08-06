@@ -4,8 +4,10 @@
 
 #include <QColor>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QString>
 
+#include <memory>
 #include <optional>
 #include <shared_mutex>
 #include <span>
@@ -20,6 +22,12 @@ struct TwitchUser;
 struct KickUser;
 using User = std::variant<TwitchUser, KickUser>;
 }  // namespace seventv::eventapi
+
+std::shared_ptr<Paint> makeSeventvPaintFromGraphQL(
+    const QJsonObject &paintJson);
+QString seventvPaintAnimationUrl(const std::shared_ptr<Paint> &paint);
+QJsonArray seventvPaintBrowserLayers(const std::shared_ptr<Paint> &paint,
+                                     const QColor &userColor);
 
 class SeventvPaints
 {

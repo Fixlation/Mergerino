@@ -1154,6 +1154,125 @@ void Helix::deleteChatMessages(
         .execute();
 }
 
+void Helix::getPinnedChatMessage(
+    QString broadcasterID, QString moderatorID,
+    ResultCallback<std::optional<HelixPinnedChatMessage>> successCallback,
+    FailureCallback<QString> failureCallback)
+{
+    QUrlQuery query;
+    query.addQueryItem("broadcaster_id", broadcasterID);
+    query.addQueryItem("moderator_id", moderatorID);
+
+    this->makeGet("chat/pins", query)
+        .onSuccess([successCallback, failureCallback](const auto &result) {
+            if (result.status() != 200)
+            {
+                failureCallback(result.formatError());
+                return;
+            }
+
+            const auto data = result.parseJson().value("data").toArray();
+            if (data.isEmpty())
+            {
+                successCallback(std::nullopt);
+                return;
+            }
+            successCallback(HelixPinnedChatMessage(data.first().toObject()));
+        })
+        .onError([failureCallback](const auto &result) {
+            auto message = result.parseJson().value("message").toString();
+            failureCallback(message.isEmpty() ? result.formatError() : message);
+        })
+        .execute();
+}
+
+void Helix::pinChatMessage(
+    QString broadcasterID, QString moderatorID, QString messageID,
+    std::optional<int> durationSeconds, ResultCallback<> successCallback,
+    FailureCallback<QString> failureCallback)
+{
+    QUrlQuery query;
+    query.addQueryItem("broadcaster_id", broadcasterID);
+    query.addQueryItem("moderator_id", moderatorID);
+    query.addQueryItem("message_id", messageID);
+    if (durationSeconds)
+    {
+        query.addQueryItem("duration_seconds",
+                           QString::number(*durationSeconds));
+    }
+
+    this->makePut("chat/pins", query)
+        .onSuccess([successCallback, failureCallback](const auto &result) {
+            if (result.status() != 204)
+            {
+                failureCallback(result.formatError());
+                return;
+            }
+            successCallback();
+        })
+        .onError([failureCallback](const auto &result) {
+            auto message = result.parseJson().value("message").toString();
+            failureCallback(message.isEmpty() ? result.formatError() : message);
+        })
+        .execute();
+}
+
+void Helix::updatePinnedChatMessage(
+    QString broadcasterID, QString moderatorID, QString messageID,
+    std::optional<int> durationSeconds, ResultCallback<> successCallback,
+    FailureCallback<QString> failureCallback)
+{
+    QUrlQuery query;
+    query.addQueryItem("broadcaster_id", broadcasterID);
+    query.addQueryItem("moderator_id", moderatorID);
+    query.addQueryItem("message_id", messageID);
+    if (durationSeconds)
+    {
+        query.addQueryItem("duration_seconds",
+                           QString::number(*durationSeconds));
+    }
+
+    this->makePatch("chat/pins", query)
+        .onSuccess([successCallback, failureCallback](const auto &result) {
+            if (result.status() != 204)
+            {
+                failureCallback(result.formatError());
+                return;
+            }
+            successCallback();
+        })
+        .onError([failureCallback](const auto &result) {
+            auto message = result.parseJson().value("message").toString();
+            failureCallback(message.isEmpty() ? result.formatError() : message);
+        })
+        .execute();
+}
+
+void Helix::unpinChatMessage(
+    QString broadcasterID, QString moderatorID, QString messageID,
+    ResultCallback<> successCallback, FailureCallback<QString> failureCallback)
+{
+    QUrlQuery query;
+    query.addQueryItem("broadcaster_id", broadcasterID);
+    query.addQueryItem("moderator_id", moderatorID);
+    query.addQueryItem("message_id", messageID);
+
+    this->makeDelete("chat/pins", query)
+        .onSuccess([successCallback, failureCallback](const auto &result) {
+            if (result.status() != 204)
+            {
+                failureCallback(result.formatError());
+                return;
+            }
+            successCallback();
+        })
+        .onError([failureCallback](const auto &result) {
+            auto message = result.parseJson().value("message").toString();
+            failureCallback(message.isEmpty() ? result.formatError() : message);
+        })
+        .execute();
+}
+
 void Helix::addChannelModerator(
     QString broadcasterID, QString userID, ResultCallback<> successCallback,
     FailureCallback<HelixAddChannelModeratorError, QString> failureCallback)
@@ -3205,6 +3324,10 @@ void Helix::sendChatMessage(
     {
         json["reply_parent_message_id"] = args.replyParentMessageID;
     }
+    if (args.pin)
+    {
+        json["pin"] = true;
+    }
 
     this->makePost("chat/messages", {})
         .json(json)
@@ -4163,7 +4286,7 @@ QString moderationAuthClipboardText()
 
 QString moderationAuthClipboardScript()
 {
-    return QStringLiteral(R"MERGERINO_JS((async () => {
+    return QStringLiteral(R"MERGERINO_JS(copy(await (async () => {
   const normalize = value => {
     if (!value) {
       return '';
@@ -4253,22 +4376,34 @@ QString moderationAuthClipboardScript()
     clean(storageValue('twilight.uniqueID')) ||
     clean(storageValue('unique_id')) ||
     randomDeviceId();
-  const configureIntegrity = () => {
+  const configureIntegrity = async () => {
+    if (!window.KPSDK || !window.KPSDK.configure) {
+      return;
+    }
     try {
-      if (window.KPSDK && window.KPSDK.configure) {
-        window.KPSDK.configure([{
-          protocol: 'https:',
-          method: 'POST',
-          domain: 'gql.twitch.tv',
-          path: '/integrity',
-        }]);
-      }
+      const configured = Promise.resolve(window.KPSDK.configure([{
+        protocol: 'https:',
+        method: 'POST',
+        domain: 'gql.twitch.tv',
+        path: '/integrity',
+      }])).catch(error => {
+        const message = String(error && error.message || error || '');
+        if (!message.toLowerCase().includes('already been configured')) {
+          console.warn('Mergerino could not configure Twitch integrity:', message);
+        }
+      });
+      await Promise.race([
+        configured,
+        new Promise(resolve => setTimeout(resolve, 1500)),
+      ]);
     } catch (_) {
     }
   };
   const fetchIntegrity = async token => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     try {
-      configureIntegrity();
+      await configureIntegrity();
       const headers = {
         'Client-ID': clientId,
         'X-Device-Id': deviceId,
@@ -4281,6 +4416,7 @@ QString moderationAuthClipboardScript()
         mode: 'cors',
         credentials: 'omit',
         headers,
+        signal: controller.signal,
       });
       if (!response.ok) {
         return '';
@@ -4289,6 +4425,8 @@ QString moderationAuthClipboardScript()
       return clean(body && body.token);
     } catch (_) {
       return '';
+    } finally {
+      clearTimeout(timeout);
     }
   };
   const cookieToken = () => {
@@ -4403,7 +4541,7 @@ QString moderationAuthClipboardScript()
 
   if (!token) {
     alert('Mergerino could not find a Twitch auth token in cookies or browser storage. Make sure you are logged in on twitch.tv, refresh, and try again.');
-    return;
+    throw new Error('Mergerino could not find a Twitch auth token.');
   }
 
   const integrityToken = await fetchIntegrity(token);
@@ -4415,18 +4553,9 @@ QString moderationAuthClipboardScript()
     deviceId,
     clientIntegrity: integrityToken,
   });
-  const done = () => alert(integrityToken ?
-    'Mergerino token copied. Return to Mergerino and click Paste Token.' :
-    'Mergerino token copied, but Twitch did not return an integrity token. Return to Mergerino and click Paste Token.');
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(payload).then(done).catch(() => {
-      prompt('Copy this token into Mergerino', payload);
-    });
-    return;
-  }
-
-  prompt('Copy this token into Mergerino', payload);
-})())MERGERINO_JS");
+  return payload;
+})());
+console.log('Mergerino token copied. Return to Mergerino and click Paste Token.');)MERGERINO_JS");
 }
 
 void saveModerationAccount(const TwitchModerationAuth::Account &account)
@@ -4858,6 +4987,106 @@ QString webGqlNetworkError(const NetworkResult &result)
     }
 
     return message;
+}
+
+void executeTwitchWebGqlDocument(
+    const QString &operationName, const QString &query,
+    const QJsonObject &variables, const QString &oauthClient,
+    const QString &oauthToken,
+    std::function<void(const QJsonValue &)> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    auto success = std::make_shared<std::function<void(const QJsonValue &)>>(
+        std::move(successCallback));
+    auto failure = std::make_shared<std::function<void(const QString &)>>(
+        std::move(failureCallback));
+    auto runRequest =
+        std::make_shared<std::function<void(const QString &, bool)>>();
+    const auto savedAccount = TwitchModerationAuth::savedAccount();
+    const bool usesSavedAccount =
+        stripTwitchOAuthPrefix(savedAccount.oauthToken) ==
+        stripTwitchOAuthPrefix(oauthToken);
+    const auto deviceId =
+        usesSavedAccount && !savedAccount.deviceId.trimmed().isEmpty()
+            ? savedAccount.deviceId.trimmed()
+            : webGqlDeviceId();
+    const auto initialIntegrity =
+        usesSavedAccount ? savedAccount.clientIntegrity.trimmed() : QString();
+
+    auto refreshIntegrityAndRetry = [=](const QString &originalError) {
+        fetchTwitchWebIntegrity(
+            oauthToken, deviceId,
+            [=](const QString &freshIntegrity) {
+                rememberTwitchWebIntegrity(oauthToken, deviceId,
+                                           freshIntegrity);
+                (*runRequest)(freshIntegrity, false);
+            },
+            [=](const QString &refreshError) {
+                QString message =
+                    QStringLiteral("Twitch API Error: ") + originalError;
+                if (!refreshError.isEmpty())
+                {
+                    message += QStringLiteral(" Integrity refresh failed: ") +
+                               refreshError;
+                }
+                *runRequest = {};
+                (*failure)(message);
+            });
+    };
+
+    *runRequest = [=](const QString &integrity, bool allowIntegrityRefresh) {
+        makeTwitchWebGqlDocumentRequest(operationName, query, variables,
+                                        oauthClient, oauthToken, integrity,
+                                        deviceId)
+            .onSuccess([=](const NetworkResult &result) {
+                const auto root = result.parseJsonValue();
+                if (root.isUndefined() || root.isNull())
+                {
+                    *runRequest = {};
+                    (*failure)(QStringLiteral("Failed to parse GQL response"));
+                    return;
+                }
+
+                const auto gqlError = firstWebGqlError(root);
+                if (!gqlError.isEmpty())
+                {
+                    if (allowIntegrityRefresh &&
+                        isTwitchIntegrityError(gqlError))
+                    {
+                        refreshIntegrityAndRetry(gqlError);
+                        return;
+                    }
+
+                    *runRequest = {};
+                    (*failure)(QStringLiteral("Twitch API Error: ") + gqlError);
+                    return;
+                }
+
+                *runRequest = {};
+                (*success)(root);
+            })
+            .onError([=](const NetworkResult &result) {
+                const auto error = webGqlNetworkError(result);
+                if (allowIntegrityRefresh && isTwitchIntegrityError(error))
+                {
+                    refreshIntegrityAndRetry(error);
+                    return;
+                }
+
+                *runRequest = {};
+                (*failure)(error);
+            })
+            .execute();
+    };
+
+    if (!initialIntegrity.isEmpty())
+    {
+        (*runRequest)(initialIntegrity, true);
+    }
+    else
+    {
+        (*runRequest)(QString(), true);
+    }
 }
 
 QString webHelixNetworkError(const NetworkResult &result)
@@ -5581,6 +5810,507 @@ void TwitchWebApi::getChatterGroups(
     (*runRequest)(QString(), true, false);
 }
 
+void TwitchWebApi::getResubNotification(
+    const QString &channelLogin, const QString &oauthClient,
+    const QString &oauthToken,
+    std::function<void(std::optional<TwitchResubNotification>)> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    const auto login = channelLogin.trimmed().toLower();
+    if (login.isEmpty())
+    {
+        failureCallback(QStringLiteral("Missing channel name."));
+        return;
+    }
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch auth token available."));
+        return;
+    }
+
+    QJsonObject variables;
+    variables.insert(QStringLiteral("channelLogin"), login);
+
+    const auto query = QStringLiteral(
+        "query Chat_ShareResub_ChannelData($channelLogin: String!) {"
+        " user(login: $channelLogin) {"
+        "  id"
+        "  self {"
+        "   resubNotification {"
+        "    id cumulativeTenureMonths months streakTenureMonths token"
+        "    isGiftSubscription"
+        "    gifter { id login displayName }"
+        "   }"
+        "  }"
+        " }"
+        "}");
+
+    executeTwitchWebGqlDocument(
+        QStringLiteral("Chat_ShareResub_ChannelData"), query, variables,
+        oauthClient, oauthToken,
+        [successCallback =
+             std::move(successCallback)](const QJsonValue &root) mutable {
+            const auto value = webGqlData(root)
+                                   .value(QStringLiteral("user"))
+                                   .toObject()
+                                   .value(QStringLiteral("self"))
+                                   .toObject()
+                                   .value(QStringLiteral("resubNotification"));
+            if (!value.isObject())
+            {
+                successCallback(std::nullopt);
+                return;
+            }
+
+            const auto object = value.toObject();
+            TwitchResubNotification notification;
+            notification.id = object.value(QStringLiteral("id")).toString();
+            notification.cumulativeTenureMonths =
+                object.value(QStringLiteral("cumulativeTenureMonths")).toInt();
+            notification.months =
+                object.value(QStringLiteral("months")).toInt();
+            notification.streakTenureMonths =
+                object.value(QStringLiteral("streakTenureMonths")).toInt();
+            notification.token =
+                object.value(QStringLiteral("token")).toString();
+            notification.isGiftSubscription =
+                object.value(QStringLiteral("isGiftSubscription")).toBool();
+            notification.gifterDisplayName =
+                object.value(QStringLiteral("gifter"))
+                    .toObject()
+                    .value(QStringLiteral("displayName"))
+                    .toString();
+
+            if (notification.id.isEmpty())
+            {
+                successCallback(std::nullopt);
+                return;
+            }
+            successCallback(std::move(notification));
+        },
+        std::move(failureCallback));
+}
+
+void TwitchWebApi::shareResubNotification(
+    const QString &channelLogin, const QString &tokenID, const QString &message,
+    bool includeStreak, const QString &oauthClient, const QString &oauthToken,
+    std::function<void()> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    const auto login = channelLogin.trimmed().toLower();
+    if (login.isEmpty() || tokenID.trimmed().isEmpty())
+    {
+        failureCallback(QStringLiteral("Missing subscription share details."));
+        return;
+    }
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch auth token available."));
+        return;
+    }
+    if (message.size() > 255)
+    {
+        failureCallback(QStringLiteral(
+            "Subscription message must be 255 characters or less."));
+        return;
+    }
+
+    QJsonObject input;
+    input.insert(QStringLiteral("message"), message);
+    input.insert(QStringLiteral("channelLogin"), login);
+    input.insert(QStringLiteral("includeStreak"), includeStreak);
+    input.insert(QStringLiteral("tokenID"), tokenID);
+    QJsonObject variables;
+    variables.insert(QStringLiteral("input"), input);
+
+    const auto query =
+        QStringLiteral("mutation Chat_ShareResub_UseResubToken("
+                       " $input: UseChatNotificationTokenInput!) {"
+                       " useChatNotificationToken(input: $input) { isSuccess }"
+                       "}");
+
+    executeTwitchWebGqlDocument(
+        QStringLiteral("Chat_ShareResub_UseResubToken"), query, variables,
+        oauthClient, oauthToken,
+        [successCallback = std::move(successCallback),
+         failureCallback](const QJsonValue &root) mutable {
+            const auto success =
+                webGqlData(root)
+                    .value(QStringLiteral("useChatNotificationToken"))
+                    .toObject()
+                    .value(QStringLiteral("isSuccess"))
+                    .toBool();
+            if (!success)
+            {
+                failureCallback(QStringLiteral(
+                    "Twitch did not accept the subscription share."));
+                return;
+            }
+            successCallback();
+        },
+        failureCallback);
+}
+
+void TwitchWebApi::getChannelModerationPermissions(
+    const QString &channelId, const QString &userId,
+    const QString &oauthClient, const QString &oauthToken,
+    std::function<void(const TwitchChannelModerationPermissions &)>
+        successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    if (channelId.trimmed().isEmpty() || userId.trimmed().isEmpty())
+    {
+        failureCallback(
+            QStringLiteral("Missing channel or moderator account ID."));
+        return;
+    }
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        return;
+    }
+
+    const auto query = QStringLiteral(
+        "query MergerinoChannelModerationPermissions("
+        "$channelID: ID!, $userID: ID!) {"
+        " channel(id: $channelID) {"
+        "  id"
+        "  addModerator: hasPermission(userID: $userID,"
+        "   permission: \"moderation.roles.mod:add\")"
+        "  removeModerator: hasPermission(userID: $userID,"
+        "   permission: \"moderation.roles.mod:remove\")"
+        "  addVip: hasPermission(userID: $userID,"
+        "   permission: \"moderation.roles.vip:add\")"
+        "  removeVip: hasPermission(userID: $userID,"
+        "   permission: \"moderation.roles.vip:remove\")"
+        "  deleteModComments: hasPermission(userID: $userID,"
+        "   permission: \"moderation.vmcl.mod_comments:delete\")"
+        " }"
+        "}");
+
+    QJsonObject variables;
+    variables.insert(QStringLiteral("channelID"), channelId);
+    variables.insert(QStringLiteral("userID"), userId);
+
+    executeTwitchWebGqlDocument(
+        QStringLiteral("MergerinoChannelModerationPermissions"), query,
+        variables, oauthClient, oauthToken,
+        [successCallback = std::move(successCallback),
+         failureCallback](const QJsonValue &root) mutable {
+            const auto channel =
+                webGqlData(root).value(QStringLiteral("channel")).toObject();
+            if (channel.isEmpty())
+            {
+                failureCallback(QStringLiteral(
+                    "Twitch did not return channel moderation permissions."));
+                return;
+            }
+
+            TwitchChannelModerationPermissions permissions;
+            permissions.addModerator =
+                channel.value(QStringLiteral("addModerator")).toBool();
+            permissions.removeModerator =
+                channel.value(QStringLiteral("removeModerator")).toBool();
+            permissions.addVip =
+                channel.value(QStringLiteral("addVip")).toBool();
+            permissions.removeVip =
+                channel.value(QStringLiteral("removeVip")).toBool();
+            permissions.deleteModComments =
+                channel.value(QStringLiteral("deleteModComments")).toBool();
+            successCallback(permissions);
+        },
+        failureCallback);
+}
+
+void TwitchWebApi::updateChannelRole(
+    TwitchChannelRoleAction action, const QString &channelId,
+    const QString &targetLogin, const QString &oauthClient,
+    const QString &oauthToken, std::function<void()> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    if (channelId.trimmed().isEmpty() || targetLogin.trimmed().isEmpty())
+    {
+        failureCallback(QStringLiteral("Missing channel or target user."));
+        return;
+    }
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        return;
+    }
+
+    QString operationName;
+    QString inputType;
+    QString mutationField;
+    QString targetKey;
+    switch (action)
+    {
+        case TwitchChannelRoleAction::AddModerator:
+            operationName = QStringLiteral("ModUser");
+            inputType = QStringLiteral("ModUserInput");
+            mutationField = QStringLiteral("modUser");
+            targetKey = QStringLiteral("targetLogin");
+            break;
+        case TwitchChannelRoleAction::RemoveModerator:
+            operationName = QStringLiteral("UnmodUser");
+            inputType = QStringLiteral("UnmodUserInput");
+            mutationField = QStringLiteral("unmodUser");
+            targetKey = QStringLiteral("targetLogin");
+            break;
+        case TwitchChannelRoleAction::AddVip:
+            operationName = QStringLiteral("VIPUser");
+            inputType = QStringLiteral("GrantVIPInput");
+            mutationField = QStringLiteral("grantVIP");
+            targetKey = QStringLiteral("granteeLogin");
+            break;
+        case TwitchChannelRoleAction::RemoveVip:
+            operationName = QStringLiteral("UnVIPUser");
+            inputType = QStringLiteral("RevokeVIPInput");
+            mutationField = QStringLiteral("revokeVIP");
+            targetKey = QStringLiteral("revokeeLogin");
+            break;
+    }
+
+    QJsonObject input;
+    input.insert(QStringLiteral("channelID"), channelId);
+    input.insert(targetKey, targetLogin.trimmed().toLower());
+    QJsonObject variables;
+    variables.insert(QStringLiteral("input"), input);
+
+    const auto query =
+        QStringLiteral("mutation %1($input: %2!) {"
+                       " %3(input: $input) { error { code } }"
+                       "}")
+            .arg(operationName, inputType, mutationField);
+
+    executeTwitchWebGqlDocument(
+        operationName, query, variables, oauthClient, oauthToken,
+        [mutationField, successCallback = std::move(successCallback),
+         failureCallback](const QJsonValue &root) mutable {
+            const auto payload =
+                webGqlData(root).value(mutationField).toObject();
+            if (payload.isEmpty())
+            {
+                failureCallback(
+                    QStringLiteral("Twitch returned an empty role response."));
+                return;
+            }
+
+            const auto error =
+                payload.value(QStringLiteral("error")).toObject();
+            const auto code = error.value(QStringLiteral("code"))
+                                  .toString()
+                                  .trimmed();
+            if (!code.isEmpty())
+            {
+                failureCallback(QStringLiteral("Twitch API Error: ") + code);
+                return;
+            }
+            successCallback();
+        },
+        failureCallback);
+}
+
+void TwitchWebApi::getModComments(
+    const QString &channelId, const QString &targetId,
+    const QString &oauthClient, const QString &oauthToken,
+    std::function<void(const QVector<TwitchModComment> &)> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    if (channelId.trimmed().isEmpty() || targetId.trimmed().isEmpty())
+    {
+        failureCallback(QStringLiteral("Missing channel or target user ID."));
+        return;
+    }
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        return;
+    }
+
+    const auto query = QStringLiteral(
+        "query ViewerCardModLogsComments("
+        "$channelID: ID!, $targetID: ID!, $cursor: Cursor) {"
+        " viewerCardModLogs(channelID: $channelID, targetID: $targetID) {"
+        "  comments(first: 100, after: $cursor) {"
+        "   ... on ModLogsCommentConnection {"
+        "    edges {"
+        "     cursor"
+        "     node {"
+        "      id timestamp text isShareable"
+        "      channel { id login }"
+        "      author { id login displayName }"
+        "     }"
+        "    }"
+        "    pageInfo { hasNextPage }"
+        "   }"
+        "   ... on ModLogsCommentsError { code }"
+        "   __typename"
+        "  }"
+        " }"
+        "}");
+
+    auto comments = std::make_shared<QVector<TwitchModComment>>();
+    auto fetchPage =
+        std::make_shared<std::function<void(const QString &, int)>>();
+    *fetchPage = [=](const QString &cursor, int page) {
+        QJsonObject variables;
+        variables.insert(QStringLiteral("channelID"), channelId);
+        variables.insert(QStringLiteral("targetID"), targetId);
+        if (!cursor.isEmpty())
+        {
+            variables.insert(QStringLiteral("cursor"), cursor);
+        }
+
+        executeTwitchWebGqlDocument(
+            QStringLiteral("ViewerCardModLogsComments"), query, variables,
+            oauthClient, oauthToken,
+            [=](const QJsonValue &root) {
+                const auto commentsPayload =
+                    webGqlData(root)
+                        .value(QStringLiteral("viewerCardModLogs"))
+                        .toObject()
+                        .value(QStringLiteral("comments"))
+                        .toObject();
+                const auto typeName =
+                    commentsPayload.value(QStringLiteral("__typename"))
+                        .toString();
+                if (typeName != QStringLiteral("ModLogsCommentConnection"))
+                {
+                    auto error =
+                        commentsPayload.value(QStringLiteral("code"))
+                            .toString()
+                            .trimmed();
+                    if (error.isEmpty())
+                    {
+                        error = QStringLiteral(
+                            "Twitch did not return moderator comments.");
+                    }
+                    *fetchPage = {};
+                    failureCallback(error);
+                    return;
+                }
+
+                QString nextCursor;
+                const auto edges =
+                    commentsPayload.value(QStringLiteral("edges")).toArray();
+                for (const auto &edgeValue : edges)
+                {
+                    const auto edge = edgeValue.toObject();
+                    nextCursor =
+                        edge.value(QStringLiteral("cursor")).toString();
+                    const auto node =
+                        edge.value(QStringLiteral("node")).toObject();
+                    if (node.isEmpty())
+                    {
+                        continue;
+                    }
+
+                    const auto channel =
+                        node.value(QStringLiteral("channel")).toObject();
+                    const auto author =
+                        node.value(QStringLiteral("author")).toObject();
+                    TwitchModComment comment;
+                    comment.id =
+                        node.value(QStringLiteral("id")).toString();
+                    comment.timestamp =
+                        node.value(QStringLiteral("timestamp")).toString();
+                    comment.text =
+                        node.value(QStringLiteral("text")).toString();
+                    comment.isShareable =
+                        node.value(QStringLiteral("isShareable")).toBool();
+                    comment.channelId =
+                        channel.value(QStringLiteral("id")).toString();
+                    comment.channelLogin =
+                        channel.value(QStringLiteral("login")).toString();
+                    comment.authorId =
+                        author.value(QStringLiteral("id")).toString();
+                    comment.authorLogin =
+                        author.value(QStringLiteral("login")).toString();
+                    comment.authorDisplayName =
+                        author.value(QStringLiteral("displayName")).toString();
+                    if (!comment.id.isEmpty())
+                    {
+                        comments->append(std::move(comment));
+                    }
+                }
+
+                const bool hasNextPage =
+                    commentsPayload.value(QStringLiteral("pageInfo"))
+                        .toObject()
+                        .value(QStringLiteral("hasNextPage"))
+                        .toBool();
+                if (hasNextPage && !nextCursor.isEmpty() && page < 19)
+                {
+                    (*fetchPage)(nextCursor, page + 1);
+                    return;
+                }
+
+                *fetchPage = {};
+                successCallback(*comments);
+            },
+            [=](const QString &error) {
+                *fetchPage = {};
+                failureCallback(error);
+            });
+    };
+
+    (*fetchPage)(QString(), 0);
+}
+
+void TwitchWebApi::deleteModComment(
+    const QString &channelId, const QString &commentId,
+    const QString &oauthClient, const QString &oauthToken,
+    std::function<void()> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    if (channelId.trimmed().isEmpty() || commentId.trimmed().isEmpty())
+    {
+        failureCallback(QStringLiteral("Missing channel or comment ID."));
+        return;
+    }
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        return;
+    }
+
+    QJsonObject input;
+    input.insert(QStringLiteral("ID"), commentId);
+    input.insert(QStringLiteral("channelID"), channelId);
+    QJsonObject variables;
+    variables.insert(QStringLiteral("input"), input);
+
+    const auto query = QStringLiteral(
+        "mutation deleteModeratorComment("
+        "$input: DeleteModeratorCommentInput!) {"
+        " deleteModeratorComment(input: $input) { comment { id } }"
+        "}");
+
+    executeTwitchWebGqlDocument(
+        QStringLiteral("deleteModeratorComment"), query, variables,
+        oauthClient, oauthToken,
+        [commentId, successCallback = std::move(successCallback),
+         failureCallback](const QJsonValue &root) mutable {
+            const auto deletedId =
+                webGqlData(root)
+                    .value(QStringLiteral("deleteModeratorComment"))
+                    .toObject()
+                    .value(QStringLiteral("comment"))
+                    .toObject()
+                    .value(QStringLiteral("id"))
+                    .toString();
+            if (deletedId != commentId)
+            {
+                failureCallback(QStringLiteral(
+                    "Twitch did not confirm the moderator comment deletion."));
+                return;
+            }
+            successCallback();
+        },
+        failureCallback);
+}
+
 void TwitchWebApi::getModeratorLogins(
     const QString &broadcasterId, const QString &oauthClient,
     const QString &oauthToken,
@@ -5743,6 +6473,42 @@ void TwitchWebApi::getPolls(
             }
 
             successCallback(HelixPolls(result.parseJson()));
+        })
+        .onError([failureCallback](const NetworkResult &result) {
+            failureCallback(webHelixNetworkError(result));
+        })
+        .execute();
+}
+
+void TwitchWebApi::endPoll(
+    const QString &channelId, const QString &pollId,
+    const QString &oauthClient, const QString &oauthToken,
+    std::function<void()> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        return;
+    }
+
+    QJsonObject payload;
+    payload.insert(QStringLiteral("broadcaster_id"), channelId);
+    payload.insert(QStringLiteral("id"), pollId);
+    payload.insert(QStringLiteral("status"), QStringLiteral("TERMINATED"));
+
+    makeTwitchWebHelixRequest(QStringLiteral("polls"), {},
+                              NetworkRequestType::Patch, oauthClient,
+                              oauthToken)
+        .json(payload)
+        .onSuccess([successCallback](const NetworkResult &result) {
+            if (result.status() != 200)
+            {
+                qCWarning(chatterinoTwitch)
+                    << "Success result for ending a poll with web auth was"
+                    << result.formatError() << "but we expected it to be 200";
+            }
+            successCallback();
         })
         .onError([failureCallback](const NetworkResult &result) {
             failureCallback(webHelixNetworkError(result));

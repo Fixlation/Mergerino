@@ -8,6 +8,8 @@ set(CHATTERINO_MIN_QT_VERSION 0x060403)
 option(CHATTERINO_DEBUG_NATIVE_MESSAGES "Debug native messages" OFF)
 option(CHATTERINO_STATIC_QT_BUILD "Static link Qt" OFF)
 
+option(MERGERINO_ENABLE_EXTENSION_BRIDGE "Build the unreleased Mergerino browser-extension bridge" OFF)
+
 set(SOURCE_FILES
         Application.cpp
         Application.hpp
@@ -77,10 +79,15 @@ set(SOURCE_FILES
         controllers/accounts/AccountModel.cpp
         controllers/accounts/AccountModel.hpp
 
+        controllers/analytics/UsageAnalytics.cpp
+        controllers/analytics/UsageAnalytics.hpp
+
         controllers/commands/builtin/chatterino/Debugging.cpp
         controllers/commands/builtin/chatterino/Debugging.hpp
         controllers/commands/builtin/Misc.cpp
         controllers/commands/builtin/Misc.hpp
+        controllers/commands/builtin/PinMessage.cpp
+        controllers/commands/builtin/PinMessage.hpp
         controllers/commands/builtin/kick/KickRawEvent.cpp
         controllers/commands/builtin/kick/KickRawEvent.hpp
         controllers/commands/builtin/kick/ModerationActions.cpp
@@ -453,6 +460,10 @@ set(SOURCE_FILES
 
         providers/seventv/SeventvAPI.cpp
         providers/seventv/SeventvAPI.hpp
+        providers/seventv/SeventvAccountManager.cpp
+        providers/seventv/SeventvAccountManager.hpp
+        providers/seventv/SeventvBrowserAuth.cpp
+        providers/seventv/SeventvBrowserAuth.hpp
         providers/seventv/SeventvBadges.cpp
         providers/seventv/SeventvBadges.hpp
         providers/seventv/SeventvCosmetics.hpp
@@ -744,6 +755,10 @@ set(SOURCE_FILES
         widgets/dialogs/CreatePollDialog.hpp
         widgets/dialogs/CreatePredictionDialog.cpp
         widgets/dialogs/CreatePredictionDialog.hpp
+        widgets/dialogs/GiveawayPopup.cpp
+        widgets/dialogs/GiveawayPopup.hpp
+        widgets/dialogs/KickPredictionDialog.cpp
+        widgets/dialogs/KickPredictionDialog.hpp
         widgets/dialogs/ManagePredictionDialog.cpp
         widgets/dialogs/ManagePredictionDialog.hpp
         widgets/dialogs/EditHotkeyDialog.cpp
@@ -792,8 +807,12 @@ set(SOURCE_FILES
         widgets/dialogs/SplitSettingsDialog.hpp
         widgets/dialogs/SettingsDialog.cpp
         widgets/dialogs/SettingsDialog.hpp
+        widgets/dialogs/SeventvAccountDialog.cpp
+        widgets/dialogs/SeventvAccountDialog.hpp
         widgets/dialogs/UpdateDialog.cpp
         widgets/dialogs/UpdateDialog.hpp
+        widgets/dialogs/TwitchModCommentsDialog.cpp
+        widgets/dialogs/TwitchModCommentsDialog.hpp
         widgets/dialogs/UserInfoPopup.cpp
         widgets/dialogs/UserInfoPopup.hpp
         widgets/dialogs/WelcomeDialog.cpp
@@ -910,6 +929,8 @@ set(SOURCE_FILES
         widgets/settingspages/NicknamesPage.hpp
         widgets/settingspages/NotificationPage.cpp
         widgets/settingspages/NotificationPage.hpp
+        widgets/settingspages/ObsPage.cpp
+        widgets/settingspages/ObsPage.hpp
         widgets/settingspages/PluginsPage.cpp
         widgets/settingspages/PluginsPage.hpp
         widgets/settingspages/SettingsPage.cpp
@@ -934,15 +955,26 @@ set(SOURCE_FILES
         widgets/splits/SplitContainer.hpp
         widgets/splits/SplitHeader.cpp
         widgets/splits/SplitHeader.hpp
+        widgets/splits/EmoteBar.cpp
+        widgets/splits/EmoteBar.hpp
         widgets/splits/SplitInput.cpp
         widgets/splits/SplitInput.hpp
         widgets/splits/SplitOverlay.cpp
         widgets/splits/SplitOverlay.hpp
+        widgets/splits/PinnedMessageBar.cpp
+        widgets/splits/PinnedMessageBar.hpp
         widgets/splits/StreamDatabaseBadgeBar.cpp
         widgets/splits/StreamDatabaseBadgeBar.hpp
         widgets/splits/TwitchPollsAndPredictionsBar.cpp
         widgets/splits/TwitchPollsAndPredictionsBar.hpp
         )
+
+if(MERGERINO_ENABLE_EXTENSION_BRIDGE)
+    list(APPEND SOURCE_FILES
+        util/MergerinoExtensionBridge.cpp
+        util/MergerinoExtensionBridge.hpp
+    )
+endif()
 
 # Generate source groups for use in IDEs
 source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${SOURCE_FILES})
@@ -951,6 +983,13 @@ source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${SOURCE_FILES})
 list(APPEND SOURCE_FILES ${RES_AUTOGEN_FILES})
 
 add_library(${LIBRARY_PROJECT} OBJECT ${SOURCE_FILES})
+
+if(MERGERINO_ENABLE_EXTENSION_BRIDGE)
+    target_compile_definitions(${LIBRARY_PROJECT} PRIVATE
+        MERGERINO_ENABLE_EXTENSION_BRIDGE
+    )
+    message(STATUS "Building with the development extension bridge enabled.")
+endif()
 
 if(CHATTERINO_PLUGINS)
     target_compile_definitions(${LIBRARY_PROJECT}

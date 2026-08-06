@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/json/value.hpp>
+#include <QByteArray>
 #include <QString>
 
 #if __has_cpp_attribute(gsl::Pointer)
@@ -113,6 +114,8 @@ public:
     {
         return this->value(key);
     }
+
+    QByteArray toJson() const;
 
 private:
     constexpr BoostJsonObject(const boost::json::object *o)

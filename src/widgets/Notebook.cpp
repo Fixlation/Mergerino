@@ -3392,7 +3392,7 @@ SplitNotebook::SplitNotebook(Window *parent)
 
     this->signalHolder_.managedConnect(
         getApp()->getWindows()->scrollToMessageSignal,
-        [this](const MessagePtr &message) {
+        [this](const MessagePtr &message, bool startReply) {
             for (auto &&item : this->items())
             {
                 if (auto *sc = dynamic_cast<SplitContainer *>(item.page))
@@ -3404,7 +3404,7 @@ SplitNotebook::SplitNotebook(Window *parent)
                             type != Channel::Type::TwitchAutomod)
                         {
                             if (split->getChannelView().scrollToMessage(
-                                    message))
+                                    message, startReply))
                             {
                                 return;
                             }

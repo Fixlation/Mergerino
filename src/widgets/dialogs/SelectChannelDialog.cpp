@@ -701,6 +701,12 @@ SelectChannelDialog::SelectChannelDialog(bool showSpecialPage,
     ui.tiktokSource = new QLineEdit();
     ui.tiktokSource->setPlaceholderText("@username or TikTok live URL");
     platformLayout->addRow("TikTok", ui.tiktokSource);
+    ui.tiktokShowJoinMessages = new QCheckBox("Show users joining");
+    ui.tiktokShowJoinMessages->setChecked(true);
+    const auto tiktokJoinMessagesTooltip = QStringLiteral(
+        "Show a chat message when a viewer joins the TikTok LIVE.");
+    platformLayout->addRow(createCheckboxRow(ui.tiktokShowJoinMessages,
+                                             tiktokJoinMessagesTooltip, this));
 
     ui.indicatorMode = new QComboBox();
     populateIndicatorModeCombo(ui.indicatorMode,
@@ -725,7 +731,8 @@ SelectChannelDialog::SelectChannelDialog(bool showSpecialPage,
 
     ui.slowerChat = new QCheckBox("Slower chat");
     const auto slowerChatTooltip = QStringLiteral(
-        "Queue messages and release them at a fixed rate.");
+        "Queue messages and release them at a fixed rate. (This is not "
+        "slow mode and does not affect viewers.)");
     platformLayout->addRow(
         createCheckboxRow(ui.slowerChat, slowerChatTooltip, this));
 
@@ -877,6 +884,7 @@ void SelectChannelDialog::setMergedDefaults()
     this->ui_.youtubeUrl->clear();
     this->ui_.enableTikTok->setChecked(false);
     this->ui_.tiktokSource->clear();
+    this->ui_.tiktokShowJoinMessages->setChecked(true);
     this->ui_.slowerChat->setChecked(false);
     this->ui_.slowerChatRate->setValue(5.0);
     this->ui_.viewerCount->setChecked(
@@ -917,6 +925,8 @@ void SelectChannelDialog::loadMergedDefaultsFromChannel(
             normalizeTikTokSource(config.tiktokSource).isEmpty()
                 ? config.tiktokSource
                 : normalizeTikTokSource(config.tiktokSource));
+        this->ui_.tiktokShowJoinMessages->setChecked(
+            config.tiktokShowJoinMessages);
     }
     else if (indirectChannel.getType() == Channel::Type::Twitch)
     {
@@ -1155,6 +1165,8 @@ void SelectChannelDialog::syncMergedFieldState()
     this->ui_.kickName->setEnabled(this->ui_.enableKick->isChecked());
     this->ui_.youtubeUrl->setEnabled(this->ui_.enableYouTube->isChecked());
     this->ui_.tiktokSource->setEnabled(this->ui_.enableTikTok->isChecked());
+    this->ui_.tiktokShowJoinMessages->setEnabled(
+        this->ui_.enableTikTok->isChecked());
     this->updateStreamDatabaseBadgeFeedVisibility();
 }
 
@@ -1274,6 +1286,8 @@ bool SelectChannelDialog::buildMergedSelection()
         .youtubeStreamUrl = youtubeChannel,
         .tiktokEnabled = this->ui_.enableTikTok->isChecked(),
         .tiktokSource = tiktokSource,
+        .tiktokShowJoinMessages =
+            this->ui_.tiktokShowJoinMessages->isChecked(),
     };
 
     if (!config.twitchEnabled && !config.kickEnabled && !config.youtubeEnabled &&
@@ -1316,6 +1330,20 @@ bool SelectChannelDialog::buildMergedSelection()
             "Enter the streamer's TikTok @username or live URL before "
             "enabling TikTok.");
         return false;
+    }
+
+    if (auto existing =
+            std::dynamic_pointer_cast<MergedChannel>(this->selectedChannel_.get()))
+    {
+        auto existingConfig = existing->config();
+        existingConfig.tiktokShowJoinMessages =
+            config.tiktokShowJoinMessages;
+        if (existingConfig == config)
+        {
+            existing->setTikTokShowJoinMessages(
+                config.tiktokShowJoinMessages);
+            return true;
+        }
     }
 
     this->selectedChannel_ = IndirectChannel(

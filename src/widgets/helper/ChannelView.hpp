@@ -133,6 +133,7 @@ public:
      * @return <code>true</code> if the message was found and highlighted.
      */
     bool scrollToMessage(const MessagePtr &message);
+    bool scrollToMessage(const MessagePtr &message, bool startReply);
     /**
      * Attempts to scroll to a message id in this channel.
      * @return <code>true</code> if the message was found and highlighted.
@@ -293,6 +294,7 @@ private:
                          std::optional<MessageFlags> overridingFlags);
     void messageAddedAtStart(std::vector<MessagePtr> &messages);
     void messageRemoveFromStart(MessagePtr &message);
+    void messageRemoved(size_t hint, const MessagePtr &message);
     void messageReplaced(size_t hint, const MessagePtr &prev,
                          const MessagePtr &replacement);
     void messagesUpdated();

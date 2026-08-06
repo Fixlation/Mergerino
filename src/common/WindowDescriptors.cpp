@@ -269,6 +269,8 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
     }
     descriptor.activityMessageScale_ =
         root.value("activityMessageScale").toDouble(0.9);
+    descriptor.collapseGiftedSubscriptions_ =
+        root.value("collapseGiftedSubscriptions").toBool(true);
     if (auto activityTimeDisplayMode = root["activityTimeDisplayMode"];
         activityTimeDisplayMode.isString())
     {
@@ -351,6 +353,8 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
             data["youtubeStreamUrl"].toString();
         descriptor.mergedTikTokEnabled = data["tiktokEnabled"].toBool(false);
         descriptor.mergedTikTokSource_ = data["tiktokSource"].toString();
+        descriptor.mergedTikTokShowJoinMessages =
+            data["tiktokShowJoinMessages"].toBool(true);
     }
 }
 

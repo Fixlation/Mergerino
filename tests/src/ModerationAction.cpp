@@ -68,14 +68,14 @@ TEST_F(ModerationActionTest, Parse)
         },
         {
             .action = "/timeout {user.name} 1d",
-            .expectedLine1 = "1",
-            .expectedLine2 = "d",
+            .expectedLine1 = "1d",
+            .expectedLine2 = "",
             .expectedType = ModerationAction::Type::Timeout,
         },
         {
             .action = ".timeout {user.name} 300",
-            .expectedLine1 = "5",
-            .expectedLine2 = "m",
+            .expectedLine1 = "5m",
+            .expectedLine2 = "",
             .expectedType = ModerationAction::Type::Timeout,
         },
         {

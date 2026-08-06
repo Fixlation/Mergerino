@@ -98,6 +98,16 @@ void Scrollbar::replaceHighlight(size_t index, ScrollbarHighlight replacement)
     this->highlights_[index] = std::move(replacement);
 }
 
+void Scrollbar::removeHighlight(size_t index)
+{
+    if (this->highlights_.size() <= index)
+    {
+        return;
+    }
+
+    this->highlights_.erase(this->highlights_.begin() + index);
+}
+
 void Scrollbar::clearHighlights()
 {
     this->highlights_.clear();

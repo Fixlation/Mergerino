@@ -35,7 +35,14 @@ using namespace chatterino::nm::detail;
 using namespace chatterino;
 using namespace chatterino::literals;
 
-const QString NATIVE_MESSAGING_HOST_NAME = u"com.mergerino.mergerino"_s;
+const QString MERGERINO_NATIVE_MESSAGING_HOST_NAME =
+    u"com.mergerino.mergerino"_s;
+const QString CHATTERINO_NATIVE_MESSAGING_HOST_NAME =
+    u"com.chatterino.chatterino"_s;
+const QString CHATTERINO_CHROME_EXTENSION_ID =
+    u"glknmaideaikkmemifbfkhnomoknepka"_s;
+const QString CHATTERINO_FIREFOX_EXTENSION_ID =
+    u"chatterino_native@chatterino.com"_s;
 const QString NATIVE_MESSAGING_QUEUE_BASE = u"mergerino_gui"_s;
 constexpr const size_t MESSAGE_SIZE = 1024;
 
@@ -47,6 +54,7 @@ const char *nativeMessagingQueueName()
 }
 
 struct Config {
+    QString hostName;
 #ifdef Q_OS_WIN
     QString fileName;
     QString registryKey;
@@ -56,7 +64,8 @@ struct Config {
 #endif
 };
 
-const Config FIREFOX{
+const Config MERGERINO_FIREFOX{
+    .hostName = MERGERINO_NATIVE_MESSAGING_HOST_NAME,
 #ifdef Q_OS_WIN
     .fileName = u"native-messaging-manifest-firefox.json"_s,
     .registryKey =
@@ -70,11 +79,42 @@ const Config FIREFOX{
 #endif
 };
 
-const Config CHROME{
+const Config MERGERINO_CHROME{
+    .hostName = MERGERINO_NATIVE_MESSAGING_HOST_NAME,
 #ifdef Q_OS_WIN
     .fileName = u"native-messaging-manifest-chrome.json"_s,
     .registryKey =
         u"HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.mergerino.mergerino"_s,
+#elif defined(Q_OS_MACOS)
+    .browserDirectory = u"~/Library/Application Support/Google/Chrome/"_s,
+    .nmDirectory = u"NativeMessagingHosts"_s,
+#else
+    .browserDirectory = u"~/.config/google-chrome"_s,
+    .nmDirectory = u"NativeMessagingHosts"_s,
+#endif
+};
+
+const Config CHATTERINO_FIREFOX{
+    .hostName = CHATTERINO_NATIVE_MESSAGING_HOST_NAME,
+#ifdef Q_OS_WIN
+    .fileName = u"native-messaging-manifest-chatterino-firefox.json"_s,
+    .registryKey =
+        u"HKCU\\Software\\Mozilla\\NativeMessagingHosts\\com.chatterino.chatterino"_s,
+#elif defined(Q_OS_MACOS)
+    .browserDirectory = u"~/Library/Application Support/Mozilla"_s,
+    .nmDirectory = u"NativeMessagingHosts"_s,
+#else
+    .browserDirectory = u"~/.mozilla"_s,
+    .nmDirectory = u"native-messaging-hosts"_s,
+#endif
+};
+
+const Config CHATTERINO_CHROME{
+    .hostName = CHATTERINO_NATIVE_MESSAGING_HOST_NAME,
+#ifdef Q_OS_WIN
+    .fileName = u"native-messaging-manifest-chatterino-chrome.json"_s,
+    .registryKey =
+        u"HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.chatterino.chatterino"_s,
 #elif defined(Q_OS_MACOS)
     .browserDirectory = u"~/Library/Application Support/Google/Chrome/"_s,
     .nmDirectory = u"NativeMessagingHosts"_s,
@@ -97,7 +137,7 @@ void registerNmManifest([[maybe_unused]] const Paths &paths,
 #else
     std::ignore =
         writeManifestTo(config.browserDirectory, config.nmDirectory,
-                        NATIVE_MESSAGING_HOST_NAME % u".json"_s, document);
+                        config.hostName % u".json"_s, document);
 #endif
 }
 
@@ -150,9 +190,9 @@ void registerNmHost(const Paths &paths)
         return;
     }
 
-    auto getBaseDocument = [] {
+    auto getBaseDocument = [](const QString &hostName) {
         return QJsonObject{
-            {u"name"_s, NATIVE_MESSAGING_HOST_NAME},
+            {u"name"_s, hostName},
             {u"description"_s, "Browser interaction with Mergerino."_L1},
             {u"path"_s, QCoreApplication::applicationFilePath()},
             {u"type"_s, "stdio"_L1},
@@ -176,15 +216,49 @@ void registerNmHost(const Paths &paths)
         }
     }
 
-    if (extensionIDs.isEmpty())
+    if (!extensionIDs.isEmpty())
     {
-        return;
+        // Mergerino-specific extensions use Mergerino's native host name.
+        {
+            auto obj =
+                getBaseDocument(MERGERINO_NATIVE_MESSAGING_HOST_NAME);
+            QJsonArray allowedOriginsArr;
+
+            for (const auto &id : extensionIDs)
+            {
+                allowedOriginsArr.append(
+                    u"chrome-extension://%1/"_s.arg(id));
+            }
+
+            obj.insert("allowed_origins", allowedOriginsArr);
+
+            registerNmManifest(paths, MERGERINO_CHROME, QJsonDocument{obj});
+        }
+
+        {
+            auto obj =
+                getBaseDocument(MERGERINO_NATIVE_MESSAGING_HOST_NAME);
+            QJsonArray allowedExtensions;
+
+            for (const auto &id : extensionIDs)
+            {
+                allowedExtensions.append(id);
+            }
+
+            obj.insert("allowed_extensions", allowedExtensions);
+
+            registerNmManifest(paths, MERGERINO_FIREFOX,
+                               QJsonDocument{obj});
+        }
     }
 
-    // chrome
+    // Existing Watching-compatible extensions use Chatterino's established
+    // native host name. Register that protocol as an alias which still launches
+    // this Mergerino executable and forwards into Mergerino's own IPC queue.
     {
-        auto obj = getBaseDocument();
-        QJsonArray allowedOriginsArr;
+        auto obj = getBaseDocument(CHATTERINO_NATIVE_MESSAGING_HOST_NAME);
+        QJsonArray allowedOriginsArr = {
+            u"chrome-extension://%1/"_s.arg(CHATTERINO_CHROME_EXTENSION_ID)};
 
         for (const auto &id : extensionIDs)
         {
@@ -193,13 +267,12 @@ void registerNmHost(const Paths &paths)
 
         obj.insert("allowed_origins", allowedOriginsArr);
 
-        registerNmManifest(paths, CHROME, QJsonDocument{obj});
+        registerNmManifest(paths, CHATTERINO_CHROME, QJsonDocument{obj});
     }
 
-    // firefox
     {
-        auto obj = getBaseDocument();
-        QJsonArray allowedExtensions;
+        auto obj = getBaseDocument(CHATTERINO_NATIVE_MESSAGING_HOST_NAME);
+        QJsonArray allowedExtensions = {CHATTERINO_FIREFOX_EXTENSION_ID};
 
         for (const auto &id : extensionIDs)
         {
@@ -208,7 +281,7 @@ void registerNmHost(const Paths &paths)
 
         obj.insert("allowed_extensions", allowedExtensions);
 
-        registerNmManifest(paths, FIREFOX, QJsonDocument{obj});
+        registerNmManifest(paths, CHATTERINO_FIREFOX, QJsonDocument{obj});
     }
 }
 

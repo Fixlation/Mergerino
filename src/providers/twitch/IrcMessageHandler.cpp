@@ -620,7 +620,8 @@ void IrcMessageHandler::handleClearMessageMessage(Communi::IrcMessage *message)
 
     QString targetID = tags.value("target-msg-id").toString();
 
-    auto msg = chan->findMessageByID(targetID);
+    auto msg = chan->disableMessage(targetID,
+                                    MessageFlag::InvalidReplyTarget);
     if (msg == nullptr)
     {
         return;
@@ -629,8 +630,6 @@ void IrcMessageHandler::handleClearMessageMessage(Communi::IrcMessage *message)
     const auto deletionNoticeId =
         MessageBuilder::makeDeletionNoticeMessageId(targetID);
 
-    msg->flags.set(MessageFlag::Disabled);
-    msg->flags.set(MessageFlag::InvalidReplyTarget);
     if (!getSettings()->hideDeletionActions &&
         chan->findMessageByID(deletionNoticeId) == nullptr)
     {
@@ -643,6 +642,10 @@ void IrcMessageHandler::handleClearMessageMessage(Communi::IrcMessage *message)
         // XXX: This is expensive. We could use a layout request if the layout
         //      would store the previous message flags.
         getApp()->getWindows()->forceLayoutChannelViews();
+    }
+    else
+    {
+        getApp()->getWindows()->repaintVisibleChatWidgets();
     }
 }
 

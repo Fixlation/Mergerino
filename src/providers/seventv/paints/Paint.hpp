@@ -5,6 +5,7 @@
 #include <QBrush>
 #include <QFont>
 #include <QMarginsF>
+#include <QString>
 
 #include <vector>
 

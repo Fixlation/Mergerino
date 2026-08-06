@@ -11,6 +11,7 @@
 #include <pajlada/signals/signal.hpp>
 #include <QList>
 #include <QPixmap>
+#include <QSize>
 #include <QString>
 #include <QThread>
 #include <QTimer>
@@ -95,6 +96,8 @@ public:
     static ImagePtr getEmpty();
 
     static ImagePtr fromAutoscaledUrl(const Url &url, uint16_t autoScale);
+    static ImagePtr fromAutoscaledUrl(const Url &url, QSize autoScaleBounds,
+                                      QSize expectedSize);
 
     const Url &url() const;
     bool loaded() const;
@@ -131,14 +134,15 @@ private:
 
     bool shouldLoad_{false};
 
-    /// Size this image should take when loaded (in both dimensions).
+    /// Bounds this image should fit within when loaded.
     ///
     /// This is used for images that have an unknown scale when they're created
     /// (i.e. the scale is only known after the image is loaded).
     ///
-    /// Upon creation, only `expectedSize_` is set to `(autoScale, autoScale)`.
-    /// When the image is loaded, `scale_` is set to `autoScale / actualSize`.
-    std::optional<uint16_t> autoScale_;
+    /// Upon creation, `expectedSize_` is used until the image is loaded.
+    /// Once loaded, `scale_` is chosen so the image fits these bounds while
+    /// preserving its aspect ratio.
+    std::optional<QSize> autoScaleBounds_;
 
     mutable std::chrono::time_point<std::chrono::steady_clock> lastUsed_;
 

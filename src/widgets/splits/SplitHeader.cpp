@@ -45,6 +45,7 @@
 #include <QCursor>
 #include <QDesktopServices>
 #include <QEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -86,6 +87,27 @@ constexpr const int TITLE_LABEL_RIGHT_PADDING =
     TITLE_SETTINGS_BUTTON_WIDTH + TITLE_SETTINGS_BUTTON_GAP;
 constexpr const int QUEUED_SLOW_CHAT_COUNT_DIGITS = 4;
 constexpr auto STREAMDATABASE_LOGIN = "streamdatabase";
+
+class PersistentCheckMenu final : public QMenu
+{
+public:
+    using QMenu::QMenu;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        auto *action = this->activeAction();
+        if (action != nullptr && action->isEnabled() &&
+            action->isCheckable())
+        {
+            action->setChecked(!action->isChecked());
+            event->accept();
+            return;
+        }
+
+        QMenu::mouseReleaseEvent(event);
+    }
+};
 
 // 5 minutes
 constexpr const qint64 THUMBNAIL_MAX_AGE_MS = 5LL * 60 * 1000;
@@ -786,6 +808,7 @@ protected:
 
         QPainter painter(this);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.translate(0.0, -0.5 * this->scale());
         painter.drawPixmap(this->rect(), iconLayer, {{}, iconLayer.size()});
     }
 
@@ -816,20 +839,53 @@ private:
     }
 };
 
+void splitHeaderTrace(const QString &message)
+{
+    QFile file(QStringLiteral("mergerino-layout-trace.txt"));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    {
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream << message << '\n';
+}
+
+Split *traceSplitHeaderSplit(Split *split)
+{
+    splitHeaderTrace(QStringLiteral("SplitHeader after BaseWidget"));
+    return split;
+}
+
+TooltipWidget *createSplitHeaderTooltip(SplitHeader *header)
+{
+    splitHeaderTrace(QStringLiteral("SplitHeader before TooltipWidget"));
+    auto *tooltip = new TooltipWidget(header);
+    splitHeaderTrace(QStringLiteral("SplitHeader after TooltipWidget"));
+    return tooltip;
+}
+
 }  // namespace
 
 namespace chatterino {
 
 SplitHeader::SplitHeader(Split *split)
     : BaseWidget(split)
-    , split_(split)
-    , tooltipWidget_(new TooltipWidget(this))
+    , split_(traceSplitHeaderSplit(split))
+    , tooltipWidget_(createSplitHeaderTooltip(this))
 {
+    splitHeaderTrace(QStringLiteral("SplitHeader constructor body start"));
+    splitHeaderTrace(QStringLiteral("SplitHeader before initializeLayout"));
     this->initializeLayout();
+    splitHeaderTrace(QStringLiteral("SplitHeader after initializeLayout"));
 
     this->setMouseTracking(true);
+    splitHeaderTrace(QStringLiteral("SplitHeader before updateChannelText"));
     this->updateChannelText();
+    splitHeaderTrace(QStringLiteral("SplitHeader after updateChannelText"));
+    splitHeaderTrace(QStringLiteral("SplitHeader before handleChannelChanged"));
     this->handleChannelChanged();
+    splitHeaderTrace(QStringLiteral("SplitHeader after handleChannelChanged"));
 
     // The lifetime of these signals are tied to the lifetime of the Split.
     // Since the SplitHeader is owned by the Split, they will always be destroyed
@@ -1433,6 +1489,20 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
     {
         menu->addAction("Settings", this->split_, &Split::changeChannel);
     }
+    menu->addAction(
+        "Filters",
+        h->getDisplaySequence(HotkeyCategory::Split, "pickFilters"),
+        this->split_, &Split::setFiltersDialog);
+    auto *unhidePinnedMessageAction =
+        menu->addAction("Unhide pinned message", this->split_,
+                        &Split::unhidePinnedMessages);
+    unhidePinnedMessageAction->setVisible(false);
+    QObject::connect(
+        menu.get(), &QMenu::aboutToShow, this,
+        [this, unhidePinnedMessageAction] {
+            unhidePinnedMessageAction->setVisible(
+                this->split_->hasHiddenPinnedMessage());
+        });
     if (!this->split_->titleSettingsButtonVisible())
     {
         menu->addAction("Show settings cog", this, [this] {
@@ -1440,6 +1510,31 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
             this->setTitleSettingsButtonVisible(
                 this->isTitleSettingsButtonHoverArea());
         });
+    }
+    if (!this->split_->isActivityPane())
+    {
+        auto *chatboxButtonsMenu = new PersistentCheckMenu(menu.get());
+        chatboxButtonsMenu->setTitle(QStringLiteral("Chatbox buttons"));
+        menu->addMenu(chatboxButtonsMenu);
+        auto addVisibilityAction =
+            [this, chatboxButtonsMenu](const QString &label,
+                                       BoolSetting &setting) {
+                auto *action = chatboxButtonsMenu->addAction(label);
+                action->setCheckable(true);
+                action->setChecked(setting.getValue());
+                QObject::connect(action, &QAction::toggled, this,
+                                 [&setting](bool checked) {
+                                     setting.setValue(checked);
+                                 });
+            };
+        addVisibilityAction(QStringLiteral("7TV"),
+                            showSeventvChatButtonSetting());
+        addVisibilityAction(QStringLiteral("Predictions"),
+                            showPredictionChatButtonSetting());
+        addVisibilityAction(QStringLiteral("Polls"),
+                            showPollChatButtonSetting());
+        addVisibilityAction(QStringLiteral("Giveaway"),
+                            showGiveawayChatButtonSetting());
     }
     if (!this->split_->isActivityPane())
     {
@@ -1906,6 +2001,10 @@ void SplitHeader::positionTitleSettingsButton()
     const int minX = labelRect.x() + leftPadding;
     const int maxX = std::max(minX, labelRect.right() - buttonWidth + 1);
     int x = textLeft + visibleTextWidth + gap;
+    if (this->split_->isActivityPane())
+    {
+        x += static_cast<int>(std::round(9 * this->scale()));
+    }
     x = std::clamp(x, minX, maxX);
     const int y = labelRect.y() +
                   (labelRect.height() - this->titleSettingsButton_->height()) /
@@ -2071,6 +2170,12 @@ void SplitHeader::updateChannelText()
 {
     auto indirectChannel = this->split_->getIndirectChannel();
     auto channel = this->split_->getChannel();
+    this->titleLabel_->setPadding(
+        this->split_->isActivityPane()
+            ? QMargins(TITLE_LABEL_LEFT_PADDING + 22, -1,
+                       TITLE_LABEL_RIGHT_PADDING, 1)
+            : QMargins(TITLE_LABEL_LEFT_PADDING, -1,
+                       TITLE_LABEL_RIGHT_PADDING, 1));
     this->isLive_ = false;
     this->tooltipText_ = QString();
     this->viewerCountTooltipText_ = QString();

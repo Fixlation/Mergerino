@@ -26,6 +26,7 @@ class SplitHeader;
 class SplitInput;
 class StreamDatabaseBadgeBar;
 class TwitchPollsAndPredictionsBar;
+class PinnedMessageBar;
 class SplitContainer;
 class SplitOverlay;
 class SelectChannelDialog;
@@ -67,6 +68,7 @@ public:
     bool hasLinkedActivityPane();
     QString activityPaneTitle() const;
     qreal activityMessageScale() const;
+    bool collapseGiftedSubscriptions() const;
     ActivityTimeDisplayMode activityTimeDisplayMode() const;
     bool slowerChatEnabled() const;
     qreal slowerChatMessagesPerSecond() const;
@@ -93,7 +95,10 @@ public:
     void setModerationMode(bool value);
     bool getModerationMode() const;
     void setInputEnabled(bool enabled);
+    bool hasHiddenPinnedMessage() const;
+    void unhidePinnedMessages();
     void setActivityMessageScale(qreal value);
+    void setCollapseGiftedSubscriptions(bool value);
     void setActivityTimeDisplayMode(ActivityTimeDisplayMode value);
     void setSlowerChatEnabled(bool value);
     void setSlowerChatMessagesPerSecond(qreal value);
@@ -172,6 +177,8 @@ protected:
 private:
     void channelNameUpdated(const QString &newChannelName);
     void handleModifiers(Qt::KeyboardModifiers modifiers);
+    void updateYouTubeDiscoveryForeground(bool foreground);
+    void refreshYouTubeDiscoveryForeground();
     void updateInputVisibility();
     void updateInputPlaceholder();
     void addShortcuts() override;
@@ -209,6 +216,7 @@ private:
     bool filterActivity_{false};
     bool filterActivityExplicit_{false};
     qreal activityMessageScale_{0.9};
+    bool collapseGiftedSubscriptions_{true};
     ActivityTimeDisplayMode activityTimeDisplayMode_;
     bool slowerChatEnabled_{false};
     qreal slowerChatMessagesPerSecond_{5.0};
@@ -229,6 +237,7 @@ private:
     SplitHeader *const header_;
     StreamDatabaseBadgeBar *streamDatabaseBadgeBar_{};
     TwitchPollsAndPredictionsBar *const twitchPollsAndPredictionsBar_;
+    PinnedMessageBar *const pinnedMessageBar_;
     ChannelView *const view_;
     SplitInput *const input_;
     SplitOverlay *const overlay_;

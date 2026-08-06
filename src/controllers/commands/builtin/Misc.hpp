@@ -26,6 +26,7 @@ QString streamlink(const CommandContext &ctx);
 QString popout(const CommandContext &ctx);
 QString popup(const CommandContext &ctx);
 QString clearmessages(const CommandContext &ctx);
+QString giveaway(const CommandContext &ctx);
 QString openURL(const CommandContext &ctx);
 QString sendRawMessage(const CommandContext &ctx);
 QString injectFakeMessage(const CommandContext &ctx);

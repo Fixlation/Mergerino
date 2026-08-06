@@ -26,6 +26,8 @@ class GenericListView;
 class InputCompletionPopup : public BasePopup
 {
     using ActionCallback = std::function<void(const QString &)>;
+    using PlatformActionCallback =
+        std::function<void(const QString &, MessagePlatform)>;
 
     constexpr static size_t MAX_ENTRY_COUNT = 200;
 
@@ -37,6 +39,7 @@ public:
                           std::vector<MessagePlatform> platformFilter = {});
 
     void setInputAction(ActionCallback callback);
+    void setPlatformInputAction(PlatformActionCallback callback);
 
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -60,6 +63,7 @@ private:
 
     CompletionModel model_;
     ActionCallback callback_;
+    PlatformActionCallback platformCallback_;
     QTimer redrawTimer_;
 
     std::optional<CompletionKind> currentKind_{};

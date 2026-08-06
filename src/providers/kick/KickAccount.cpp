@@ -2,6 +2,8 @@
 
 #include "Application.hpp"
 #include "common/ChatterinoSetting.hpp"
+#include "common/Credentials.hpp"
+#include "common/Modes.hpp"
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
@@ -146,6 +148,56 @@ bool KickAccount::update(const KickAccountData &data)
 QString KickAccount::toString() const
 {
     return this->username_;
+}
+
+QString KickAccount::chatIdentityCredentialName() const
+{
+    return QStringLiteral("chat-identity-session:%1").arg(this->userID_);
+}
+
+void KickAccount::setChatIdentityToken(const QString &token, bool persist)
+{
+    const auto normalized = token.trimmed();
+    if (this->chatIdentityToken_ == normalized)
+    {
+        return;
+    }
+
+    this->chatIdentityToken_ = normalized;
+    if (persist && !Modes::instance().isPortable && !this->isAnonymous())
+    {
+        auto &credentials = Credentials::instance();
+        if (normalized.isEmpty())
+        {
+            credentials.erase(QStringLiteral("kick"),
+                              this->chatIdentityCredentialName());
+        }
+        else
+        {
+            credentials.set(QStringLiteral("kick"),
+                            this->chatIdentityCredentialName(), normalized);
+        }
+    }
+    this->chatIdentityAuthUpdated.invoke();
+}
+
+void KickAccount::loadChatIdentityToken(QObject *receiver)
+{
+    if (this->isAnonymous() || receiver == nullptr ||
+        Modes::instance().isPortable)
+    {
+        return;
+    }
+
+    auto weak = this->weak_from_this();
+    Credentials::instance().get(
+        QStringLiteral("kick"), this->chatIdentityCredentialName(), receiver,
+        [weak](const QString &token) {
+            if (auto self = weak.lock())
+            {
+                self->setChatIdentityToken(token, false);
+            }
+        });
 }
 
 void KickAccount::refreshIfNeeded()

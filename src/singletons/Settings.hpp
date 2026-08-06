@@ -102,6 +102,29 @@ enum class EmoteTooltipScale : std::uint8_t {
     Huge,
 };
 
+enum class EmoteBarMode : std::uint8_t {
+    Disabled,
+    Recent,
+    MostUsed,
+    Combined,
+};
+
+enum class EmoteBarScope : std::uint8_t {
+    SevenTV,
+    All,
+};
+
+enum class LinkPreviewMode : std::uint8_t {
+    Disabled,
+    MediaOnly,
+    All,
+};
+
+enum class SeventvAddEmoteTargetScope : std::uint8_t {
+    OpenTabs,
+    AllEditableChannels,
+};
+
 constexpr std::optional<std::string_view> qmagicenumDisplayName(
     EmoteTooltipScale value) noexcept
 {
@@ -114,6 +137,60 @@ constexpr std::optional<std::string_view> qmagicenumDisplayName(
         case EmoteTooltipScale::Large:
         case EmoteTooltipScale::Huge:
             return {};
+    }
+}
+
+constexpr std::optional<std::string_view> qmagicenumDisplayName(
+    EmoteBarMode value) noexcept
+{
+    switch (value)
+    {
+        case EmoteBarMode::Disabled:
+            return "Disabled";
+        case EmoteBarMode::Recent:
+            return "Most recent";
+        case EmoteBarMode::MostUsed:
+            return "Most used";
+        case EmoteBarMode::Combined:
+            return "Combined";
+    }
+}
+
+constexpr std::optional<std::string_view> qmagicenumDisplayName(
+    EmoteBarScope value) noexcept
+{
+    switch (value)
+    {
+        case EmoteBarScope::SevenTV:
+            return "7TV only";
+        case EmoteBarScope::All:
+            return "All available emotes";
+    }
+}
+
+constexpr std::optional<std::string_view> qmagicenumDisplayName(
+    LinkPreviewMode value) noexcept
+{
+    switch (value)
+    {
+        case LinkPreviewMode::Disabled:
+            return "Disabled";
+        case LinkPreviewMode::MediaOnly:
+            return "Media links only";
+        case LinkPreviewMode::All:
+            return "All links";
+    }
+}
+
+constexpr std::optional<std::string_view> qmagicenumDisplayName(
+    SeventvAddEmoteTargetScope value) noexcept
+{
+    switch (value)
+    {
+        case SeventvAddEmoteTargetScope::OpenTabs:
+            return "Open Mergerino tabs only";
+        case SeventvAddEmoteTargetScope::AllEditableChannels:
+            return "All editable 7TV channels";
     }
 }
 
@@ -260,7 +337,7 @@ public:
     BoolSetting showMessageLength = {"/appearance/messages/showMessageLength",
                                      false};
     BoolSetting showSendWaitTimer = {"/appearance/messages/showSendWaitTimer",
-                                     false};
+                                     true};
     EnumSetting<MessageOverflow> messageOverflow = {
         "/appearance/messages/messageOverflow", MessageOverflow::Highlight};
     BoolSetting separateMessages = {"/appearance/messages/separateMessages",
@@ -1028,6 +1105,85 @@ public:
         true,
     };
 
+    // 7TV account management. Keep these fields at the end so surgical builds
+    // do not change the offsets of long-standing Settings members.
+    QStringSetting sevenTVAccountToken = {"/accounts/seventv/token", ""};
+    QStringSetting sevenTVAccountUserID = {"/accounts/seventv/userId", ""};
+    QStringSetting sevenTVAccountUsername = {"/accounts/seventv/username", ""};
+    QStringSetting sevenTVAccountDisplayName = {
+        "/accounts/seventv/displayName", ""};
+    QStringSetting sevenTVAccountEmoteSetID = {
+        "/accounts/seventv/emoteSetId", ""};
+    QStringSetting sevenTVDefaultPaintID = {
+        "/accounts/seventv/defaultPaintId", ""};
+    QStringSetting sevenTVDefaultBadgeID = {
+        "/accounts/seventv/defaultBadgeId", ""};
+    QStringSetting sevenTVChannelCosmeticsJson = {
+        "/accounts/seventv/channelCosmetics", "[]"};
+    UInt64Setting sevenTVAccountUpdatedAt = {
+        "/accounts/seventv/updatedAt", 0};
+
+    // OBS chat overlay. These settings are served only over the loopback OBS
+    // browser-source endpoint while Mergerino is running.
+    BoolSetting obsOverlayEnabled = {"/obs/overlay/enabled", true};
+    QStringSetting obsOverlayTabName = {"/obs/overlay/tabName", ""};
+
+    QStringSetting obsOverlayFontFamily = {
+        "/obs/overlay/fontFamily", DEFAULT_FONT_FAMILY};
+    IntSetting obsOverlayFontSize = {"/obs/overlay/fontSize", 28};
+    IntSetting obsOverlayFontWeight = {"/obs/overlay/fontWeight", 600};
+    QStringSetting obsOverlayTextColor = {
+        "/obs/overlay/textColor", "#FFFFFFFF"};
+    QStringSetting obsOverlayBackgroundColor = {
+        "/obs/overlay/backgroundColor", "#FF111111"};
+    IntSetting obsOverlayBackgroundOpacity = {
+        "/obs/overlay/backgroundOpacity", 0};
+    QStringSetting obsOverlayShadowColor = {
+        "/obs/overlay/shadowColor", "#FF000000"};
+    IntSetting obsOverlayShadowOpacity = {
+        "/obs/overlay/shadowOpacity", 210};
+    IntSetting obsOverlayShadowBlur = {"/obs/overlay/shadowBlur", 4};
+    IntSetting obsOverlayMessageSpacing = {
+        "/obs/overlay/messageSpacing", 4};
+    IntSetting obsOverlayBorderRadius = {
+        "/obs/overlay/borderRadius", 8};
+    IntSetting obsOverlayEmoteSize = {"/obs/overlay/emoteSize", 34};
+
+    IntSetting obsOverlayMaxMessages = {"/obs/overlay/maxMessages", 8};
+    IntSetting obsOverlayMessageLifetime = {
+        "/obs/overlay/messageLifetime", 20};
+    IntSetting obsOverlayFadeDuration = {
+        "/obs/overlay/fadeDuration", 500};
+    BoolSetting obsOverlayNewestAtBottom = {
+        "/obs/overlay/newestAtBottom", true};
+    BoolSetting obsOverlayUseUsernameColors = {
+        "/obs/overlay/useUsernameColors", true};
+    BoolSetting obsOverlayShowTimestamps = {
+        "/obs/overlay/showTimestamps", false};
+    // Retained in its original layout position for binary compatibility with
+    // incremental builds. The overlay now uses obsOverlayPlatformStyle below.
+    BoolSetting obsOverlayShowPlatformIcons = {
+        "/obs/overlay/showPlatformIcons", true};
+    BoolSetting obsOverlayShowBadges = {"/obs/overlay/showBadges", true};
+    BoolSetting obsOverlayShowSevenTVEmotes = {
+        "/obs/overlay/showSevenTVEmotes", true};
+    BoolSetting obsOverlayShowSevenTVBadges = {
+        "/obs/overlay/showSevenTVBadges", true};
+    BoolSetting obsOverlayShowSevenTVPaints = {
+        "/obs/overlay/showSevenTVPaints", true};
+    BoolSetting obsOverlayShowHighlights = {
+        "/obs/overlay/showHighlights", false};
+    BoolSetting obsOverlayShowSystemMessages = {
+        "/obs/overlay/showSystemMessages", false};
+    BoolSetting obsOverlayShowModerationMessages = {
+        "/obs/overlay/showModerationMessages", false};
+    BoolSetting spoofTwitchChat = {"/misc/spoofTwitchChat", false};
+    QStringSetting obsOverlayPlatformStyle = {
+        "/obs/overlay/platformStyle", "logos"};
+    BoolSetting shareAnonymousUsageAnalytics = {
+        "/privacy/shareAnonymousUsageAnalytics", true};
+    QStringSetting anonymousAnalyticsInstallationID = {
+        "/privacy/anonymousAnalyticsInstallationID", ""};
 private:
     void updateModerationActions();
 
@@ -1038,6 +1194,23 @@ private:
 
 Settings *getSettings();
 EnumStringSetting<SplitHeaderViewerCountMode> &headerViewerCountModeSetting();
+EnumStringSetting<PlatformEventHighlightStyle> &
+    platformAlertHighlightStyleSetting();
+QStringSetting &platformAlertHighlightCustomColorSetting();
+EnumStringSetting<EmoteBarMode> &emoteBarModeSetting();
+EnumStringSetting<EmoteBarScope> &emoteBarScopeSetting();
+IntSetting &emoteBarMaxEmotesSetting();
+QStringSetting &emoteBarHistoryJsonSetting();
+BoolSetting &emoteBarIntroductionDismissedSetting();
+BoolSetting &disablePinnedMessagesSetting();
+BoolSetting &showSeventvChatButtonSetting();
+BoolSetting &showPredictionChatButtonSetting();
+BoolSetting &showPollChatButtonSetting();
+BoolSetting &showGiveawayChatButtonSetting();
+BoolSetting &obsOverlayMessageAnimationsSetting();
+EnumStringSetting<LinkPreviewMode> &linkPreviewModeSetting();
+EnumStringSetting<SeventvAddEmoteTargetScope> &
+    seventvAddEmoteTargetScopeSetting();
 
 }  // namespace chatterino
 

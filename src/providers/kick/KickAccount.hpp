@@ -72,6 +72,14 @@ public:
         return this->refreshToken_;
     }
 
+    QString chatIdentityToken() const
+    {
+        return this->chatIdentityToken_;
+    }
+    QString chatIdentityCredentialName() const;
+    void setChatIdentityToken(const QString &token, bool persist = true);
+    void loadChatIdentityToken(QObject *receiver);
+
     QString seventvUserID() const
     {
         return this->seventvUserID_;
@@ -81,6 +89,7 @@ public:
     void loadSeventvUser();
 
     pajlada::Signals::NoArgSignal authUpdated;
+    pajlada::Signals::NoArgSignal chatIdentityAuthUpdated;
 
 private:
     enum class CheckResult : uint8_t {
@@ -106,6 +115,7 @@ private:
     QString clientSecret_;
     QString authToken_;
     QString refreshToken_;
+    QString chatIdentityToken_;
     QDateTime expiresAt_;
 
     QString seventvUserID_;

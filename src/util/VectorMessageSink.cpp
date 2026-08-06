@@ -75,6 +75,11 @@ void VectorMessageSink::disableAllMessages()
 
 void VectorMessageSink::applySimilarityFilters(const MessagePtr &message) const
 {
+    if (this->additionalFlags.has(MessageFlag::RecentMessage))
+    {
+        return;
+    }
+
     if (!getSettings()->similarityEnabled)
     {
         return;

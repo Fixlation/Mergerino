@@ -6,8 +6,11 @@
 
 #include <QString>
 
+#include <pajlada/signals/scoped-connection.hpp>
+
 #include <cassert>
 #include <memory>
+#include <vector>
 
 namespace chatterino {
 
@@ -67,6 +70,9 @@ class IController;
 class SpellChecker;
 
 class KickChatServer;
+#ifdef MERGERINO_ENABLE_EXTENSION_BRIDGE
+class MergerinoExtensionBridge;
+#endif
 class ObsBrowserDockServer;
 
 class IApplication
@@ -197,6 +203,9 @@ private:
     std::unique_ptr<ITwitchUsers> twitchUsers;
     std::unique_ptr<SpellChecker> spellChecker;
     std::unique_ptr<KickChatServer> kickChatServer;
+#ifdef MERGERINO_ENABLE_EXTENSION_BRIDGE
+    std::unique_ptr<MergerinoExtensionBridge> mergerinoExtensionBridge;
+#endif
     std::unique_ptr<ObsBrowserDockServer> obsBrowserDockServer;
 #ifdef CHATTERINO_HAVE_PLUGINS
     std::unique_ptr<PluginController> plugins;
@@ -262,6 +271,8 @@ private:
     std::unique_ptr<NativeMessagingServer> nmServer;
     Updates &updates;
     QString previousVersionForPatchNotes_;
+    std::vector<std::unique_ptr<pajlada::Signals::ScopedConnection>>
+        settingConnections_;
 
     bool initialized{false};
 };

@@ -41,6 +41,8 @@ public:
 
     void setActivityMessageScale(qreal scale);
     qreal activityMessageScale() const;
+    void setCollapseGiftedSubscriptions(bool enabled);
+    bool collapseGiftedSubscriptions() const;
     void setActivityTimeDisplayMode(ActivityTimeDisplayMode mode);
     ActivityTimeDisplayMode activityTimeDisplayMode() const;
     void setSlowerChatEnabled(bool enabled);
@@ -51,12 +53,8 @@ public:
     bool viewerCountEnabled() const;
     void setStreamDatabaseBadgeFeedVisible(bool visible);
     bool streamDatabaseBadgeFeedVisible() const;
-    void setTwitchActivityMinimumBits(uint32_t value);
-    uint32_t twitchActivityMinimumBits() const;
-    void setKickActivityMinimumKicks(uint32_t value);
-    uint32_t kickActivityMinimumKicks() const;
-    void setTikTokActivityMinimumDiamonds(uint32_t value);
-    uint32_t tiktokActivityMinimumDiamonds() const;
+    void setActivityMinimum(uint32_t value);
+    uint32_t activityMinimum() const;
 
     bool hasAcceptedChanges() const;
 
@@ -72,14 +70,13 @@ private:
         QComboBox *indicatorMode{};
         QCheckBox *filterActivity{};
         QComboBox *activityScale{};
+        QCheckBox *collapseGiftedSubscriptions{};
         QComboBox *activityTimeDisplayMode{};
         QCheckBox *slowerChat{};
         QDoubleSpinBox *slowerChatRate{};
         QCheckBox *viewerCount{};
         QCheckBox *streamDatabaseBadgeFeed{};
-        QSpinBox *twitchBitsMinimum{};
-        QSpinBox *kickKicksMinimum{};
-        QSpinBox *tiktokGiftMinimum{};
+        QSpinBox *activityMinimum{};
         QWidget *slowerChatRateLabel{};
         QWidget *slowerChatRateField{};
         QVariantAnimation *slowerChatRateAnimation{};

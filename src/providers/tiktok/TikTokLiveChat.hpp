@@ -17,11 +17,12 @@ namespace chatterino {
 class TikTokLiveChat
 {
 public:
-    explicit TikTokLiveChat(QString source);
+    explicit TikTokLiveChat(QString source, bool showJoinMessages = true);
     ~TikTokLiveChat();
 
     void start();
     void stop();
+    void setShowJoinMessages(bool enabled);
 
     bool isLive() const;
     const QString &roomId() const;
@@ -30,6 +31,8 @@ public:
     const QString &resolvedSource() const;
 
     static QString normalizeSource(const QString &source);
+    static QString cachedAvatarUrl(const QString &userName,
+                                   const QString &userID = {});
 
     pajlada::Signals::Signal<QString> sourceResolved;
     pajlada::Signals::Signal<MessagePtr> messageReceived;
@@ -75,6 +78,7 @@ private:
     bool live_{false};
     bool failureReported_{false};
     bool browserSnapshotReceived_{false};
+    bool showJoinMessages_{true};
 
     std::shared_ptr<bool> lifetimeGuard_;
     std::unique_ptr<BrowserSession> browser_;

@@ -9,6 +9,7 @@
 #include "common/Modes.hpp"
 #include "common/network/NetworkManager.hpp"
 #include "common/QLogging.hpp"
+#include "controllers/analytics/UsageAnalytics.hpp"
 #include "singletons/CrashHandler.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Resources.hpp"
@@ -293,6 +294,10 @@ void runGui(QApplication &a, const Paths &paths, Settings &settings,
 
     Application app(settings, paths, args, updates);
     app.initialize(settings, paths);
+
+    UsageAnalytics usageAnalytics(settings);
+    usageAnalytics.start();
+
     app.run();
 
     chatterino::NetworkManager::deinit();

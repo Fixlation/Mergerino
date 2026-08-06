@@ -25,12 +25,14 @@
 #include "widgets/Window.hpp"
 
 #include <QApplication>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMimeData>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStringList>
+#include <QTextStream>
 
 #include <algorithm>
 #include <optional>
@@ -145,6 +147,18 @@ void restoreSendPlatformSelection(Split *split,
     selection.customPlatforms = splitNode.customSelectedSendPlatforms_;
     selection.enabledPlatforms = splitNode.enabledSendPlatforms_;
     split->getInput().restoreSendPlatformSelection(selection);
+}
+
+void splitRestoreTrace(const QString &message)
+{
+    QFile file(QStringLiteral("mergerino-layout-trace.txt"));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    {
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream << message << '\n';
 }
 
 }  // namespace
@@ -279,6 +293,8 @@ Split *SplitContainer::cloneSplit(Split *source, const QList<QUuid> &filters,
     clone->setFilterActivity(source->filterActivity(),
                              source->filterActivityExplicit());
     clone->setActivityMessageScale(source->activityMessageScale());
+    clone->setCollapseGiftedSubscriptions(
+        source->collapseGiftedSubscriptions());
     clone->setActivityTimeDisplayMode(source->activityTimeDisplayMode());
     clone->setSlowerChatEnabled(source->slowerChatEnabled());
     clone->setSlowerChatMessagesPerSecond(
@@ -1005,13 +1021,20 @@ void SplitContainer::applyFromDescriptor(const NodeDescriptor &rootNode)
 {
     assert(this->baseNode_->type_ == Node::Type::EmptyRoot);
 
+    splitRestoreTrace(QStringLiteral("SplitContainer::applyFromDescriptor start"));
     this->splitsNeedingActivityFilterNormalization_.clear();
     this->splitsNeedingActivityPaneMigration_.clear();
     this->disableLayouting_ = true;
+    splitRestoreTrace(QStringLiteral("before applyFromDescriptorRecursively"));
     this->applyFromDescriptorRecursively(rootNode, this->baseNode_.get());
+    splitRestoreTrace(QStringLiteral("after applyFromDescriptorRecursively"));
     this->disableLayouting_ = false;
+    splitRestoreTrace(QStringLiteral("before normalizeRestoredActivityFiltering"));
     this->normalizeRestoredActivityFiltering();
+    splitRestoreTrace(QStringLiteral("after normalizeRestoredActivityFiltering"));
+    splitRestoreTrace(QStringLiteral("before SplitContainer::layout"));
     this->layout();
+    splitRestoreTrace(QStringLiteral("after SplitContainer::layout"));
 }
 
 void SplitContainer::popup()
@@ -1089,6 +1112,8 @@ NodeDescriptor SplitContainer::buildDescriptorRecursively(
             currentNode->split_->filterActivityExplicit();
         result.activityMessageScale_ =
             currentNode->split_->activityMessageScale();
+        result.collapseGiftedSubscriptions_ =
+            currentNode->split_->collapseGiftedSubscriptions();
         result.activityTimeDisplayMode_ =
             currentNode->split_->activityTimeDisplayMode();
         result.slowerChatEnabled_ = currentNode->split_->slowerChatEnabled();
@@ -1144,11 +1169,24 @@ void SplitContainer::applyFromDescriptorRecursively(
         }
         const auto &splitNode = *n;
 
+        splitRestoreTrace(
+            QStringLiteral("leaf before new Split type=%1 channel=%2")
+                .arg(splitNode.type_, splitNode.channelName_));
         auto *split = new Split(this);
-        split->setChannel(WindowManager::decodeChannel(splitNode));
+        splitRestoreTrace(QStringLiteral("leaf after new Split"));
+        splitRestoreTrace(QStringLiteral("leaf before decodeChannel"));
+        auto channel = WindowManager::decodeChannel(splitNode);
+        splitRestoreTrace(QStringLiteral("leaf after decodeChannel"));
+        splitRestoreTrace(QStringLiteral("leaf before setChannel"));
+        split->setChannel(channel);
+        splitRestoreTrace(QStringLiteral("leaf after setChannel"));
+        splitRestoreTrace(QStringLiteral("leaf before setModerationMode"));
         split->setModerationMode(splitNode.moderationMode_);
+        splitRestoreTrace(QStringLiteral("leaf before setFilters"));
         split->setFilters(splitNode.filters_);
+        splitRestoreTrace(QStringLiteral("leaf before setCheckSpellingOverride"));
         split->setCheckSpellingOverride(splitNode.spellCheckOverride);
+        splitRestoreTrace(QStringLiteral("leaf before setInputEnabled"));
         split->setInputEnabled(splitNode.activityPane_.value_or(false)
                                    ? false
                                    : splitNode.inputEnabled_);
@@ -1169,6 +1207,8 @@ void SplitContainer::applyFromDescriptorRecursively(
             this->splitsNeedingActivityFilterNormalization_.push_back(split);
         }
         split->setActivityMessageScale(splitNode.activityMessageScale_);
+        split->setCollapseGiftedSubscriptions(
+            splitNode.collapseGiftedSubscriptions_);
         split->setActivityTimeDisplayMode(
             splitNode.activityTimeDisplayMode_.value_or(
                 ActivityTimeDisplayMode::Relative));
@@ -1197,9 +1237,13 @@ void SplitContainer::applyFromDescriptorRecursively(
         {
             split->setPlatformIndicatorMode(PlatformIndicatorMode::LineColor);
         }
+        splitRestoreTrace(QStringLiteral("leaf before restoreSendPlatformSelection"));
         restoreSendPlatformSelection(split, splitNode);
+        splitRestoreTrace(QStringLiteral("leaf after restoreSendPlatformSelection"));
 
+        splitRestoreTrace(QStringLiteral("leaf before insertSplit"));
         this->insertSplit(split);
+        splitRestoreTrace(QStringLiteral("leaf after insertSplit"));
 
         return;
     }
@@ -1216,9 +1260,14 @@ void SplitContainer::applyFromDescriptorRecursively(
 
         bool vertical = containerNode.vertical_;
 
+        splitRestoreTrace(
+            QStringLiteral("container start vertical=%1 items=%2")
+                .arg(vertical ? 1 : 0)
+                .arg(containerNode.items_.size()));
         baseNode->type_ = vertical ? Node::Type::VerticalContainer
                                    : Node::Type::HorizontalContainer;
 
+        qsizetype restoreIndex = 0;
         for (const auto &item : containerNode.items_)
         {
             if (std::holds_alternative<SplitNodeDescriptor>(item))
@@ -1229,11 +1278,45 @@ void SplitContainer::applyFromDescriptorRecursively(
                     return;
                 }
                 const auto &splitNode = *inner;
+                splitRestoreTrace(
+                    QStringLiteral(
+                        "container item %1 before new Split type=%2 channel=%3")
+                        .arg(restoreIndex)
+                        .arg(splitNode.type_, splitNode.channelName_));
                 auto *split = new Split(this);
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 after new Split")
+                        .arg(restoreIndex));
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before setFilters")
+                        .arg(restoreIndex));
                 split->setFilters(splitNode.filters_);
-                split->setChannel(WindowManager::decodeChannel(splitNode));
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before decodeChannel")
+                        .arg(restoreIndex));
+                auto channel = WindowManager::decodeChannel(splitNode);
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 after decodeChannel")
+                        .arg(restoreIndex));
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before setChannel")
+                        .arg(restoreIndex));
+                split->setChannel(channel);
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 after setChannel")
+                        .arg(restoreIndex));
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before setModerationMode")
+                        .arg(restoreIndex));
                 split->setModerationMode(splitNode.moderationMode_);
+                splitRestoreTrace(
+                    QStringLiteral(
+                        "container item %1 before setCheckSpellingOverride")
+                        .arg(restoreIndex));
                 split->setCheckSpellingOverride(splitNode.spellCheckOverride);
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before setInputEnabled")
+                        .arg(restoreIndex));
                 split->setInputEnabled(splitNode.activityPane_.value_or(false)
                                            ? false
                                            : splitNode.inputEnabled_);
@@ -1255,6 +1338,8 @@ void SplitContainer::applyFromDescriptorRecursively(
                         split);
                 }
                 split->setActivityMessageScale(splitNode.activityMessageScale_);
+                split->setCollapseGiftedSubscriptions(
+                    splitNode.collapseGiftedSubscriptions_);
                 split->setActivityTimeDisplayMode(
                     splitNode.activityTimeDisplayMode_.value_or(
                         ActivityTimeDisplayMode::Relative));
@@ -1287,7 +1372,15 @@ void SplitContainer::applyFromDescriptorRecursively(
                     split->setPlatformIndicatorMode(
                         PlatformIndicatorMode::LineColor);
                 }
+                splitRestoreTrace(
+                    QStringLiteral(
+                        "container item %1 before restoreSendPlatformSelection")
+                        .arg(restoreIndex));
                 restoreSendPlatformSelection(split, splitNode);
+                splitRestoreTrace(
+                    QStringLiteral(
+                        "container item %1 after restoreSendPlatformSelection")
+                        .arg(restoreIndex));
 
                 auto node = std::make_shared<Node>();
                 node->parent_ = baseNode;
@@ -1296,12 +1389,27 @@ void SplitContainer::applyFromDescriptorRecursively(
 
                 node->flexH_ = splitNode.flexH_;
                 node->flexV_ = splitNode.flexV_;
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before emplace node")
+                        .arg(restoreIndex));
                 baseNode->children_.emplace_back(std::move(node));
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 after emplace node")
+                        .arg(restoreIndex));
 
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before addSplit")
+                        .arg(restoreIndex));
                 this->addSplit(split);
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 after addSplit")
+                        .arg(restoreIndex));
             }
             else
             {
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 before recurse container")
+                        .arg(restoreIndex));
                 auto node = std::make_shared<Node>();
                 node->parent_ = baseNode;
 
@@ -1314,8 +1422,13 @@ void SplitContainer::applyFromDescriptorRecursively(
 
                 baseNode->children_.emplace_back(node);
                 this->applyFromDescriptorRecursively(item, node.get());
+                splitRestoreTrace(
+                    QStringLiteral("container item %1 after recurse container")
+                        .arg(restoreIndex));
             }
+            ++restoreIndex;
         }
+        splitRestoreTrace(QStringLiteral("container end"));
     }
 }
 

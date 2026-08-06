@@ -1022,7 +1022,17 @@ void TwitchChannel::setRoomId(const QString &id)
         if (!getApp()->isTest())
         {
             this->roomIdChanged();
-            this->loadRecentMessages();
+            QTimer::singleShot(0, [weak = weakOf<Channel>(this)] {
+                auto shared = weak.lock();
+                if (!shared)
+                {
+                    return;
+                }
+                if (auto *tc = dynamic_cast<TwitchChannel *>(shared.get()))
+                {
+                    tc->loadRecentMessages();
+                }
+            });
         }
         this->disconnected_ = false;
         this->lastConnectedAt_ = std::chrono::system_clock::now();
@@ -2403,17 +2413,19 @@ void TwitchChannel::syncSendWaitTimer()
     auto now = std::chrono::steady_clock::now();
     const auto remaining =
         this->sendWaitEnd_.has_value()
-            ? std::chrono::duration_cast<std::chrono::seconds>(
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(
                   this->sendWaitEnd_.value() - now)
-            : 0s;
-    if (remaining <= 0s)
+            : std::chrono::milliseconds{0};
+    if (remaining <= std::chrono::milliseconds{0})
     {
         this->sendWaitTimer_.stop();
-        this->sendWaitUpdate.invoke("");
+        this->sendWaitUpdate.invoke(0);
     }
     else
     {
-        this->sendWaitUpdate.invoke(formatTime(remaining, 2));
+        const auto rounded = std::chrono::duration_cast<std::chrono::seconds>(
+            remaining + std::chrono::milliseconds{999});
+        this->sendWaitUpdate.invoke(static_cast<int>(rounded.count()));
     }
 }
 

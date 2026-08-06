@@ -3,6 +3,8 @@
 #include <rapidjson/document.h>
 
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <pajlada/serialize.hpp>
 
 using namespace pajlada;
@@ -99,6 +101,43 @@ TEST(Serialize, FloatString)
     auto out = Deserialize<float>::get(middle, &error);
     EXPECT_TRUE(error);
     EXPECT_FLOAT_EQ(out, 0.0f);
+}
+
+TEST(Serialize, UInt64RoundTrip)
+{
+    constexpr std::uint64_t timestamp = 1785427293853ULL;
+    constexpr std::uint64_t maximum =
+        std::numeric_limits<std::uint64_t>::max();
+
+    rapidjson::Document d;
+    for (const auto input : {timestamp, maximum})
+    {
+        auto middle =
+            Serialize<std::uint64_t>::get(input, d.GetAllocator());
+
+        EXPECT_TRUE(middle.IsUint64());
+
+        bool error = false;
+        const auto output =
+            Deserialize<std::uint64_t>::get(middle, &error);
+        EXPECT_FALSE(error);
+        EXPECT_EQ(input, output);
+    }
+}
+
+TEST(Serialize, Int64RoundTrip)
+{
+    constexpr std::int64_t input = -5000000000LL;
+
+    rapidjson::Document d;
+    auto middle = Serialize<std::int64_t>::get(input, d.GetAllocator());
+
+    EXPECT_TRUE(middle.IsInt64());
+
+    bool error = false;
+    const auto output = Deserialize<std::int64_t>::get(middle, &error);
+    EXPECT_FALSE(error);
+    EXPECT_EQ(input, output);
 }
 
 TEST(Deserialize, StringToStringView)

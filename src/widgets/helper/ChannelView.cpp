@@ -10,6 +10,7 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/Command.hpp"
 #include "controllers/commands/CommandController.hpp"
+#include "controllers/commands/builtin/PinMessage.hpp"
 #include "controllers/filters/FilterSet.hpp"
 #include "debug/Benchmark.hpp"
 #include "messages/Emote.hpp"
@@ -28,6 +29,7 @@
 #include "providers/merged/MergedChannel.hpp"
 #include "providers/links/LinkInfo.hpp"
 #include "providers/links/LinkResolver.hpp"
+#include "providers/seventv/SeventvAccountManager.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchBadge.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
@@ -43,6 +45,7 @@
 #include "widgets/helper/ActivityMessageUtils.hpp"
 #include "util/Helpers.hpp"
 #include "util/IncognitoBrowser.hpp"
+#include "util/PostToThread.hpp"
 #include "util/QMagicEnum.hpp"
 #include "util/Twitch.hpp"
 #include "widgets/buttons/LabelButton.hpp"
@@ -69,12 +72,17 @@
 #include <QEasingCurve>
 #include <QGestureEvent>
 #include <QGraphicsBlurEffect>
+#include <QInputDialog>
 #include <QJsonDocument>
 #include <QMessageBox>
+#include <QLineEdit>
 #include <QPainter>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QScreen>
+#include <QSet>
 #include <QStringBuilder>
+#include <QTimer>
 #include <QUrl>
 #include <QVariantAnimation>
 
@@ -83,6 +91,8 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -170,6 +180,26 @@ SlowChatQueuePriority slowChatQueuePriority(const MessagePtr &message)
                  : SlowChatQueuePriority::Normal;
 }
 
+ChannelPtr commandChannelForMessage(const ChannelPtr &channel,
+                                    MessagePlatform platform)
+{
+    const auto merged = std::dynamic_pointer_cast<MergedChannel>(channel);
+    if (!merged)
+    {
+        return channel;
+    }
+
+    switch (platform)
+    {
+        case MessagePlatform::AnyOrTwitch:
+            return merged->twitchChannel();
+        case MessagePlatform::Kick:
+            return merged->kickChannel();
+        default:
+            return channel;
+    }
+}
+
 QColor blendColorTowards(const QColor &base, const QColor &target, qreal factor)
 {
     factor = std::clamp(factor, 0.0, 1.0);
@@ -216,7 +246,531 @@ qreal messageLayoutShiftProgress(qreal progress)
     return curve.valueForProgress(std::clamp(progress, 0.0, 1.0));
 }
 
-void addEmoteContextMenuItems(QMenu *menu, const Emote &emote, QStringView kind)
+bool isSameChatMessage(const MessagePtr &left, const MessagePtr &right)
+{
+    if (left == right)
+    {
+        return true;
+    }
+    if (!left || !right || left->id.isEmpty() || right->id.isEmpty())
+    {
+        return false;
+    }
+
+    return left->platform == right->platform && left->id == right->id &&
+           left->channelName.compare(right->channelName,
+                                     Qt::CaseInsensitive) == 0;
+}
+
+template <typename F>
+void runOnChannelViewThread(ChannelView *view, F &&callback)
+{
+    QPointer<ChannelView> weakView(view);
+    runInGuiThread([weakView, callback = std::forward<F>(callback)]() mutable {
+        if (weakView)
+        {
+            callback(*weakView);
+        }
+    });
+}
+
+bool isSevenTVEmote(const Emote &emote)
+{
+    if (emote.id.string.isEmpty())
+    {
+        return false;
+    }
+
+    const QUrl page(emote.homePage.string);
+    return page.isValid() &&
+           page.host().endsWith(QStringLiteral("7tv.app"),
+                                Qt::CaseInsensitive) &&
+           page.path().startsWith(QStringLiteral("/emotes/"));
+}
+
+QString editorTargetName(const SeventvEditorChannel &target)
+{
+    if (!target.displayName.isEmpty())
+    {
+        return target.displayName;
+    }
+    if (!target.username.isEmpty())
+    {
+        return target.username;
+    }
+    return target.connectionID;
+}
+
+QString editorTargetLabel(const SeventvEditorChannel &target)
+{
+    return editorTargetName(target);
+}
+
+bool editorTargetMatchesChannel(const SeventvEditorChannel &target,
+                                const ChannelPtr &channel)
+{
+    if (!channel)
+    {
+        return false;
+    }
+
+    if (const auto merged = std::dynamic_pointer_cast<MergedChannel>(channel))
+    {
+        if (editorTargetMatchesChannel(target, merged->twitchChannel()) ||
+            editorTargetMatchesChannel(target, merged->kickChannel()))
+        {
+            return true;
+        }
+        if (target.platform != QStringLiteral("YOUTUBE") ||
+            !merged->config().youtubeEnabled || !merged->youtubeLiveChat())
+        {
+            return false;
+        }
+
+        auto source = merged->youtubeLiveChat()->resolvedSource().trimmed();
+        if (source.startsWith('@'))
+        {
+            source.remove(0, 1);
+        }
+        auto targetUsername = target.username.trimmed();
+        if (targetUsername.startsWith('@'))
+        {
+            targetUsername.remove(0, 1);
+        }
+        return (!target.connectionID.isEmpty() &&
+                target.connectionID.compare(source, Qt::CaseInsensitive) ==
+                    0) ||
+               (!targetUsername.isEmpty() &&
+                targetUsername.compare(source, Qt::CaseInsensitive) == 0);
+    }
+
+    if (const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel))
+    {
+        if (!target.emoteSetID.isEmpty() &&
+            target.emoteSetID == twitch->seventvEmoteSetID())
+        {
+            return true;
+        }
+    }
+    if (const auto kick = std::dynamic_pointer_cast<KickChannel>(channel))
+    {
+        if (!target.emoteSetID.isEmpty() &&
+            target.emoteSetID == kick->seventvEmoteSetID())
+        {
+            return true;
+        }
+    }
+
+    if (target.platform == QStringLiteral("TWITCH"))
+    {
+        const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel);
+        if (!twitch)
+        {
+            return false;
+        }
+        return (!target.emoteSetID.isEmpty() &&
+                target.emoteSetID == twitch->seventvEmoteSetID()) ||
+               (!target.connectionID.isEmpty() &&
+                target.connectionID == twitch->roomId()) ||
+               (!target.username.isEmpty() &&
+                target.username.compare(twitch->getName(),
+                                        Qt::CaseInsensitive) == 0);
+    }
+
+    if (target.platform == QStringLiteral("KICK"))
+    {
+        const auto kick = std::dynamic_pointer_cast<KickChannel>(channel);
+        if (!kick)
+        {
+            return false;
+        }
+        return (!target.emoteSetID.isEmpty() &&
+                target.emoteSetID == kick->seventvEmoteSetID()) ||
+               (!target.connectionID.isEmpty() && kick->userID() != 0 &&
+                target.connectionID == QString::number(kick->userID())) ||
+               (!target.username.isEmpty() &&
+                target.username.compare(kick->slug(), Qt::CaseInsensitive) ==
+                    0);
+    }
+
+    return false;
+}
+
+std::vector<SeventvEditorChannel> availableEditorTargets()
+{
+    const auto &allTargets =
+        SeventvAccountManager::instance().editorChannels();
+    std::vector<SeventvEditorChannel> targets;
+    QSet<QString> activeEmoteSets;
+    for (const auto &target : allTargets)
+    {
+        const auto emoteSetID = target.emoteSetID.trimmed();
+        if (emoteSetID.isEmpty() || activeEmoteSets.contains(emoteSetID))
+        {
+            continue;
+        }
+        activeEmoteSets.insert(emoteSetID);
+        targets.push_back(target);
+    }
+    return targets;
+}
+
+void refreshEditorTargetInChannel(const SeventvEditorChannel &target,
+                                  const ChannelPtr &channel)
+{
+    if (!channel)
+    {
+        return;
+    }
+    if (const auto merged = std::dynamic_pointer_cast<MergedChannel>(channel))
+    {
+        refreshEditorTargetInChannel(target, merged->twitchChannel());
+        refreshEditorTargetInChannel(target, merged->kickChannel());
+        return;
+    }
+    if (!editorTargetMatchesChannel(target, channel))
+    {
+        return;
+    }
+    if (const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel))
+    {
+        twitch->refreshSevenTVChannelEmotes(false);
+    }
+    else if (const auto kick = std::dynamic_pointer_cast<KickChannel>(channel))
+    {
+        kick->reloadSeventvEmotes(false);
+    }
+}
+
+void refreshOpenEditorTarget(const SeventvEditorChannel &target)
+{
+    getApp()->getWindows()->getMainWindow().getNotebook().forEachSplit(
+        [&](Split *split) {
+            refreshEditorTargetInChannel(
+                target, split->getIndirectChannel().get());
+        });
+}
+
+struct SevenTVEditorMenuEntry {
+    SeventvEditorChannel target;
+    std::optional<SeventvManagedEmote> enabledEmote;
+    QString error;
+};
+
+struct SevenTVEditorMenuState {
+    QPointer<QMenu> addMenu;
+    QPointer<QMenu> removeMenu;
+    QPointer<QMenu> renameMenu;
+    QPointer<QWidget> dialogParent;
+    ChannelPtr feedbackChannel;
+    QString emoteID;
+    QString originalName;
+    std::vector<SevenTVEditorMenuEntry> entries;
+    int pending = 0;
+};
+
+void addDisabledMenuMessage(QMenu *menu, const QString &text)
+{
+    auto *action = menu->addAction(text);
+    action->setEnabled(false);
+}
+
+void postSevenTVEditorFeedback(const ChannelPtr &channel,
+                               const QString &message)
+{
+    if (channel)
+    {
+        channel->addSystemMessage(message);
+    }
+}
+
+void populateSevenTVEditorMenus(
+    const std::shared_ptr<SevenTVEditorMenuState> &state)
+{
+    if (state->addMenu == nullptr || state->removeMenu == nullptr ||
+        state->renameMenu == nullptr)
+    {
+        return;
+    }
+
+    state->addMenu->clear();
+    state->removeMenu->clear();
+    state->renameMenu->clear();
+    int failedLoads = 0;
+
+    for (const auto &entry : state->entries)
+    {
+        if (!entry.error.isEmpty())
+        {
+            ++failedLoads;
+            continue;
+        }
+
+        const auto target = entry.target;
+        const auto targetLabel = editorTargetLabel(target);
+        if (!entry.enabledEmote)
+        {
+            state->addMenu->addAction(
+                targetLabel,
+                [dialogParent = state->dialogParent,
+                 feedbackChannel = state->feedbackChannel, target,
+                 emoteID = state->emoteID,
+                 originalName = state->originalName] {
+                    QTimer::singleShot(
+                        0, dialogParent,
+                        [dialogParent, feedbackChannel, target, emoteID,
+                         originalName] {
+                            if (dialogParent == nullptr)
+                            {
+                                return;
+                            }
+                            bool accepted = false;
+                            const auto name =
+                                QInputDialog::getText(
+                                    dialogParent,
+                                    QStringLiteral("Add 7TV emote"),
+                                    QStringLiteral("Add \"%1\" to %2 as:")
+                                        .arg(originalName,
+                                             editorTargetLabel(target)),
+                                    QLineEdit::Normal, originalName, &accepted)
+                                    .trimmed();
+                            if (!accepted)
+                            {
+                                return;
+                            }
+                            if (name.isEmpty())
+                            {
+                                postSevenTVEditorFeedback(
+                                    feedbackChannel,
+                                    QStringLiteral(
+                                        "The 7TV emote name cannot be empty."));
+                                return;
+                            }
+
+                            SeventvAccountManager::instance()
+                                .addEmoteToEditorChannel(
+                                    target, emoteID, name,
+                                    [target] {
+                                        refreshOpenEditorTarget(target);
+                                    },
+                                    [feedbackChannel, target,
+                                     originalName](const QString &error) {
+                                        postSevenTVEditorFeedback(
+                                            feedbackChannel,
+                                            QStringLiteral(
+                                                "Failed to add %1 to %2: %3")
+                                                .arg(
+                                                    originalName,
+                                                    editorTargetLabel(target),
+                                                    error));
+                                    });
+                        });
+                });
+            continue;
+        }
+
+        const auto enabledEmote = *entry.enabledEmote;
+        state->removeMenu->addAction(
+            targetLabel,
+            [feedbackChannel = state->feedbackChannel, target,
+             emoteID = state->emoteID, enabledName = enabledEmote.name] {
+                SeventvAccountManager::instance()
+                    .removeEmoteFromEditorChannel(
+                        target, emoteID,
+                        [target] {
+                            refreshOpenEditorTarget(target);
+                        },
+                        [feedbackChannel, target,
+                         enabledName](const QString &error) {
+                            postSevenTVEditorFeedback(
+                                feedbackChannel,
+                                QStringLiteral(
+                                    "Failed to remove %1 from %2: %3")
+                                    .arg(enabledName,
+                                         editorTargetLabel(target), error));
+                        });
+            });
+
+        state->renameMenu->addAction(
+            targetLabel,
+            [dialogParent = state->dialogParent,
+             feedbackChannel = state->feedbackChannel, target,
+             emoteID = state->emoteID, enabledName = enabledEmote.name] {
+                QTimer::singleShot(
+                    0, dialogParent,
+                    [dialogParent, feedbackChannel, target, emoteID,
+                     enabledName] {
+                        if (dialogParent == nullptr)
+                        {
+                            return;
+                        }
+                        bool accepted = false;
+                        const auto name =
+                            QInputDialog::getText(
+                                dialogParent,
+                                QStringLiteral("Rename 7TV emote"),
+                                QStringLiteral("Rename \"%1\" in %2 to:")
+                                    .arg(enabledName,
+                                         editorTargetLabel(target)),
+                                QLineEdit::Normal, enabledName, &accepted)
+                                .trimmed();
+                        if (!accepted)
+                        {
+                            return;
+                        }
+                        if (name.isEmpty())
+                        {
+                            postSevenTVEditorFeedback(
+                                feedbackChannel,
+                                QStringLiteral(
+                                    "The 7TV emote name cannot be empty."));
+                            return;
+                        }
+
+                        SeventvAccountManager::instance()
+                            .renameEmoteInEditorChannel(
+                                target, emoteID, name,
+                                [target] {
+                                    refreshOpenEditorTarget(target);
+                                },
+                                [feedbackChannel, target,
+                                 enabledName](const QString &error) {
+                                    postSevenTVEditorFeedback(
+                                        feedbackChannel,
+                                        QStringLiteral(
+                                            "Failed to rename %1 in %2: %3")
+                                            .arg(enabledName,
+                                                 editorTargetLabel(target),
+                                                 error));
+                                });
+                    });
+            });
+    }
+
+    if (state->addMenu->isEmpty())
+    {
+        addDisabledMenuMessage(state->addMenu, QStringLiteral(
+            "Already enabled in every available channel"));
+    }
+    if (state->removeMenu->isEmpty())
+    {
+        addDisabledMenuMessage(
+            state->removeMenu,
+            QStringLiteral("Not enabled in any available channel"));
+    }
+    if (state->renameMenu->isEmpty())
+    {
+        addDisabledMenuMessage(
+            state->renameMenu,
+            QStringLiteral("Not enabled in any available channel"));
+    }
+    if (failedLoads > 0)
+    {
+        const auto text =
+            QStringLiteral("%1 channel set(s) could not be loaded")
+                .arg(failedLoads);
+        addDisabledMenuMessage(state->addMenu, text);
+        addDisabledMenuMessage(state->removeMenu, text);
+        addDisabledMenuMessage(state->renameMenu, text);
+    }
+}
+
+void addSevenTVEditorMenu(QMenu *menu, const Emote &emote,
+                          QWidget *dialogParent,
+                          const ChannelPtr &feedbackChannel)
+{
+    if (!isSevenTVEmote(emote))
+    {
+        return;
+    }
+
+    auto &manager = SeventvAccountManager::instance();
+    if (!manager.isLoggedIn())
+    {
+        return;
+    }
+
+    auto *seventvMenu = menu->addMenu(QStringLiteral("7TV"));
+    auto *addMenu = seventvMenu->addMenu(QStringLiteral("Add"));
+    auto *removeMenu = seventvMenu->addMenu(QStringLiteral("Remove"));
+    auto *renameMenu = seventvMenu->addMenu(QStringLiteral("Rename"));
+    const auto showStatus = [addMenu, removeMenu,
+                             renameMenu](const QString &text) {
+        addDisabledMenuMessage(addMenu, text);
+        addDisabledMenuMessage(removeMenu, text);
+        addDisabledMenuMessage(renameMenu, text);
+    };
+    if (manager.isBusy())
+    {
+        showStatus(QStringLiteral("7TV account is busy"));
+        return;
+    }
+    if (!manager.editorChannelsLoaded())
+    {
+        showStatus(QStringLiteral("Loading editable channels…"));
+        manager.refresh();
+        return;
+    }
+
+    const auto targets = availableEditorTargets();
+    if (targets.empty())
+    {
+        showStatus(QStringLiteral("No editable channels found"));
+        return;
+    }
+
+    addDisabledMenuMessage(addMenu, QStringLiteral("Loading channel sets…"));
+    addDisabledMenuMessage(removeMenu,
+                           QStringLiteral("Loading channel sets…"));
+    addDisabledMenuMessage(renameMenu,
+                           QStringLiteral("Loading channel sets…"));
+
+    auto state = std::make_shared<SevenTVEditorMenuState>();
+    state->addMenu = addMenu;
+    state->removeMenu = removeMenu;
+    state->renameMenu = renameMenu;
+    state->dialogParent = dialogParent;
+    state->feedbackChannel = feedbackChannel;
+    state->emoteID = emote.id.string;
+    state->originalName = emote.name.string;
+    state->entries.reserve(targets.size());
+    for (const auto &target : targets)
+    {
+        state->entries.push_back({.target = target});
+    }
+    state->pending = static_cast<int>(state->entries.size());
+
+    for (size_t index = 0; index < state->entries.size(); ++index)
+    {
+        manager.loadEditorChannelEmotes(
+            state->entries.at(index).target,
+            [state, index](std::vector<SeventvManagedEmote> emotes) {
+                const auto match = std::ranges::find_if(
+                    emotes, [state](const auto &candidate) {
+                        return candidate.id == state->emoteID;
+                    });
+                if (match != emotes.end())
+                {
+                    state->entries.at(index).enabledEmote = *match;
+                }
+                if (--state->pending == 0)
+                {
+                    populateSevenTVEditorMenus(state);
+                }
+            },
+            [state, index](const QString &error) {
+                state->entries.at(index).error = error;
+                if (--state->pending == 0)
+                {
+                    populateSevenTVEditorMenus(state);
+                }
+            });
+    }
+}
+
+void addEmoteContextMenuItems(QMenu *menu, const Emote &emote,
+                              QStringView kind, QWidget *dialogParent,
+                              const ChannelPtr &feedbackChannel)
 {
     auto *openAction = menu->addAction("&Open");
     auto *openMenu = new QMenu(menu);
@@ -267,6 +821,8 @@ void addEmoteContextMenuItems(QMenu *menu, const Emote &emote, QStringView kind)
                                 QDesktopServices::openUrl(QUrl(url.string));
                             });
     }
+
+    addSevenTVEditorMenu(menu, emote, dialogParent, feedbackChannel);
 }
 
 bool hasPlatformBadgeElement(const Message &message)
@@ -505,7 +1061,9 @@ QString activityMergedGiftSummaryText(const ActivityCompactGiftSummary &summary,
 }
 
 void addImageContextMenuItems(QMenu *menu,
-                              const MessageLayoutElement *hoveredElement)
+                              const MessageLayoutElement *hoveredElement,
+                              QWidget *dialogParent,
+                              const ChannelPtr &feedbackChannel)
 {
     if (hoveredElement == nullptr)
     {
@@ -521,7 +1079,8 @@ void addImageContextMenuItems(QMenu *menu,
         if (const auto *badgeElement =
                 dynamic_cast<const BadgeElement *>(&creator))
         {
-            addEmoteContextMenuItems(menu, *badgeElement->getEmote(), u"badge");
+            addEmoteContextMenuItems(menu, *badgeElement->getEmote(), u"badge",
+                                     dialogParent, feedbackChannel);
         }
     }
 
@@ -532,7 +1091,8 @@ void addImageContextMenuItems(QMenu *menu,
         if (const auto *emoteElement =
                 dynamic_cast<const EmoteElement *>(&creator))
         {
-            addEmoteContextMenuItems(menu, *emoteElement->getEmote(), u"emote");
+            addEmoteContextMenuItems(menu, *emoteElement->getEmote(), u"emote",
+                                     dialogParent, feedbackChannel);
         }
         else if (const auto *layeredElement =
                      dynamic_cast<const LayeredEmoteElement *>(&creator))
@@ -543,7 +1103,8 @@ void addImageContextMenuItems(QMenu *menu,
                 auto *emoteAction = menu->addAction(emote.ptr->name.string);
                 auto *emoteMenu = new QMenu(menu);
                 emoteAction->setMenu(emoteMenu);
-                addEmoteContextMenuItems(emoteMenu, *emote.ptr, u"emote");
+                addEmoteContextMenuItems(emoteMenu, *emote.ptr, u"emote",
+                                         dialogParent, feedbackChannel);
             }
         }
     }
@@ -690,9 +1251,10 @@ ChannelView::ChannelView(InternalCtor /*tag*/, QWidget *parent, Split *split,
     this->initializeScrollbar();
     this->initializeSignals();
 
-    this->cursors_.neutral = QCursor(Qt::SizeAllCursor);
-    this->cursors_.up = QCursor(Qt::UpArrowCursor);
-    this->cursors_.down = QCursor(Qt::SizeVerCursor);
+    this->cursors_.neutral =
+        QCursor(getResources().scrolling.neutralScroll);
+    this->cursors_.up = QCursor(getResources().scrolling.upScroll);
+    this->cursors_.down = QCursor(getResources().scrolling.downScroll);
 
     this->pauseTimer_.setSingleShot(true);
     QObject::connect(&this->pauseTimer_, &QTimer::timeout, this, [this] {
@@ -1554,6 +2116,9 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
         return std::nullopt;
     }
 
+    const bool collapseGiftedSubscriptions =
+        this->split_ == nullptr ||
+        this->split_->collapseGiftedSubscriptions();
     if (const auto recipientCount = getActivityGiftBombRecipientCount(*message))
     {
         if (!shouldShowMessageInActivityPane(
@@ -1567,6 +2132,21 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
         }
 
         pendingGiftRecipients = std::max(0, *recipientCount);
+        if (!collapseGiftedSubscriptions)
+        {
+            if (message->giftedSubscriptionRecipientCount > 0)
+            {
+                auto expanded = message->clone();
+                expanded->flags.unset(MessageFlag::Collapsed);
+                return prepareActivityMessage(
+                    expanded, this->resolvedActivityTimeDisplayMode());
+            }
+
+            // Twitch and YouTube gift bombs are followed by one recipient
+            // message per gifted subscription. Hide the summary so the
+            // recipients themselves become the activity entries.
+            return std::nullopt;
+        }
         return makeActivityCompactMessage(message,
                                           compactActivityGiftBombText(*message),
                                           this->resolvedActivityTimeDisplayMode());
@@ -1578,7 +2158,12 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
         {
             pendingGiftRecipients--;
         }
-        return std::nullopt;
+        if (collapseGiftedSubscriptions)
+        {
+            return std::nullopt;
+        }
+        return prepareActivityMessage(
+            message, this->resolvedActivityTimeDisplayMode());
     }
 
     if (!shouldShowMessageInActivityPane(
@@ -1640,6 +2225,12 @@ MessagePtr ChannelView::decorateStreamDatabaseMessage(
 
 bool ChannelView::tryMergeActivityGiftMessage(const MessagePtr &message)
 {
+    if (this->split_ != nullptr &&
+        !this->split_->collapseGiftedSubscriptions())
+    {
+        return false;
+    }
+
     const auto currentSummary = activityCompactGiftSummary(*message);
     if (!currentSummary)
     {
@@ -2103,92 +2694,140 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
         underlyingChannel->messageAppended,
         [this](MessagePtr &message,
                std::optional<MessageFlags> overridingFlags) {
-            if (this->shouldIncludeMessage(message))
-            {
-                if (this->channel_->lastDate_ != QDate::currentDate())
-                {
-                    // Day change message
-                    this->channel_->lastDate_ = QDate::currentDate();
-                    auto msg = makeSystemMessage(
-                        QLocale().toString(QDate::currentDate(),
-                                           QLocale::LongFormat),
-                        QTime(0, 0));
-                    msg->flags.set(MessageFlag::DoNotLog);
-                    this->enqueueOrAddProxyMessage(msg);
-                }
-                this->enqueueOrAddProxyMessage(message, overridingFlags, true);
-            }
+            auto copiedMessage = message;
+            runOnChannelViewThread(
+                this, [copiedMessage, overridingFlags](ChannelView &view) {
+                    if (view.shouldIncludeMessage(copiedMessage))
+                    {
+                        if (view.channel_->lastDate_ != QDate::currentDate())
+                        {
+                            // Day change message
+                            view.channel_->lastDate_ = QDate::currentDate();
+                            auto msg = makeSystemMessage(
+                                QLocale().toString(QDate::currentDate(),
+                                                   QLocale::LongFormat),
+                                QTime(0, 0));
+                            msg->flags.set(MessageFlag::DoNotLog);
+                            msg->flags.set(
+                                MessageFlag::DoNotTriggerNotification);
+                            view.enqueueOrAddProxyMessage(msg);
+                        }
+                        view.enqueueOrAddProxyMessage(copiedMessage,
+                                                      overridingFlags, true);
+                    }
+                });
         });
 
     this->channelConnections_.managedConnect(
         underlyingChannel->messagesAddedAtStart,
         [this](std::vector<MessagePtr> &messages) {
-            std::vector<MessagePtr> filtered;
-            filtered.reserve(messages.size());
-            for (const auto &msg : messages)
-            {
-                if (this->shouldIncludeMessage(msg))
-                {
-                    filtered.push_back(this->decorateStreamDatabaseMessage(msg));
-                }
-            }
+            auto copiedMessages = messages;
+            runOnChannelViewThread(
+                this, [copiedMessages = std::move(copiedMessages)](
+                          ChannelView &view) {
+                    std::vector<MessagePtr> filtered;
+                    filtered.reserve(copiedMessages.size());
+                    for (const auto &msg : copiedMessages)
+                    {
+                        if (view.shouldIncludeMessage(msg))
+                        {
+                            filtered.push_back(
+                                view.decorateStreamDatabaseMessage(msg));
+                        }
+                    }
 
-            if (!filtered.empty())
-            {
-                this->channel_->addMessagesAtStart(filtered);
-            }
+                    if (!filtered.empty())
+                    {
+                        view.channel_->addMessagesAtStart(filtered);
+                    }
+                });
         });
 
     this->channelConnections_.managedConnect(
         underlyingChannel->messageReplaced,
         [this](auto index, const auto &prev, const auto &replacement) {
-            const bool shouldIncludeReplacement =
-                this->shouldIncludeMessage(replacement);
-            auto proxyReplacement =
-                shouldIncludeReplacement
-                    ? this->decorateStreamDatabaseMessage(replacement)
-                    : MessagePtr{};
+            runOnChannelViewThread(
+                this, [index, prev, replacement](ChannelView &view) {
+                    const bool shouldIncludeReplacement =
+                        view.shouldIncludeMessage(replacement);
+                    auto proxyReplacement =
+                        shouldIncludeReplacement
+                            ? view.decorateStreamDatabaseMessage(replacement)
+                            : MessagePtr{};
 
-            if (this->updatePendingSlowChatMessage(
-                    prev, proxyReplacement))
+                    if (view.updatePendingSlowChatMessage(prev,
+                                                          proxyReplacement))
+                    {
+                        return;
+                    }
+
+                    if (shouldIncludeReplacement)
+                    {
+                        auto proxyPrev = prev;
+                        if (view.shouldDecorateStreamDatabaseMessage() &&
+                            prev != nullptr && !prev->id.isEmpty())
+                        {
+                            if (auto existing =
+                                    view.channel_->findMessageByID(prev->id))
+                            {
+                                proxyPrev = existing;
+                            }
+                        }
+                        view.channel_->replaceMessage(index, proxyPrev,
+                                                      proxyReplacement);
+                    }
+                });
+        });
+
+    this->channelConnections_.managedConnect(
+        Channel::messageRemoved,
+        [this](Channel *source, size_t, const MessagePtr &message) {
+            if (source != this->underlyingChannel_.get())
             {
                 return;
             }
-
-            if (shouldIncludeReplacement)
-            {
-                auto proxyPrev = prev;
-                if (this->shouldDecorateStreamDatabaseMessage() &&
-                    prev != nullptr && !prev->id.isEmpty())
-                {
-                    if (auto existing =
-                            this->channel_->findMessageByID(prev->id))
+            runOnChannelViewThread(
+                this, [message](ChannelView &view) {
+                    auto proxyMessage = message;
+                    if (message != nullptr && !message->id.isEmpty())
                     {
-                        proxyPrev = existing;
+                        if (auto existing =
+                                view.channel_->findMessageByID(message->id))
+                        {
+                            proxyMessage = existing;
+                        }
                     }
-                }
-                this->channel_->replaceMessage(index, proxyPrev,
-                                               proxyReplacement);
-            }
+                    view.channel_->removeMessage(proxyMessage);
+                });
         });
 
     this->channelConnections_.managedConnect(
         underlyingChannel->filledInMessages, [this](const auto &messages) {
-            std::vector<MessagePtr> filtered;
-            filtered.reserve(messages.size());
-            for (const auto &msg : messages)
-            {
-                if (this->shouldIncludeMessage(msg))
-                {
-                    filtered.push_back(this->decorateStreamDatabaseMessage(msg));
-                }
-            }
-            this->channel_->fillInMissingMessages(filtered);
+            auto copiedMessages = messages;
+            runOnChannelViewThread(
+                this, [copiedMessages = std::move(copiedMessages)](
+                          ChannelView &view) {
+                    std::vector<MessagePtr> filtered;
+                    filtered.reserve(copiedMessages.size());
+                    for (const auto &msg : copiedMessages)
+                    {
+                        if (view.shouldIncludeMessage(msg))
+                        {
+                            filtered.push_back(
+                                view.decorateStreamDatabaseMessage(msg));
+                        }
+                    }
+                    view.channel_->fillInMissingMessages(filtered);
+                });
         });
 
     this->channelConnections_.managedConnect(underlyingChannel->messagesCleared,
                                              [this]() {
-                                                 this->clearMessages();
+                                                 runOnChannelViewThread(
+                                                     this,
+                                                     [](ChannelView &view) {
+                                                         view.clearMessages();
+                                                     });
                                              });
 
     // Copy over messages from the backing channel to the filtered one
@@ -2264,6 +2903,16 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
             this->messageReplaced(index, prev, replacement);
         });
 
+    this->channelConnections_.managedConnect(
+        Channel::messageRemoved,
+        [this](Channel *source, size_t index, const MessagePtr &message) {
+            if (source != this->channel_.get())
+            {
+                return;
+            }
+            this->messageRemoved(index, message);
+        });
+
     // on messages filled in
     this->channelConnections_.managedConnect(this->channel_->filledInMessages,
                                              [this](const auto &) {
@@ -2292,7 +2941,9 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
     {
         this->channelConnections_.managedConnect(
             twitchChannel->streamStatusChanged, [this]() {
-                this->liveStatusChanged.invoke();
+                runOnChannelViewThread(this, [](ChannelView &view) {
+                    view.liveStatusChanged.invoke();
+                });
             });
     }
     else if (auto *kickChannel =
@@ -2300,7 +2951,9 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
     {
         this->channelConnections_.managedConnect(
             kickChannel->liveStatusChanged, [this] {
-                this->liveStatusChanged.invoke();
+                runOnChannelViewThread(this, [](ChannelView &view) {
+                    view.liveStatusChanged.invoke();
+                });
             });
     }
     else if (auto *mergedChannel =
@@ -2308,7 +2961,9 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
     {
         this->channelConnections_.managedConnect(
             mergedChannel->streamStatusChanged, [this] {
-                this->liveStatusChanged.invoke();
+                runOnChannelViewThread(this, [](ChannelView &view) {
+                    view.liveStatusChanged.invoke();
+                });
             });
     }
 }
@@ -2629,6 +3284,53 @@ void ChannelView::messageReplaced(size_t hint, const MessagePtr &prev,
     this->queueLayout();
 }
 
+void ChannelView::messageRemoved(size_t hint, const MessagePtr &message)
+{
+    if (this->isActivityPaneView())
+    {
+        this->rebuildActivityMessages();
+        return;
+    }
+
+    auto optItem = this->messages_.find(hint, [&](const auto &item) {
+        return item->getMessagePtr() == message;
+    });
+    if (!optItem)
+    {
+        return;
+    }
+
+    const auto index = optItem->first;
+    const bool wasAtBottom = this->scrollBar_->isAtBottom();
+    const auto relativeCurrent = this->scrollBar_->getRelativeCurrentValue();
+
+    if (!this->messages_.removeItem(index))
+    {
+        return;
+    }
+    this->scrollBar_->removeHighlight(index);
+    this->scrollBar_->offsetMaximum(-1);
+
+    if (wasAtBottom)
+    {
+        this->scrollBar_->scrollToBottom();
+    }
+    else if (static_cast<qreal>(index) < relativeCurrent)
+    {
+        this->scrollBar_->offset(-1);
+    }
+
+    bool alternate = false;
+    for (const auto &layout : this->messages_.getSnapshot())
+    {
+        layout->flags.set(MessageLayoutFlag::AlternateBackground, alternate);
+        alternate = !alternate;
+    }
+    this->lastMessageHasAlternateBackground_ = alternate;
+    this->lastMessageHasAlternateBackgroundReverse_ = true;
+    this->queueLayout();
+}
+
 void ChannelView::messagesUpdated()
 {
     if (this->isActivityPaneView())
@@ -2787,6 +3489,11 @@ MessageElementFlags ChannelView::getFlags() const
 
 bool ChannelView::scrollToMessage(const MessagePtr &message)
 {
+    return this->scrollToMessage(message, false);
+}
+
+bool ChannelView::scrollToMessage(const MessagePtr &message, bool startReply)
+{
     if (!this->mayContainMessage(message))
     {
         return false;
@@ -2807,7 +3514,8 @@ bool ChannelView::scrollToMessage(const MessagePtr &message)
     size_t messageIdx = messagesSnapshot.size() - 1;
     for (; messageIdx < SIZE_MAX; messageIdx--)
     {
-        if (messagesSnapshot[messageIdx]->getMessagePtr() == message)
+        if (isSameChatMessage(messagesSnapshot[messageIdx]->getMessagePtr(),
+                              message))
         {
             break;
         }
@@ -2822,6 +3530,10 @@ bool ChannelView::scrollToMessage(const MessagePtr &message)
     if (this->split_)
     {
         getApp()->getWindows()->select(this->split_);
+    }
+    if (startReply)
+    {
+        this->setInputReply(messagesSnapshot[messageIdx]->getMessagePtr());
     }
     return true;
 }
@@ -4057,7 +4769,7 @@ void ChannelView::addContextMenuItems(
     menu->setAttribute(Qt::WA_DeleteOnClose);
 
     // Add image options if the element clicked contains an image (e.g. a badge or an emote)
-    addImageContextMenuItems(menu, hoveredElement);
+    addImageContextMenuItems(menu, hoveredElement, this, this->channel());
 
     // Add link options if the element clicked contains a link
     addLinkContextMenuItems(menu, hoveredElement);
@@ -4232,10 +4944,7 @@ void ChannelView::addMessageContextMenuItems(QMenu *menu,
     if (!message->id.isEmpty() && canModerateMessage)
     {
         menu->addSeparator();
-        auto *moderateAction = menu->addAction("Mo&derate");
-        auto *moderateMenu = new QMenu(menu);
-        moderateAction->setMenu(moderateMenu);
-        moderateMenu->addAction(
+        menu->addAction(
             "&Delete message",
             [id = message->id, platform = message->platform,
              moderationChannel] {
@@ -4284,6 +4993,14 @@ void ChannelView::addMessageContextMenuItems(QMenu *menu,
                     }
                 }
             });
+
+        auto messagePtr = layout->getMessagePtr();
+        if (commands::canPinChatMessage(moderationChannel, messagePtr))
+        {
+            menu->addAction("&Pin message", [moderationChannel, messagePtr] {
+                commands::pinChatMessage(moderationChannel, messagePtr, 1200);
+            });
+        }
     }
 
     bool isSearch = this->context_ == Context::Search;
@@ -4447,6 +5164,12 @@ void ChannelView::addCommandExecutionContextMenuItems(
             {
                 channel = this->underlyingChannel_;
             }
+            channel = commandChannelForMessage(
+                channel, layout->getMessage()->platform);
+            if (!channel)
+            {
+                return;
+            }
             auto *split = dynamic_cast<Split *>(this->parentWidget());
             QString userText;
             if (split)
@@ -4461,7 +5184,8 @@ void ChannelView::addCommandExecutionContextMenuItems(
                     {"input.text", userText},
                 });
 
-            value = getApp()->getCommands()->execCommand(value, channel, false);
+            value = getApp()->getCommands()->execCommand(
+                value, channel, false, layout->getMessage());
 
             channel->sendMessage(value);
         });
@@ -4679,12 +5403,20 @@ void ChannelView::handleLinkClick(QMouseEvent *event, const Link &link,
                 }
             }
 
+            channel = commandChannelForMessage(
+                channel, layout->getMessage()->platform);
+            if (!channel)
+            {
+                break;
+            }
+
             // Execute command clicking a moderator button
             value = getApp()->getCommands()->execCustomCommand(
                 QStringList(), Command{"(modaction)", value}, true, channel,
                 layout->getMessage());
 
-            value = getApp()->getCommands()->execCommand(value, channel, false);
+            value = getApp()->getCommands()->execCommand(
+                value, channel, false, layout->getMessage());
 
             channel->sendMessage(value);
         }
@@ -4906,6 +5638,14 @@ void ChannelView::setInputReply(const MessagePtr &message)
 
     if (message == nullptr || this->split_ == nullptr)
     {
+        return;
+    }
+
+    const auto channelType = this->channel()->getType();
+    if (channelType == Channel::Type::TwitchMentions ||
+        channelType == Channel::Type::TwitchAutomod)
+    {
+        getApp()->getWindows()->scrollToMessage(message, true);
         return;
     }
 

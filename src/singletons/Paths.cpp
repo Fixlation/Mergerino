@@ -90,12 +90,25 @@ void Paths::initRootDirectory()
 {
     assert(this->portable_.has_value());
 
-    // Root path = %APPDATA%/Mergerino or the folder that the executable
-    // resides in
+    // Root path = an explicitly configured data root, %APPDATA%/Mergerino,
+    // or the folder that the executable resides in.
 
     this->rootAppDataDirectory = [&]() -> QString {
+        const auto &modes = Modes::instance();
+
+        if (!modes.dataRoot.isEmpty())
+        {
+            auto path = QDir::fromNativeSeparators(modes.dataRoot);
+            if (QDir::isRelativePath(path))
+            {
+                path = QDir(QCoreApplication::applicationDirPath())
+                           .absoluteFilePath(path);
+            }
+            return QDir::cleanPath(path);
+        }
+
         // portable
-        if (Modes::instance().isPortable)
+        if (modes.isPortable)
         {
             return QCoreApplication::applicationDirPath();
         }

@@ -9,6 +9,7 @@
 #include "util/DebugCount.hpp"
 #include "util/QStringHash.hpp"
 
+#include <QByteArray>
 #include <QColor>
 #include <QTime>
 
@@ -125,6 +126,10 @@ struct Message {
     mutable bool frozen = false;
 
     MessagePlatform platform = MessagePlatform::AnyOrTwitch;
+
+    // The original Kick chat-message object. Kick's pin endpoint requires the
+    // complete message payload rather than only the message ID.
+    QByteArray kickMessageJson;
 
     std::vector<std::unique_ptr<MessageElement>> elements;
 

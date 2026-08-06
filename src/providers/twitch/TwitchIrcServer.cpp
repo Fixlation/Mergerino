@@ -39,6 +39,7 @@
 #include <pajlada/signals/signalholder.hpp>
 #include <QCoreApplication>
 #include <QMetaEnum>
+#include <QUuid>
 
 #include <cassert>
 #include <functional>
@@ -53,6 +54,26 @@ constexpr int JOIN_RATELIMIT_BUDGET = 18;
 constexpr int JOIN_RATELIMIT_COOLDOWN = 12500;
 
 using namespace chatterino;
+
+QString outgoingTwitchMessageTags(const QString &replyParentId = {})
+{
+    QStringList tags;
+    if (getSettings()->spoofTwitchChat)
+    {
+        auto nonce = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        nonce.remove(QChar('-'));
+        tags.append(QStringLiteral("client-nonce=") + nonce);
+    }
+    if (!replyParentId.isEmpty())
+    {
+        tags.append(QStringLiteral("reply-parent-msg-id=") + replyParentId);
+    }
+    if (tags.isEmpty())
+    {
+        return {};
+    }
+    return QChar('@') + tags.join(QChar(';')) + QChar(' ');
+}
 
 void sendHelixMessage(const std::shared_ptr<TwitchChannel> &channel,
                       const QString &message, const QString &replyParentId = {})
@@ -755,7 +776,7 @@ void TwitchIrcServer::onReplySendRequested(
     }
     else
     {
-        this->sendRawMessage("@reply-parent-msg-id=" + replyId + " PRIVMSG #" +
+        this->sendRawMessage(outgoingTwitchMessageTags(replyId) + "PRIVMSG #" +
                              channel->getName() + " :" + message);
     }
     sent = true;
@@ -1162,7 +1183,8 @@ void TwitchIrcServer::disconnect()
 void TwitchIrcServer::sendMessage(const QString &channelName,
                                   const QString &message)
 {
-    this->sendRawMessage("PRIVMSG #" + channelName + " :" + message);
+    this->sendRawMessage(outgoingTwitchMessageTags() + "PRIVMSG #" +
+                         channelName + " :" + message);
 }
 
 void TwitchIrcServer::sendRawMessage(const QString &rawMessage)

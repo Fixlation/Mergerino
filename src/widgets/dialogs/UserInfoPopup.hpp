@@ -5,6 +5,7 @@
 #pragma once
 
 #include "singletons/Paths.hpp"
+#include "providers/twitch/api/TwitchWebApi.hpp"
 #include "widgets/BaseWindow.hpp"
 #include "widgets/DraggablePopup.hpp"
 
@@ -27,6 +28,7 @@ using ChannelPtr = std::shared_ptr<Channel>;
 class Label;
 class MarkdownLabel;
 class EditUserNotesDialog;
+class TwitchModCommentsDialog;
 class ChannelView;
 class Split;
 struct HelixUser;
@@ -72,6 +74,9 @@ private:
     void updateLatestMessages();
     void updateNotes();
     void updateLogUserButton();
+    void updateTargetRoleStateFromMessages();
+    void refreshChannelModerationPermissions();
+    void openModComments();
     void prepareForClose();
     bool canModerateTargetUser() const;
     bool isCurrentPlatformUser() const;
@@ -81,7 +86,7 @@ private:
                                      int durationSeconds);
 
     void loadAvatar(const QString &userID, const QString &pictureURL,
-                    bool isKick);
+                    bool isKick, bool loadSevenTV = true);
 
     void loadSevenTVAvatar(const QString &userID, bool isKick);
     void setSevenTVAvatar(const QString &filename, const QByteArray &format);
@@ -129,6 +134,12 @@ private:
     std::unique_ptr<pajlada::Signals::ScopedConnection>
         youtubeModerationConnection_;
 
+    TwitchChannelModerationPermissions channelModerationPermissions_;
+    int channelModerationPermissionsGeneration_ = 0;
+    bool targetIsModerator_ = false;
+    bool targetIsVip_ = false;
+    bool targetIsBroadcaster_ = false;
+
     // If we should close the dialog automatically if the user clicks out
     // Set based on the "Automatically close usercard when it loses focus" setting
     // Pinned status is tracked in DraggablePopup::isPinned_.
@@ -153,6 +164,7 @@ private:
         QCheckBox *ignoreHighlights = nullptr;
         MarkdownLabel *notesPreview = nullptr;
         LabelButton *notesAdd = nullptr;
+        LabelButton *modComments = nullptr;
         QCheckBox *logUser = nullptr;
 
         Label *noMessagesLabel = nullptr;
@@ -160,6 +172,12 @@ private:
 
         LabelButton *usercardLabel = nullptr;
         LabelButton *switchAvatars = nullptr;
+        LabelButton *moderatorToggle = nullptr;
+        LabelButton *vipToggle = nullptr;
+        // Preserve the established UI struct layout for the project's
+        // incremental changed-file build workflow.
+        QWidget *roleToggleLayoutPadding1 = nullptr;
+        QWidget *roleToggleLayoutPadding2 = nullptr;
 
         TimeoutWidget *timeoutWidget = nullptr;
     } ui_;
@@ -168,6 +186,7 @@ private:
     bool isTwitchAvatarShown_ = true;
     QPixmap avatarPixmap_;
     QPointer<EditUserNotesDialog> editUserNotesDialog_;
+    QPointer<TwitchModCommentsDialog> twitchModCommentsDialog_;
 
     bool isKick_ = false;
     bool isGenericPlatform_ = false;

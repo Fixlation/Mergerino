@@ -47,4 +47,4 @@ body:
     attributes:
       label: OS and Mergerino Version
       description: The name of your Operating System and the version shown in Mergerino's about settings page.
-      placeholder: Mergerino 1.3.2 on Windows 10 Version 2009, kernel 10.0.19043
+      placeholder: Mergerino 1.3.3 on Windows 10 Version 2009, kernel 10.0.19043

@@ -34,6 +34,9 @@
 
 #include <boost/json/parse.hpp>
 
+#include <QJsonObject>
+#include <QJsonValue>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -46,8 +49,125 @@ namespace chatterino {
 namespace {
 
 std::atomic_uint64_t NEXT_LOCAL_MESSAGE_ID = 1;
+
+struct KickPollState {
+    std::optional<KickPoll> poll;
+};
+
+std::unordered_map<const KickChannel *, std::unique_ptr<KickPollState>>
+    KICK_POLL_STATES;
+
+struct KickPredictionRefreshState {
+    uint64_t revision = 0;
+    uint64_t generation = 0;
+};
+
+std::unordered_map<const KickChannel *,
+                   std::unique_ptr<KickPredictionRefreshState>>
+    KICK_PREDICTION_REFRESH_STATES;
+
+KickPollState &kickPollState(const KickChannel *channel)
+{
+    auto &state = KICK_POLL_STATES[channel];
+    if (!state)
+    {
+        state = std::make_unique<KickPollState>();
+    }
+    return *state;
+}
+
+KickPredictionRefreshState &kickPredictionRefreshState(
+    const KickChannel *channel)
+{
+    auto &state = KICK_PREDICTION_REFRESH_STATES[channel];
+    if (!state)
+    {
+        state = std::make_unique<KickPredictionRefreshState>();
+    }
+    return *state;
+}
+
 constexpr uint16_t KICK_LEVEL_BADGE_IMAGE_SIZE = 17;
 constexpr int LOCAL_SENT_MESSAGE_DELAY_MS = 250;
+
+QString predictionID(const QJsonValue &value)
+{
+    const auto stringID = value.toString().trimmed();
+    if (!stringID.isEmpty())
+    {
+        return stringID;
+    }
+
+    bool ok = false;
+    const auto numericID = value.toVariant().toULongLong(&ok);
+    return ok && numericID != 0 ? QString::number(numericID) : QString{};
+}
+
+QDateTime predictionDateTime(const QJsonValue &value)
+{
+    const auto parsed =
+        QDateTime::fromString(value.toString().trimmed(), Qt::ISODate);
+    return parsed.isValid() ? parsed.toUTC() : QDateTime{};
+}
+
+std::optional<KickPrediction> parseLatestPrediction(
+    const QJsonObject &rawPrediction)
+{
+    KickPrediction prediction;
+    prediction.id =
+        predictionID(rawPrediction.value(QStringLiteral("id")));
+    prediction.title =
+        rawPrediction.value(QStringLiteral("title")).toString().trimmed();
+    prediction.state = rawPrediction.value(QStringLiteral("state"))
+                           .toString()
+                           .trimmed()
+                           .toUpper();
+    prediction.durationSeconds =
+        rawPrediction.value(QStringLiteral("duration")).toInt();
+    if (prediction.durationSeconds <= 0)
+    {
+        prediction.durationSeconds =
+            rawPrediction.value(QStringLiteral("duration_seconds")).toInt();
+    }
+    prediction.createdAt = predictionDateTime(
+        rawPrediction.value(QStringLiteral("created_at")));
+    prediction.updatedAt = predictionDateTime(
+        rawPrediction.value(QStringLiteral("updated_at")));
+    prediction.lockedAt = predictionDateTime(
+        rawPrediction.value(QStringLiteral("locked_at")));
+    prediction.winningOutcomeID = predictionID(
+        rawPrediction.value(QStringLiteral("winning_outcome_id")));
+
+    for (const auto &rawOutcome :
+         rawPrediction.value(QStringLiteral("outcomes")).toArray())
+    {
+        const auto outcome = rawOutcome.toObject();
+        const auto title =
+            outcome.value(QStringLiteral("title")).toString().trimmed();
+        if (title.isEmpty())
+        {
+            continue;
+        }
+
+        prediction.outcomes.push_back({
+            .id = predictionID(outcome.value(QStringLiteral("id"))),
+            .title = title,
+            .totalVoteAmount =
+                outcome.value(QStringLiteral("total_vote_amount")).toInt(),
+            .voteCount =
+                outcome.value(QStringLiteral("vote_count")).toInt(),
+        });
+    }
+
+    if (prediction.state.isEmpty() ||
+        (prediction.isOpen() &&
+         (prediction.title.isEmpty() || prediction.outcomes.empty())))
+    {
+        return std::nullopt;
+    }
+
+    return prediction;
+}
 
 QString makeLocalKickMessageID()
 {
@@ -201,6 +321,8 @@ KickChannel::KickChannel(const QString &name)
 
 KickChannel::~KickChannel()
 {
+    KICK_POLL_STATES.erase(this);
+
     auto *app = getApp();
     if (app)
     {
@@ -446,10 +568,22 @@ bool KickChannel::canSendMessage() const
 
 void KickChannel::sendMessage(const QString &message)
 {
-    this->sendReply(message, {});
+    this->sendReply(message, {}, {});
+}
+
+void KickChannel::sendMessageAndWaitForEcho(
+    const QString &message, SentMessageCallback callback)
+{
+    this->sendReply(message, {}, std::move(callback));
 }
 
 void KickChannel::sendReply(const QString &message, const QString &replyToId)
+{
+    this->sendReply(message, replyToId, {});
+}
+
+void KickChannel::sendReply(const QString &message, const QString &replyToId,
+                            SentMessageCallback callback)
 {
     if (!getApp()->getAccounts()->kick.isLoggedIn())
     {
@@ -477,6 +611,7 @@ void KickChannel::sendReply(const QString &message, const QString &replyToId)
             .localID = localID,
             .messageText = pending->messageText,
             .createdAt = pending->serverReceivedTime,
+            .confirmedCallback = std::move(callback),
         });
         QTimer::singleShot(
             LOCAL_SENT_MESSAGE_DELAY_MS,
@@ -504,9 +639,18 @@ void KickChannel::sendReply(const QString &message, const QString &replyToId)
     }
 
     this->updateSevenTVActivity();
+
+    const bool sendWaitStarted =
+        this->roomModes_.slowModeDuration && !this->hasHighRateLimit();
+    if (sendWaitStarted)
+    {
+        this->setSendWait(*this->roomModes_.slowModeDuration);
+    }
+
     getKickApi()->sendMessage(
         this->userID(), prepared, replyToId,
-        [weak = this->weakFromThis(), localID](const auto &res) {
+        [weak = this->weakFromThis(), localID,
+         sendWaitStarted](const auto &res) {
             auto self = weak.lock();
             if (!self)
             {
@@ -514,14 +658,14 @@ void KickChannel::sendReply(const QString &message, const QString &replyToId)
             }
             if (res)
             {
-                if (self->roomModes_.slowModeDuration)
-                {
-                    self->setSendWait(*self->roomModes_.slowModeDuration);
-                }
                 return;  // message sent
             }
             if (self)
             {
+                if (sendWaitStarted)
+                {
+                    self->setSendWait(0s);
+                }
                 self->markPendingSentMessageFailed(localID);
                 self->addSystemMessage(u"Failed to send message: " %
                                        res.error());
@@ -594,14 +738,23 @@ bool KickChannel::tryReplacePendingSentMessage(const MessagePtr &message)
             continue;
         }
 
+        auto confirmedCallback = std::move(it->confirmedCallback);
         if (auto pending = this->findMessageByID(it->localID))
         {
             this->replaceMessage(pending, message);
             this->pendingSentMessages_.erase(it);
+            if (confirmedCallback)
+            {
+                confirmedCallback(message);
+            }
             return true;
         }
 
         this->pendingSentMessages_.erase(it);
+        if (confirmedCallback)
+        {
+            confirmedCallback(message);
+        }
         return false;
     }
 
@@ -613,8 +766,10 @@ void KickChannel::prunePendingSentMessages(const QDateTime &now)
     auto it = this->pendingSentMessages_.begin();
     while (it != this->pendingSentMessages_.end())
     {
-        if (it->createdAt.msecsTo(now) > 30'000 ||
-            !this->findMessageByID(it->localID))
+        const auto age = it->createdAt.msecsTo(now);
+        if (age > 30'000 ||
+            (age > LOCAL_SENT_MESSAGE_DELAY_MS &&
+             !this->findMessageByID(it->localID)))
         {
             it = this->pendingSentMessages_.erase(it);
             continue;
@@ -885,6 +1040,138 @@ void KickChannel::updateRoomModes(const RoomModes &modes)
     }
 }
 
+const std::optional<KickPrediction> &KickChannel::activePrediction() const
+{
+    return this->activePrediction_;
+}
+
+void KickChannel::refreshPrediction()
+{
+    const auto slug = this->slug_.trimmed();
+    if (slug.isEmpty())
+    {
+        return;
+    }
+
+    auto &refreshState = kickPredictionRefreshState(this);
+    const auto requestGeneration = ++refreshState.generation;
+    const auto revision = refreshState.revision;
+    const auto weak = this->weakFromThis();
+    KickApi::privateLatestPrediction(
+        slug, [weak, requestGeneration, revision](
+                  const ExpectedStr<QJsonObject> &result) {
+            auto self = weak.lock();
+            if (!self)
+            {
+                return;
+            }
+            auto &refreshState = kickPredictionRefreshState(self.get());
+            if (refreshState.generation != requestGeneration ||
+                refreshState.revision != revision)
+            {
+                return;
+            }
+
+            if (!result)
+            {
+                qCWarning(chatterinoKick)
+                    << *self << "Failed to refresh active prediction:"
+                    << result.error();
+                return;
+            }
+
+            if (result->isEmpty())
+            {
+                if (self->activePrediction_)
+                {
+                    refreshState.revision++;
+                    self->activePrediction_.reset();
+                    self->predictionChanged.invoke();
+                }
+                return;
+            }
+
+            auto prediction = parseLatestPrediction(*result);
+            if (!prediction)
+            {
+                qCWarning(chatterinoKick)
+                    << *self << "Ignored incomplete latest prediction";
+                return;
+            }
+
+            self->updatePrediction(std::move(*prediction));
+        });
+}
+
+void KickChannel::updatePrediction(KickPrediction prediction)
+{
+    kickPredictionRefreshState(this).revision++;
+    prediction.state = prediction.state.trimmed().toUpper();
+
+    std::optional<KickPrediction> next;
+    if (prediction.isOpen())
+    {
+        next = std::move(prediction);
+    }
+
+    if (this->activePrediction_ == next)
+    {
+        return;
+    }
+
+    this->activePrediction_ = std::move(next);
+    this->predictionChanged.invoke();
+}
+
+const std::optional<KickPoll> &KickChannel::activePoll() const
+{
+    return kickPollState(this).poll;
+}
+
+void KickChannel::updatePoll(std::optional<KickPoll> poll)
+{
+    const auto now = QDateTime::currentDateTimeUtc();
+    if (poll)
+    {
+        poll->state = poll->state.trimmed().toUpper();
+        if (!poll->isVisible() ||
+            (poll->hideAt.isValid() && poll->hideAt <= now))
+        {
+            poll.reset();
+        }
+    }
+
+    auto &state = kickPollState(this);
+    if (state.poll == poll)
+    {
+        return;
+    }
+
+    state.poll = std::move(poll);
+    this->predictionChanged.invoke();
+
+    if (!state.poll || !state.poll->hideAt.isValid())
+    {
+        return;
+    }
+
+    const auto hideAt = state.poll->hideAt;
+    const auto delayMs =
+        std::clamp<qint64>(now.msecsTo(hideAt), 1, 24 * 60 * 60 * 1000);
+    const auto weak = this->weakFromThis();
+    QTimer::singleShot(static_cast<int>(delayMs), [weak, hideAt] {
+        auto channel = weak.lock();
+        if (channel == nullptr || !channel->activePoll() ||
+            channel->activePoll()->hideAt != hideAt ||
+            QDateTime::currentDateTimeUtc() < hideAt)
+        {
+            return;
+        }
+
+        channel->updatePoll(std::nullopt);
+    });
+}
+
 void KickChannel::setSendWait(std::chrono::seconds waitTime)
 {
     if (waitTime <= 0s)
@@ -955,9 +1242,35 @@ void KickChannel::resolveChannelInfo()
             self->updateRoomModes(RoomModes{
                 .subscribersMode = res->chatroom.subscribersMode,
                 .emotesMode = res->chatroom.emotesMode,
-                .slowModeDuration = res->chatroom.slowModeDuration,
+                // Kick's legacy channel payload reports a stale interval.
+                // The current chat-settings request below is authoritative.
+                .slowModeDuration = std::nullopt,
                 .followersModeDuration = res->chatroom.followersModeDuration,
             });
+            KickApi::privateChatSettings(
+                res->channelID,
+                [weak](const ExpectedStr<KickPrivateChatSettings> &settings) {
+                    auto self = weak.lock();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    if (!settings)
+                    {
+                        qCWarning(chatterinoKick)
+                            << *self << "Failed to fetch chat settings:"
+                            << settings.error();
+                        return;
+                    }
+
+                    self->updateRoomModes(RoomModes{
+                        .subscribersMode = settings->subscribersMode,
+                        .emotesMode = settings->emotesMode,
+                        .slowModeDuration = settings->slowModeDuration,
+                        .followersModeDuration =
+                            settings->followersModeDuration,
+                    });
+                });
             self->updateStreamData(*res);
             self->reloadKickChannelEmotes();
             self->refreshOwnIdentity();
@@ -1206,20 +1519,34 @@ void KickChannel::setUserInfo(UserInit init)
                                 this->weakFromThis());
             const auto roomID = this->roomID();
             const auto channelID = this->channelID();
-            this->loadRecentMessages([weak = this->weakFromThis(), roomID,
-                                      channelID] {
+            QTimer::singleShot(0, [weak = this->weakFromThis(), roomID,
+                                   channelID] {
                 auto self = weak.lock();
                 if (!self)
                 {
                     return;
                 }
-                getApp()->getKickChatServer()->liveUpdates().joinRoom(roomID,
-                                                                       channelID);
+                self->loadRecentMessages([weak, roomID, channelID] {
+                    auto self = weak.lock();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    getApp()->getKickChatServer()->liveUpdates().joinRoom(
+                        roomID, channelID);
+                });
             });
         }
         else
         {
-            this->loadRecentMessages();
+            QTimer::singleShot(0, [weak = this->weakFromThis()] {
+                auto self = weak.lock();
+                if (!self)
+                {
+                    return;
+                }
+                self->loadRecentMessages();
+            });
         }
     }
 
@@ -1722,20 +2049,22 @@ bool KickChannel::tryReplaceLastSeventvAddOrRemove(MessageFlag op,
 void KickChannel::emitSendWait()
 {
     auto now = std::chrono::steady_clock::now();
-    std::chrono::seconds remaining = 0s;
+    std::chrono::milliseconds remaining{0};
     if (this->sendWaitEnd_)
     {
-        remaining = std::chrono::duration_cast<std::chrono::seconds>(
+        remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             *this->sendWaitEnd_ - now);
     }
-    if (remaining <= 0s)
+    if (remaining <= std::chrono::milliseconds{0})
     {
         this->sendWaitTimer_.stop();
-        this->sendWaitUpdate.invoke({});
+        this->sendWaitUpdate.invoke(0);
     }
     else
     {
-        this->sendWaitUpdate.invoke(formatTime(remaining, 2));
+        const auto rounded = std::chrono::duration_cast<std::chrono::seconds>(
+            remaining + std::chrono::milliseconds{999});
+        this->sendWaitUpdate.invoke(static_cast<int>(rounded.count()));
     }
 }
 

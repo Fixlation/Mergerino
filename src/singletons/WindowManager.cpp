@@ -34,12 +34,14 @@
 
 #include <pajlada/settings/backup.hpp>
 #include <QDebug>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QSaveFile>
 #include <QScreen>
+#include <QTextStream>
 
 #include <chrono>
 #include <optional>
@@ -123,6 +125,18 @@ QJsonArray messagePlatformArray(const std::vector<MessagePlatform> &platforms)
         array.append(messagePlatformName(platform));
     }
     return array;
+}
+
+void layoutTrace(const QString &message)
+{
+    QFile file(QStringLiteral("mergerino-layout-trace.txt"));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    {
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream << message << '\n';
 }
 
 }  // namespace
@@ -253,6 +267,7 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
     this->forceLayoutChannelViewsListener.add(
         settings.showBlockedTermAutomodMessages);
     this->forceLayoutChannelViewsListener.add(settings.hideModerated);
+    this->forceLayoutChannelViewsListener.add(linkPreviewModeSetting());
     this->forceLayoutChannelViewsListener.add(
         settings.streamerModeHideModActions);
     this->forceLayoutChannelViewsListener.add(
@@ -270,6 +285,9 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
     this->reloadChannelViewsListener.add(settings.platformEventHighlightStyle);
     this->reloadChannelViewsListener.add(
         settings.platformEventHighlightCustomColor);
+    this->reloadChannelViewsListener.add(platformAlertHighlightStyleSetting());
+    this->reloadChannelViewsListener.add(
+        platformAlertHighlightCustomColorSetting());
 
     settings.messageAnimations.connect(
         [this] {
@@ -280,6 +298,7 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
                 });
             }
         },
+        this->signalHolder,
         false);
 
     this->repaintVisibleChatWidgetsListener.add(
@@ -513,7 +532,12 @@ void WindowManager::select(SplitContainer *container)
 
 void WindowManager::scrollToMessage(const MessagePtr &message)
 {
-    this->scrollToMessageSignal.invoke(message);
+    this->scrollToMessage(message, false);
+}
+
+void WindowManager::scrollToMessage(const MessagePtr &message, bool startReply)
+{
+    this->scrollToMessageSignal.invoke(message, startReply);
 }
 
 QRect WindowManager::emotePopupBounds() const
@@ -533,6 +557,7 @@ void WindowManager::setEmotePopupBounds(QRect bounds)
 void WindowManager::initialize()
 {
     assertInGuiThread();
+    layoutTrace(QStringLiteral("WindowManager::initialize start"));
 
     {
         WindowLayout windowLayout;
@@ -543,7 +568,9 @@ void WindowManager::initialize()
         }
         else
         {
+            layoutTrace(QStringLiteral("before loadWindowLayoutFromFile"));
             windowLayout = this->loadWindowLayoutFromFile();
+            layoutTrace(QStringLiteral("after loadWindowLayoutFromFile"));
         }
 
         auto desired = this->appArgs.activateChannel;
@@ -554,7 +581,9 @@ void WindowManager::initialize()
 
         this->emotePopupBounds_ = windowLayout.emotePopupBounds_;
 
+        layoutTrace(QStringLiteral("before applyWindowLayout"));
         this->applyWindowLayout(windowLayout);
+        layoutTrace(QStringLiteral("after applyWindowLayout"));
     }
 
     if (this->appArgs.isFramelessEmbed)
@@ -566,6 +595,7 @@ void WindowManager::initialize()
     // No main window has been created from loading, create an empty one
     if (this->mainWindow_ == nullptr)
     {
+        layoutTrace(QStringLiteral("creating fallback main window"));
         this->mainWindow_ = &this->createWindow(WindowType::Main);
         this->mainWindow_->getNotebook().addPage(true);
 
@@ -576,6 +606,7 @@ void WindowManager::initialize()
         }
     }
 
+    layoutTrace(QStringLiteral("WindowManager::initialize end"));
 }
 
 void WindowManager::save()
@@ -593,8 +624,40 @@ void WindowManager::save()
 
     qCDebug(chatterinoWindowmanager) << "Saving";
     assertInGuiThread();
-    QJsonDocument document;
+    QJsonDocument document(this->currentWindowLayoutJson());
+    // save file
+    std::error_code ec;
+    pajlada::Settings::Backup::saveWithBackup(
+        qStringToStdPath(this->windowLayoutFilePath),
+        {.enabled = true, .numSlots = 9},
+        [&](const auto &path, auto &ec) {
+            QSaveFile file(stdPathToQString(path));
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            {
+                ec = std::make_error_code(std::errc::io_error);
+                return;
+            }
 
+            file.write(document.toJson(QJsonDocument::Indented));
+            if (!file.commit() || file.error() != QFile::NoError)
+            {
+                ec = std::make_error_code(std::errc::io_error);
+            }
+        },
+        ec);
+
+    if (ec)
+    {
+        // TODO(Qt 6.5): drop fromStdString
+        qCWarning(chatterinoWindowmanager)
+            << "Failed to save windowlayout"
+            << QString::fromStdString(ec.message());
+    }
+}
+
+QJsonObject WindowManager::currentWindowLayoutJson() const
+{
+    assertInGuiThread();
     // "serialize"
     QJsonArray windowArr;
     for (Window *window : this->windows_)
@@ -681,36 +744,7 @@ void WindowManager::save()
 
     QJsonObject obj;
     obj.insert("windows", windowArr);
-    document.setObject(obj);
-
-    // save file
-    std::error_code ec;
-    pajlada::Settings::Backup::saveWithBackup(
-        qStringToStdPath(this->windowLayoutFilePath),
-        {.enabled = true, .numSlots = 9},
-        [&](const auto &path, auto &ec) {
-            QSaveFile file(stdPathToQString(path));
-            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            {
-                ec = std::make_error_code(std::errc::io_error);
-                return;
-            }
-
-            file.write(document.toJson(QJsonDocument::Indented));
-            if (!file.commit() || file.error() != QFile::NoError)
-            {
-                ec = std::make_error_code(std::errc::io_error);
-            }
-        },
-        ec);
-
-    if (ec)
-    {
-        // TODO(Qt 6.5): drop fromStdString
-        qCWarning(chatterinoWindowmanager)
-            << "Failed to save windowlayout"
-            << QString::fromStdString(ec.message());
-    }
+    return obj;
 }
 
 void WindowManager::sendAlert()
@@ -830,6 +864,8 @@ void WindowManager::encodeNodeRecursively(SplitNode *node, QJsonObject &obj)
                        node->getSplit()->filterActivityExplicit());
             obj.insert("activityMessageScale",
                        node->getSplit()->activityMessageScale());
+            obj.insert("collapseGiftedSubscriptions",
+                       node->getSplit()->collapseGiftedSubscriptions());
             obj.insert("activityTimeDisplayMode",
                        qmagicenum::enumNameString(
                            node->getSplit()->activityTimeDisplayMode())
@@ -985,6 +1021,8 @@ void WindowManager::encodeChannel(IndirectChannel channel, QJsonObject &obj)
             obj.insert("youtubeStreamUrl", config.youtubeStreamUrl);
             obj.insert("tiktokEnabled", config.tiktokEnabled);
             obj.insert("tiktokSource", config.tiktokSource);
+            obj.insert("tiktokShowJoinMessages",
+                       config.tiktokShowJoinMessages);
         }
         break;
 
@@ -1058,6 +1096,8 @@ IndirectChannel WindowManager::decodeChannel(const SplitDescriptor &descriptor)
             .youtubeStreamUrl = descriptor.mergedYoutubeStreamUrl_,
             .tiktokEnabled = descriptor.mergedTikTokEnabled,
             .tiktokSource = descriptor.mergedTikTokSource_,
+            .tiktokShowJoinMessages =
+                descriptor.mergedTikTokShowJoinMessages,
         }));
     }
 
@@ -1094,19 +1134,29 @@ WindowLayout WindowManager::loadWindowLayoutFromFile() const
 
 void WindowManager::applyWindowLayout(const WindowLayout &layout)
 {
+    layoutTrace(QStringLiteral("applyWindowLayout start windows=%1")
+                    .arg(layout.windows_.size()));
     if (this->appArgs.dontLoadMainWindow)
     {
+        layoutTrace(QStringLiteral("applyWindowLayout skipped dontLoadMainWindow"));
         return;
     }
 
     // Set emote popup position
     this->emotePopupBounds_ = layout.emotePopupBounds_;
 
+    int windowIndex = 0;
     for (const auto &windowData : layout.windows_)
     {
         auto type = windowData.type_;
 
+        layoutTrace(QStringLiteral("window %1 before create type=%2 tabs=%3")
+                        .arg(windowIndex)
+                        .arg(type == WindowType::Main ? QStringLiteral("main")
+                                                      : QStringLiteral("popup"))
+                        .arg(windowData.tabs_.size()));
         Window &window = this->createWindow(type, false);
+        layoutTrace(QStringLiteral("window %1 after create").arg(windowIndex));
 
         if (type == WindowType::Main)
         {
@@ -1117,6 +1167,7 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
 
         // get geometry
         {
+            layoutTrace(QStringLiteral("window %1 before geometry").arg(windowIndex));
             // out of bounds windows
             auto screens = QApplication::screens();
             bool outOfBounds =
@@ -1158,18 +1209,30 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
                     },
                     widgets::BoundsChecking::Off);
             }
+            layoutTrace(QStringLiteral("window %1 after geometry").arg(windowIndex));
         }
 
         for (const auto &folder : windowData.tabFolders_)
         {
+            layoutTrace(QStringLiteral("window %1 before restore folder").arg(windowIndex));
             window.getNotebook().restoreTabFolder(folder.id_, folder.title_,
                                                   folder.expanded_);
+            layoutTrace(QStringLiteral("window %1 after restore folder").arg(windowIndex));
         }
 
         // open tabs
+        int tabIndex = 0;
         for (const auto &tab : windowData.tabs_)
         {
+            layoutTrace(QStringLiteral("window %1 tab %2 before addPage selected=%3 hasRoot=%4")
+                            .arg(windowIndex)
+                            .arg(tabIndex)
+                            .arg(tab.selected_)
+                            .arg(tab.rootNode_.has_value()));
             SplitContainer *page = window.getNotebook().addPage(false);
+            layoutTrace(QStringLiteral("window %1 tab %2 after addPage")
+                            .arg(windowIndex)
+                            .arg(tabIndex));
 
             // set custom title
             if (!tab.customTitle_.isEmpty())
@@ -1185,7 +1248,13 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
             // selected
             if (tab.selected_)
             {
+                layoutTrace(QStringLiteral("window %1 tab %2 before select")
+                                .arg(windowIndex)
+                                .arg(tabIndex));
                 window.getNotebook().select(page);
+                layoutTrace(QStringLiteral("window %1 tab %2 after select")
+                                .arg(windowIndex)
+                                .arg(tabIndex));
             }
 
             // highlighting on new messages
@@ -1193,12 +1262,22 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
 
             if (tab.rootNode_)
             {
+                layoutTrace(QStringLiteral("window %1 tab %2 before applyFromDescriptor")
+                                .arg(windowIndex)
+                                .arg(tabIndex));
                 page->applyFromDescriptor(*tab.rootNode_);
+                layoutTrace(QStringLiteral("window %1 tab %2 after applyFromDescriptor")
+                                .arg(windowIndex)
+                                .arg(tabIndex));
             }
+            ++tabIndex;
         }
+        layoutTrace(QStringLiteral("window %1 before show").arg(windowIndex));
         window.show();
+        layoutTrace(QStringLiteral("window %1 after show").arg(windowIndex));
 
         // Set window state
+        layoutTrace(QStringLiteral("window %1 before state").arg(windowIndex));
         switch (windowData.state_)
         {
             case WindowDescriptor::State::Minimized: {
@@ -1214,7 +1293,10 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
             case WindowDescriptor::State::None:
                 break;
         }
+        layoutTrace(QStringLiteral("window %1 after state").arg(windowIndex));
+        ++windowIndex;
     }
+    layoutTrace(QStringLiteral("applyWindowLayout end"));
 }
 
 }  // namespace chatterino

@@ -33,7 +33,9 @@
 #    include <lauxlib.h>
 #    include <lua.h>
 #    include <lualib.h>
+#    include <QFile>
 #    include <QJsonDocument>
+#    include <QTextStream>
 #    include <sol/overload.hpp>
 #    include <sol/sol.hpp>
 #    include <sol/types.hpp>
@@ -45,6 +47,21 @@
 #    include <variant>
 
 namespace chatterino {
+namespace {
+
+void pluginStartupTrace(const QString &message)
+{
+    QFile file(QStringLiteral("mergerino-layout-trace.txt"));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    {
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream << message << '\n';
+}
+
+}  // namespace
 
 PluginController::PluginController(const Paths &paths_)
     : paths(paths_)
@@ -54,31 +71,52 @@ PluginController::PluginController(const Paths &paths_)
 
 void PluginController::initialize(Settings &settings)
 {
+    pluginStartupTrace(QStringLiteral("PluginController::initialize start"));
     // actuallyInitialize will be called by this connection
+    pluginStartupTrace(QStringLiteral("PluginController before pluginsEnabled connect"));
     settings.pluginsEnabled.connect([this](bool enabled) {
+        pluginStartupTrace(
+            QStringLiteral("PluginController pluginsEnabled callback enabled=%1")
+                .arg(enabled ? 1 : 0));
         if (enabled)
         {
+            pluginStartupTrace(QStringLiteral("PluginController before loadPlugins"));
             this->loadPlugins();
+            pluginStartupTrace(QStringLiteral("PluginController after loadPlugins"));
         }
         else
         {
             // uninitialize plugins
+            pluginStartupTrace(QStringLiteral("PluginController before plugins clear"));
             this->plugins_.clear();
+            pluginStartupTrace(QStringLiteral("PluginController after plugins clear"));
         }
     });
+    pluginStartupTrace(QStringLiteral("PluginController after pluginsEnabled connect"));
+    pluginStartupTrace(QStringLiteral("PluginController::initialize end"));
 }
 
 void PluginController::loadPlugins()
 {
+    pluginStartupTrace(QStringLiteral("PluginController::loadPlugins start"));
     this->plugins_.clear();
     auto dir = QDir(this->paths.pluginsDirectory);
+    pluginStartupTrace(
+        QStringLiteral("PluginController plugins dir=%1").arg(dir.path()));
     qCDebug(chatterinoLua) << "Loading plugins in" << dir.path();
     for (const auto &info :
          dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
     {
+        pluginStartupTrace(
+            QStringLiteral("PluginController before tryLoadFromDir %1")
+                .arg(info.absoluteFilePath()));
         auto pluginDir = QDir(info.absoluteFilePath());
         this->tryLoadFromDir(pluginDir);
+        pluginStartupTrace(
+            QStringLiteral("PluginController after tryLoadFromDir %1")
+                .arg(info.absoluteFilePath()));
     }
+    pluginStartupTrace(QStringLiteral("PluginController::loadPlugins end"));
 }
 
 bool PluginController::tryLoadFromDir(const QDir &pluginDir)

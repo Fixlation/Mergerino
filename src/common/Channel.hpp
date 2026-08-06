@@ -13,6 +13,7 @@
 #include <magic_enum/magic_enum.hpp>
 #include <pajlada/signals/signal.hpp>
 #include <QDate>
+#include <QDateTime>
 #include <QHash>
 #include <QSet>
 #include <QString>
@@ -29,6 +30,23 @@ using MessagePtr = std::shared_ptr<const Message>;
 using MessagePtrMut = std::shared_ptr<Message>;
 
 class EmoteMap;
+
+struct PinnedChatMessage {
+    enum class Platform : std::uint8_t {
+        Twitch,
+        Kick,
+    };
+
+    Platform platform = Platform::Twitch;
+    QString messageID;
+    QString messageText;
+    QString senderUserID;
+    QString senderLogin;
+    QString senderDisplayName;
+    QString pinnedByDisplayName;
+    QDateTime startsAt;
+    std::optional<QDateTime> endsAt;
+};
 
 class Channel : public std::enable_shared_from_this<Channel>, public MessageSink
 {
@@ -74,10 +92,20 @@ public:
     /// (index, prev-message, replacement)
     pajlada::Signals::Signal<size_t, const MessagePtr &, const MessagePtr &>
         messageReplaced;
+    // Static so adding targeted message removal does not alter Channel's
+    // object layout in incremental development builds.
+    static pajlada::Signals::Signal<Channel *, size_t, const MessagePtr &>
+        messageRemoved;
+    // Static so flag-only message updates can propagate without altering
+    // Channel's object layout in incremental development builds.
+    static pajlada::Signals::Signal<Channel *, const MessagePtr &>
+        messageFlagsChanged;
     /// Invoked when some number of messages were filled in using time received
     pajlada::Signals::Signal<const std::vector<MessagePtr> &> filledInMessages;
     pajlada::Signals::NoArgSignal displayNameChanged;
     pajlada::Signals::NoArgSignal messagesCleared;
+    pajlada::Signals::Signal<const std::optional<PinnedChatMessage> &>
+        pinnedMessageChanged;
 
     Type getType() const;
     const QString &getName() const;
@@ -124,10 +152,15 @@ public:
     void replaceMessage(size_t index, const MessagePtr &replacement);
     void replaceMessage(size_t hint, const MessagePtr &message,
                         const MessagePtr &replacement);
-    void disableMessage(const QString &messageID);
+    void removeMessage(const MessagePtr &message);
+    MessagePtr disableMessage(const QString &messageID,
+                              MessageFlags additionalFlags = {});
 
     /// Removes all messages from this channel and invokes #messagesCleared
     void clearMessages();
+
+    const std::optional<PinnedChatMessage> &pinnedMessage() const;
+    void setPinnedMessage(std::optional<PinnedChatMessage> message);
 
     MessagePtr findMessageByID(QStringView messageID) final;
 
@@ -179,6 +212,7 @@ private:
     LimitedQueue<MessagePtr> messages_;
     Type type_;
     bool anythingLogged_ = false;
+    std::optional<PinnedChatMessage> pinnedMessage_;
     QHash<QString, QSet<QString>> sessionFirstMessageUsersByStream_;
     QStringList sessionFirstMessageStreamOrder_;
 

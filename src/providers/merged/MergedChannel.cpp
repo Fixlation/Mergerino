@@ -334,6 +334,31 @@ const MergedChannelConfig &MergedChannel::config() const
     return this->config_;
 }
 
+void MergedChannel::setTikTokShowJoinMessages(bool enabled)
+{
+    if (this->config_.tiktokShowJoinMessages == enabled)
+    {
+        return;
+    }
+
+    this->config_.tiktokShowJoinMessages = enabled;
+    if (this->tiktokLiveChat_ != nullptr)
+    {
+        this->tiktokLiveChat_->setShowJoinMessages(enabled);
+    }
+
+    if (!enabled)
+    {
+        for (const auto &message : this->getMessageSnapshot())
+        {
+            if (message->flags.has(MessageFlag::TikTokJoinMessage))
+            {
+                this->removeMessage(message);
+            }
+        }
+    }
+}
+
 const QString &MergedChannel::getDisplayName() const
 {
     return this->displayName_;
@@ -488,9 +513,7 @@ void MergedChannel::reconnect()
 
     if (this->youtubeLiveChat_ != nullptr)
     {
-        this->youtubeLive_ = false;
-        this->youtubeLiveChat_->stop();
-        this->youtubeLiveChat_->start();
+        this->restartYouTubeLiveChat();
     }
 
     if (this->tiktokLiveChat_ != nullptr)
@@ -761,6 +784,69 @@ YouTubeLiveChat *MergedChannel::youtubeLiveChat() const
     return this->youtubeLiveChat_.get();
 }
 
+void MergedChannel::setYouTubeDiscoveryForeground(bool foreground)
+{
+    this->youtubeDiscoveryForeground_ = foreground;
+    if (this->youtubeLiveChat_)
+    {
+        this->youtubeLiveChat_->setDiscoveryForeground(foreground);
+    }
+}
+
+void MergedChannel::createYouTubeLiveChat()
+{
+    if (!this->config_.youtubeEnabled ||
+        this->config_.youtubeStreamUrl.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    this->youtubeLive_ = false;
+    this->youtubeLiveChat_ =
+        std::make_unique<YouTubeLiveChat>(this->config_.youtubeStreamUrl);
+    this->youtubeLiveChat_->setDiscoveryForeground(
+        this->youtubeDiscoveryForeground_);
+    this->youtubeConnections_.managedConnect(
+        this->youtubeLiveChat_->messageReceived,
+        [this](const MessagePtr &message) { this->addYouTubeMessage(message); });
+    this->youtubeConnections_.managedConnect(
+        this->youtubeLiveChat_->sourceResolved, [this](const QString &source) {
+            if (!source.isEmpty())
+            {
+                this->config_.youtubeStreamUrl = source;
+                getApp()->getWindows()->queueSave();
+            }
+        });
+    this->youtubeConnections_.managedConnect(
+        this->youtubeLiveChat_->systemMessageReceived,
+        [this](const MessagePtr &message) {
+            this->addSystemStatusMessage(message);
+            this->refreshStatusText();
+        });
+    this->youtubeConnections_.managedConnect(
+        this->youtubeLiveChat_->liveStatusChanged, [this] {
+            this->youtubeLive_ = this->youtubeLiveChat_->isLive();
+            this->refreshStatusText();
+            this->streamStatusChanged.invoke();
+        });
+    this->youtubeConnections_.managedConnect(
+        this->youtubeLiveChat_->moderationStatusChanged,
+        [this] { this->streamStatusChanged.invoke(); });
+    this->youtubeLiveChat_->start();
+}
+
+void MergedChannel::restartYouTubeLiveChat()
+{
+    this->youtubeLive_ = false;
+    if (this->youtubeLiveChat_)
+    {
+        this->youtubeLiveChat_->stop();
+    }
+    this->youtubeConnections_.clear();
+    this->youtubeLiveChat_.reset();
+    this->createYouTubeLiveChat();
+}
+
 void MergedChannel::initializeSources()
 {
     if (this->config_.twitchEnabled)
@@ -812,45 +898,15 @@ void MergedChannel::initializeSources()
         }
     }
 
-    if (this->config_.youtubeEnabled &&
-        !this->config_.youtubeStreamUrl.trimmed().isEmpty())
-    {
-        this->youtubeLiveChat_ =
-            std::make_unique<YouTubeLiveChat>(this->config_.youtubeStreamUrl);
-        this->youtubeConnections_.managedConnect(
-            this->youtubeLiveChat_->messageReceived,
-            [this](const MessagePtr &message) { this->addYouTubeMessage(message); });
-        this->youtubeConnections_.managedConnect(
-            this->youtubeLiveChat_->sourceResolved, [this](const QString &source) {
-                if (!source.isEmpty())
-                {
-                    this->config_.youtubeStreamUrl = source;
-                    getApp()->getWindows()->queueSave();
-                }
-            });
-        this->youtubeConnections_.managedConnect(
-            this->youtubeLiveChat_->systemMessageReceived, [this](const MessagePtr &message) {
-                this->addSystemStatusMessage(message);
-                this->refreshStatusText();
-            });
-        this->youtubeConnections_.managedConnect(
-            this->youtubeLiveChat_->liveStatusChanged, [this] {
-                this->youtubeLive_ = this->youtubeLiveChat_->isLive();
-                this->refreshStatusText();
-                this->streamStatusChanged.invoke();
-            });
-        this->youtubeConnections_.managedConnect(
-            this->youtubeLiveChat_->moderationStatusChanged, [this] {
-                this->streamStatusChanged.invoke();
-            });
-        this->youtubeLiveChat_->start();
-    }
+    this->createYouTubeLiveChat();
 
     if (this->config_.tiktokEnabled &&
         !this->config_.tiktokSource.trimmed().isEmpty())
     {
         this->tiktokLiveChat_ =
-            std::make_unique<TikTokLiveChat>(this->config_.tiktokSource);
+            std::make_unique<TikTokLiveChat>(
+                this->config_.tiktokSource,
+                this->config_.tiktokShowJoinMessages);
         this->tiktokConnections_.managedConnect(
             this->tiktokLiveChat_->messageReceived,
             [this](const MessagePtr &message) { this->addTikTokMessage(message); });
@@ -888,8 +944,10 @@ void MergedChannel::connectSourceSignals(
 
     connections.managedConnect(
         source->messageAppended,
-        [this, platform](MessagePtr &message, std::optional<MessageFlags>) {
-            this->appendMergedMessage(message, platform);
+        [this, platform](MessagePtr &message,
+                         std::optional<MessageFlags> overridingFlags) {
+            this->appendMergedMessage(message, platform,
+                                      std::move(overridingFlags));
         });
     connections.managedConnect(
         source->messagesAddedAtStart,
@@ -906,6 +964,29 @@ void MergedChannel::connectSourceSignals(
         [this, platform](size_t, const MessagePtr &previous,
                          const MessagePtr &replacement) {
             this->replaceMergedMessage(previous, replacement, platform);
+        });
+    connections.managedConnect(
+        Channel::messageFlagsChanged,
+        [this, sourceChannel = source.get(), platform](
+            Channel *changedChannel, const MessagePtr &message) {
+            if (changedChannel != sourceChannel)
+            {
+                return;
+            }
+
+            const auto key = messageKey(message, platform);
+            const auto it = this->mirroredMessages_.find(key);
+            if (it == this->mirroredMessages_.end())
+            {
+                return;
+            }
+
+            it->second->flags.set(
+                MessageFlag::Disabled,
+                message->flags.has(MessageFlag::Disabled));
+            it->second->flags.set(
+                MessageFlag::InvalidReplyTarget,
+                message->flags.has(MessageFlag::InvalidReplyTarget));
         });
 
     if (auto *twitch = dynamic_cast<TwitchChannel *>(source.get()))
@@ -1015,7 +1096,9 @@ void MergedChannel::fillInMergedMessages(
 }
 
 void MergedChannel::appendMergedMessage(const MessagePtr &source,
-                                        MessagePlatform platform)
+                                        MessagePlatform platform,
+                                        std::optional<MessageFlags>
+                                            overridingFlags)
 {
     auto merged = this->createAndTrackMergedMessage(source, platform);
     if (!merged)
@@ -1023,7 +1106,8 @@ void MergedChannel::appendMergedMessage(const MessagePtr &source,
         return;
     }
 
-    this->addMessage(merged, MessageContext::Repost);
+    this->addMessage(merged, MessageContext::Repost,
+                     std::move(overridingFlags));
 }
 
 void MergedChannel::replaceMergedMessage(const MessagePtr &previous,
@@ -1201,15 +1285,19 @@ void MergedChannel::addTikTokMessage(const MessagePtr &message)
         this->mirroredMessages_[key] = merged;
     }
 
-    const auto chatterName =
-        !merged->loginName.isEmpty() ? merged->loginName : merged->displayName;
-    if (!chatterName.isEmpty())
+    if (!merged->flags.has(MessageFlag::System))
     {
-        this->addRecentChatter(chatterName);
-    }
+        const auto chatterName = !merged->loginName.isEmpty()
+                                     ? merged->loginName
+                                     : merged->displayName;
+        if (!chatterName.isEmpty())
+        {
+            this->addRecentChatter(chatterName);
+        }
 
-    const auto highlight = processMergedPlatformHighlights(*merged);
-    triggerHighlightsAndAddMention(this, merged, highlight);
+        const auto highlight = processMergedPlatformHighlights(*merged);
+        triggerHighlightsAndAddMention(this, merged, highlight);
+    }
 
     this->addMessage(merged, MessageContext::Repost);
 }

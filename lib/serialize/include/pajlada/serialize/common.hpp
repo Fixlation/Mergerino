@@ -56,6 +56,15 @@ GetNumber(const RJValue &value)
     if (value.IsInt()) {
         return value.GetInt();
     }
+    if (value.IsUint()) {
+        return static_cast<Type>(value.GetUint());
+    }
+    if (value.IsInt64()) {
+        return static_cast<Type>(value.GetInt64());
+    }
+    if (value.IsUint64()) {
+        return static_cast<Type>(value.GetUint64());
+    }
 
     return Type{};
 }

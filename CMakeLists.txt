@@ -43,6 +43,7 @@ option(CHATTERINO_USE_GDI_FONTENGINE "Use the legacy GDI fontengine instead of t
 option(CHATTERINO_ALLOW_PRIVATE_QT_API "Allow uses of Qt's private API - when enabling this, Mergerino must use the exact Qt version it was compiled against" OFF)
 option(CHATTERINO_SPELLCHECK "Enable spellchecking in Mergerino (requires Hunspell)" OFF)
 option(CHATTERINO_NIGHTLY_BUILD "Specifies whether this is a nightly build." OFF)
+option(MERGERINO_ALLOW_UNSUPPORTED_LINUX "Allow an unsupported Linux community build" OFF)
 
 option(CHATTERINO_SANITIZER_SUPPORT "Attempt to enable Sanitizer support on the test and app targets. Actual sanitizers can then be enabled with the SANITIZE_* options." OFF)
 mark_as_advanced(CHATTERINO_SANITIZER_SUPPORT)
@@ -67,12 +68,30 @@ if(BUILD_TESTS)
 endif()
 
 project(mergerino
-    VERSION 1.3.2
+    VERSION 1.3.3
     DESCRIPTION "Merged streamer chat client for Twitch, Kick, and YouTube"
 )
 
 if(NOT WIN32)
-    message(FATAL_ERROR "Mergerino currently supports Windows only.")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND MERGERINO_ALLOW_UNSUPPORTED_LINUX)
+        message(WARNING
+            "Configuring an unsupported community Linux build. "
+            "Linux is not covered by Mergerino's build/test pipeline; "
+            "see docs/building-linux.md for known limitations."
+        )
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR
+            "Mergerino officially supports Windows only. "
+            "For an unsupported community Linux build, reconfigure with "
+            "-DMERGERINO_ALLOW_UNSUPPORTED_LINUX=ON and read "
+            "docs/building-linux.md."
+        )
+    else()
+        message(FATAL_ERROR
+            "Mergerino currently supports Windows only. "
+            "The unsupported Linux opt-in does not apply to ${CMAKE_SYSTEM_NAME}."
+        )
+    endif()
 endif()
 
 if(BUILD_BENCHMARKS)
@@ -208,7 +227,7 @@ else()
     set(LIBCOMMUNI_ROOT_LIB_FOLDER "${CMAKE_SOURCE_DIR}/lib/libcommuni")
 
     if(NOT EXISTS "${LIBCOMMUNI_ROOT_LIB_FOLDER}/CMakeLists.txt")
-        message(FATAL_ERROR "Submodules probably not loaded, unable to find lib/libcommuni/CMakeLists.txt")
+        message(FATAL_ERROR "Vendored dependency is missing: lib/libcommuni/CMakeLists.txt")
     endif()
 
     add_subdirectory("${LIBCOMMUNI_ROOT_LIB_FOLDER}" EXCLUDE_FROM_ALL)
@@ -222,7 +241,7 @@ if(BUILD_WITH_QTKEYCHAIN)
         set(QTKEYCHAIN_ROOT_LIB_FOLDER "${CMAKE_SOURCE_DIR}/lib/qtkeychain")
 
         if(NOT EXISTS "${QTKEYCHAIN_ROOT_LIB_FOLDER}/CMakeLists.txt")
-            message(FATAL_ERROR "Submodules probably not loaded, unable to find lib/qtkeychain/CMakeLists.txt")
+            message(FATAL_ERROR "Vendored dependency is missing: lib/qtkeychain/CMakeLists.txt")
         endif()
 
         set(_prev_testing ${BUILD_TESTING})

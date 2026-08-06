@@ -25,6 +25,7 @@
 #include "widgets/helper/ChannelView.hpp"
 #include "widgets/Notebook.hpp"
 #include "widgets/splits/Split.hpp"
+#include "widgets/splits/SplitInput.hpp"
 #include "widgets/splits/SplitContainer.hpp"
 #include "widgets/Window.hpp"
 
@@ -464,6 +465,39 @@ QString clearmessages(const CommandContext &ctx)
         split->getChannelView().clearMessages();
     }
 
+    return "";
+}
+
+QString giveaway(const CommandContext &ctx)
+{
+    auto *currentPage = getApp()
+                            ->getWindows()
+                            ->getLastSelectedWindow()
+                            ->getNotebook()
+                            .getSelectedPage();
+    if (currentPage == nullptr)
+    {
+        return "";
+    }
+
+    auto *split = currentPage->getSelectedSplit();
+    if (split == nullptr)
+    {
+        return "";
+    }
+
+    const auto channel = split->getChannel();
+    if (channel == nullptr || !channel->hasModRights())
+    {
+        if (ctx.channel != nullptr)
+        {
+            ctx.channel->addSystemMessage(
+                QStringLiteral("Only moderators can start giveaways."));
+        }
+        return "";
+    }
+
+    split->getInput().openGiveawayPopup();
     return "";
 }
 

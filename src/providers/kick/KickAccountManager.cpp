@@ -164,6 +164,7 @@ KickAccountManager::AddUserResponse KickAccountManager::addAccount(
     }
 
     auto account = std::make_shared<KickAccount>(data);
+    account->loadChatIdentityToken(&this->refreshTimer);
     this->accounts.insert(account);
     this->holder.managedConnect(account->authUpdated, [this, account] {
         if (this->currentUser_ == account)
@@ -184,6 +185,7 @@ bool KickAccountManager::removeAccount(KickAccount *account)
         return false;
     }
 
+    account->setChatIdentityToken({});
     auto accountPath = "/kickAccounts/uid" + std::to_string(account->userID());
     pajlada::Settings::SettingManager::gRemoveSetting(accountPath);
 

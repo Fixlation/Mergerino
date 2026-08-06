@@ -6,10 +6,13 @@
 
 #include "common/Channel.hpp"
 #include "messages/Message.hpp"
+#include "providers/kick/KickApi.hpp"
+#include "providers/twitch/api/TwitchWebApi.hpp"
 #include "widgets/BaseWidget.hpp"
 
-#include <QHBoxLayout>
+#include <boost/signals2/connection.hpp>
 #include <QHash>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QNetworkAccessManager>
@@ -29,19 +32,26 @@
 
 class QNetworkReply;
 class QCompleter;
+class QDialog;
+class QPushButton;
 
 namespace chatterino {
 
 class Split;
 class EmotePopup;
+class GiveawayPopup;
 class InputCompletionPopup;
 class InputHighlighter;
 class MessageView;
+class ChatIdentityPopupHost;
+class KickChatIdentityPopup;
 class StreamDatabaseBadgePickerPopup;
+class KickChannel;
 class TwitchChannel;
 class LabelButton;
 class ResizingTextEdit;
 class ChannelView;
+class EmoteBar;
 class PlatformSwitchButton;
 class SvgButton;
 class SpellCheckHighlighter;
@@ -111,13 +121,15 @@ public:
     void setInputText(const QString &newInputText);
 
     /**
-     * @brief Sets a formatted time to sendWaitStatus
+     * @brief Updates a platform's timeout or slow-mode countdown
      *
-     * This method is used to update the text of the timeout and slow mode timer
+     * The visible status follows the currently selected merged-chat targets.
      */
-    void setSendWaitStatus(const QString &text) const;
+    void setSendWaitStatus(MessagePlatform platform, int secondsRemaining);
+    void clearSendWaitStatuses();
 
     void triggerSelfMessageReceived();
+    void openGiveawayPopup();
 
     std::optional<bool> checkSpellingOverride() const;
     void setCheckSpellingOverride(std::optional<bool> override);
@@ -153,6 +165,10 @@ protected:
     void updateBadgeButton();
     int badgeButtonTargetWidth() const;
     void setBadgeButtonShown(bool shown, bool animate);
+    int sendWaitLockTargetWidth() const;
+    void updateSendWaitLockIcon();
+    void positionSendWaitLockIcon();
+    void setSendWaitLockShown(bool shown, bool animate);
     void updateEmoteButton();
     void updateCompletionPopup();
     void updatePlatformButtonLayout(int platformCount = 1);
@@ -160,15 +176,32 @@ protected:
     void hideCompletionPopup();
     void insertCompletionText(const QString &input_) const;
     void updatePollPredictionButtons();
+    void refreshResubNotification();
+    void updateResubCallout();
+    void openShareResubDialog();
     void openPollDialog();
+    void openTwitchPollDialog();
+    void openKickPollDialog();
     void openPredictionDialog();
+    void openTwitchPredictionDialog();
+    void openKickPredictionDialog();
     void openEmotePopup();
     void updateEmotePopupChannel();
+    void activateEmoteBarToken(const QString &token,
+                               Qt::KeyboardModifiers modifiers);
+    std::vector<ChannelPtr> emoteBarSendChannels() const;
     void openBadgePickerPopup();
     void updateBadgePickerContext();
+    void ensureChatIdentityPopupHost();
+    void ensureTwitchIdentityPopup();
+    void ensureKickIdentityPopup();
+    void switchChatIdentityPlatform(MessagePlatform platform);
+    void updateSeventvCosmeticsForInput();
     void resetBadgeIdentityButtonFetch(bool clearBadges);
     void requestBadgeIdentityForCurrentTwitchChannel(
         const std::shared_ptr<TwitchChannel> &twitch);
+    void requestKickIdentityForCurrentChannel(
+        const std::shared_ptr<KickChannel> &kick);
     void clearReplyTarget();
 
     void updateCancelReplyButton();
@@ -195,6 +228,7 @@ protected:
         const std::vector<MessagePlatform> &availablePlatforms) const;
     std::vector<MessagePlatform> selectedSendPlatforms() const;
     ChannelPtr channelForSendPlatform(MessagePlatform platform) const;
+    std::vector<MessagePlatform> giveawayPlatforms() const;
     bool canSendToPlatform(MessagePlatform platform) const;
     void normalizeSelectedSendPlatforms(
         const std::vector<MessagePlatform> &availablePlatforms);
@@ -206,18 +240,44 @@ protected:
     void cycleSendPlatform();
 
     Split *const split_;
+    bool hasSendWait(MessagePlatform platform) const;
+    void refreshSendWaitStatus();
+
     ChannelView *const channelView_;
     QPointer<EmotePopup> emotePopup_;
+    QPointer<GiveawayPopup> giveawayPopup_;
+    QPointer<ChatIdentityPopupHost> chatIdentityPopupHost_;
     QPointer<StreamDatabaseBadgePickerPopup> badgePickerPopup_;
+    QPointer<KickChatIdentityPopup> kickIdentityPopup_;
     QPointer<InputCompletionPopup> inputCompletionPopup_;
     QNetworkAccessManager badgeIdentityNetwork_;
     QHash<QString, QNetworkReply *> pendingBadgeIdentityRequests_;
     QSet<QString> failedBadgeIdentityChannels_;
     int badgeIdentityRequestGeneration_ = 0;
+    std::optional<KickChatIdentity> kickChatIdentity_;
+    QString kickChatIdentityKey_;
+    QString kickIdentityFailedKey_;
+    bool kickIdentityRequestPending_ = false;
+    int kickIdentityRequestGeneration_ = 0;
+    MessagePlatform chatIdentityPlatform_ = MessagePlatform::AnyOrTwitch;
+
+    QPointer<QDialog> resubDialog_;
+    int resubRequestGeneration_ = 0;
+    QString resubChannelLogin_;
+    std::optional<TwitchResubNotification> resubNotification_;
+    boost::signals2::scoped_connection resubAccountConnection_;
 
     struct {
         // vbox for all components
         QVBoxLayout *vbox;
+
+        // Twitch subscription anniversary callout
+        QWidget *resubCalloutWrapper = nullptr;
+        QLabel *resubCalloutLabel = nullptr;
+        QPushButton *resubCalloutButton = nullptr;
+
+        // Recent and most-used emotes
+        EmoteBar *emoteBar = nullptr;
 
         // reply widgets
         QWidget *replyWrapper;
@@ -232,15 +292,18 @@ protected:
         QHBoxLayout *inputHbox;
         QWidget *badgeButtonWrapper = nullptr;
         QToolButton *badgeButton = nullptr;
+        QWidget *sendWaitLockWrapper = nullptr;
+        QLabel *sendWaitLockIcon = nullptr;
         ResizingTextEdit *textEdit;
         QLabel *textEditLength;
         LabelButton *sendButton;
-        QLabel *sendWaitStatus;
         QVBoxLayout *rightVbox;
         QHBoxLayout *buttonHbox;
         PlatformSwitchButton *platformButton;
         SvgButton *predictionButton = nullptr;
         SvgButton *pollButton = nullptr;
+        SvgButton *seventvButton = nullptr;
+        SvgButton *giveawayButton = nullptr;
         SvgButton *emoteButton;
     } ui_;
 
@@ -255,6 +318,8 @@ protected:
     bool selectedSendAllPlatforms_ = false;
     std::vector<MessagePlatform> customSelectedSendPlatforms_;
     std::vector<MessagePlatform> enabledSendPlatforms_;
+    QHash<MessagePlatform, int> sendWaitStatuses_;
+    QString placeholderText_;
 
     // Hidden denotes whether this split input should be hidden or not
     // This is used instead of the regular QWidget::hide/show because
@@ -280,6 +345,8 @@ protected:
     QVariantAnimation badgeButtonVisibilityAnimation_;
     bool badgeButtonVisibilityInitialized_ = false;
     bool badgeButtonShown_ = true;
+    QVariantAnimation sendWaitLockVisibilityAnimation_;
+    bool sendWaitLockShown_ = false;
 
     std::optional<bool> checkSpellingOverride_;
     bool shouldCheckSpelling() const;

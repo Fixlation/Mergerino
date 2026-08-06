@@ -1,5 +1,6 @@
 #include "util/BoostJsonWrap.hpp"
 
+#include <boost/json/serialize.hpp>
 #include <boost/json/string.hpp>
 #include <QString>
 
@@ -162,6 +163,15 @@ BoostJsonValue BoostJsonObject::value(std::string_view key) const
         return {};
     }
     return {it->value()};
+}
+
+QByteArray BoostJsonObject::toJson() const
+{
+    if (!this->o)
+    {
+        return {};
+    }
+    return QByteArray::fromStdString(boost::json::serialize(*this->o));
 }
 
 BoostJsonValue BoostJsonArray::at(size_t i) const

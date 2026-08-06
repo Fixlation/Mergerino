@@ -218,7 +218,15 @@ Qt::WindowFlags windowFlagsFor(FlagsEnum<BaseWindow::Flags> flags)
         out.setFlag(Qt::Window);
     }
     out.setFlag(Qt::WindowStaysOnTopHint, flags.has(BaseWindow::TopMost));
-    out.setFlag(Qt::FramelessWindowHint, flags.has(BaseWindow::Frameless));
+    out.setFlag(Qt::FramelessWindowHint,
+                flags.has(BaseWindow::Frameless) ||
+                    flags.has(BaseWindow::FixedSizeCustomFrame));
+    if (flags.has(BaseWindow::CloseButtonOnly))
+    {
+        out.setFlag(Qt::WindowMinimizeButtonHint, false);
+        out.setFlag(Qt::WindowMaximizeButtonHint, false);
+        out.setFlag(Qt::WindowCloseButtonHint, true);
+    }
 
 #ifdef Q_OS_LINUX
     if (flags.has(BaseWindow::LinuxPopup))
@@ -560,6 +568,11 @@ void BaseWindow::init()
             buttonLayout->addWidget(minButton);
             buttonLayout->addWidget(maxButton);
             buttonLayout->addWidget(exitButton);
+            if (this->flags_.has(CloseButtonOnly))
+            {
+                minButton->hide();
+                maxButton->hide();
+            }
             buttonLayout->setSpacing(0);
         }
 
@@ -1313,7 +1326,8 @@ bool BaseWindow::handleSHOWWINDOW(MSG *msg)
     {
         this->shown_ = true;
 
-        if (this->hasCustomWindowFrame())
+        if (this->hasCustomWindowFrame() &&
+            !this->flags_.has(FixedSizeCustomFrame))
         {
             // disable OS window border
             const MARGINS margins = {-1};
@@ -1352,6 +1366,15 @@ bool BaseWindow::handleNCCALCSIZE(MSG *msg, qintptr *result)
 
     auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(msg->lParam);
     auto *r = &params->rgrc[0];
+
+    if (this->flags_.has(FixedSizeCustomFrame))
+    {
+        // The native window is already frameless. Keep the full rect as the
+        // client area and do not ask Windows to preserve a 1x1 region while
+        // the dialog is being moved.
+        *result = 0;
+        return true;
+    }
 
     WINDOWPLACEMENT wp;
     wp.length = sizeof(WINDOWPLACEMENT);

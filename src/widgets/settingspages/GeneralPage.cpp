@@ -36,6 +36,7 @@
 #include <QMessageBox>
 #include <QPalette>
 #include <QSignalBlocker>
+#include <QUrl>
 
 namespace {
 
@@ -126,6 +127,10 @@ void importChatterinoFromSettings(QWidget *parent)
         settings->platformEventHighlightStyle.getValue();
     options.platformEventHighlightCustomColor =
         settings->platformEventHighlightCustomColor.getValue();
+    options.platformAlertHighlightStyle =
+        platformAlertHighlightStyleSetting().getValue();
+    options.platformAlertHighlightCustomColor =
+        platformAlertHighlightCustomColorSetting().getValue();
 
     auto stage =
         chatterino_import::stageImportFromDefaultSource(getApp()->getPaths(),
@@ -436,12 +441,11 @@ void GeneralPage::initLayout(GeneralPageView &layout)
             "limit, or a lower limit enforced by a moderation bot")
         ->addTo(layout);
 
-    SettingWidget::checkbox("Show countdown on slow mode or when timed out",
+    SettingWidget::checkbox("Show chat send cooldown countdowns",
                             s.showSendWaitTimer)
-        ->setTooltip("Show how long you may need to wait before being able to "
-                     "send in a Twitch channel again if the channel is in slow "
-                     "mode or if you have been timed out")
-        ->addKeywords({"slowmode", "timeout"})
+        ->setTooltip("Show how long you need to wait before sending again when "
+                     "a platform applies slow mode or a timeout")
+        ->addKeywords({"slowmode", "slow mode", "timeout", "cooldown"})
         ->addTo(layout);
 
     SettingWidget::checkbox("Allow sending duplicate messages",
@@ -574,25 +578,44 @@ void GeneralPage::initLayout(GeneralPageView &layout)
                        "logo", "both", "none", "twitch", "kick", "youtube"})
         ->addTo(layout);
 
-    SettingWidget::dropdown("Platform event/alert highlight style",
+    SettingWidget::dropdown("Platform event highlight style",
                             s.platformEventHighlightStyle)
         ->setTooltip("Controls how automatic platform event highlights are "
                      "drawn for things like subscriptions, redeems, first "
-                     "messages, watch streaks, paid chat events, and "
-                     "moderation alerts.")
+                     "messages, watch streaks, and paid chat events.")
         ->addKeywords({"highlight", "gradient", "platform", "event",
                        "subscription", "redeem", "first message",
                        "watch streak", "hype chat", "membership",
                        "twitch", "kick", "youtube", "custom color"})
         ->addTo(layout);
 
-    SettingWidget::colorButton("Platform event/alert custom color",
+    SettingWidget::colorButton("Platform event custom color",
                                s.platformEventHighlightCustomColor)
-        ->setTooltip("Used when the platform event/alert highlight style is "
+        ->setTooltip("Used when the platform event highlight style is "
                      "set to \"Custom color\".")
         ->conditionallyEnabledBy(s.platformEventHighlightStyle, "customcolor")
         ->addKeywords({"highlight", "platform", "event", "custom color",
                        "gradient", "subscription", "redeem"})
+        ->addTo(layout);
+
+    SettingWidget::dropdown("Platform alert highlight style",
+                            platformAlertHighlightStyleSetting())
+        ->setTooltip("Controls highlights for automatic moderation alerts "
+                     "such as bans and timeouts. Select None to leave these "
+                     "messages unhighlighted.")
+        ->addKeywords({"highlight", "platform", "alert", "moderation",
+                       "ban", "timeout", "gradient", "none",
+                       "custom color"})
+        ->addTo(layout);
+
+    SettingWidget::colorButton("Platform alert custom color",
+                               platformAlertHighlightCustomColorSetting())
+        ->setTooltip("Used when the platform alert highlight style is set to "
+                     "\"Custom color\".")
+        ->conditionallyEnabledBy(platformAlertHighlightStyleSetting(),
+                                 "customcolor")
+        ->addKeywords({"highlight", "platform", "alert", "moderation",
+                       "ban", "timeout", "custom color"})
         ->addTo(layout);
 
     SettingWidget::checkbox("Reduce opacity of message history",
@@ -605,6 +628,13 @@ void GeneralPage::initLayout(GeneralPageView &layout)
     SettingWidget::checkbox("Hide deleted messages", s.hideModerated)
         ->setTooltip(
             "When enabled, messages deleted by moderators will be hidden.")
+        ->addTo(layout);
+
+    SettingWidget::checkbox("Disable pinned messages",
+                            disablePinnedMessagesSetting())
+        ->setTooltip(
+            "Hide pinned-message banners in every chat tab.")
+        ->addKeywords({"pin", "pinned", "message", "banner", "disable"})
         ->addTo(layout);
 
     layout.addDropdown<QString>(
@@ -665,6 +695,51 @@ void GeneralPage::initLayout(GeneralPageView &layout)
     SettingWidget::colorButton("Line color", s.lastMessageColor)->addTo(layout);
 
     layout.addTitle("Emotes");
+
+    layout.addSubtitle("Chat input emote bar");
+    layout.addDescription(
+        "Show recently sent or most-used emotes directly above each chat "
+        "input. Click an emote to send it immediately; Ctrl+Click or "
+        "Alt+Click inserts it into the current message instead.");
+
+    SettingWidget::dropdown("Mode", emoteBarModeSetting())
+        ->setTooltip(
+            "Combined shows most-used emotes first and recent emotes on a "
+            "second row without duplicates.")
+        ->addKeywords({"recent", "most used", "quick emotes"})
+        ->addTo(layout);
+
+    SettingWidget::dropdown("Included emotes", emoteBarScopeSetting())
+        ->setTooltip(
+            "Choose between only 7TV emotes or every available native, 7TV, "
+            "BetterTTV, and FrankerFaceZ emote.")
+        ->addKeywords({"scope", "provider", "seventv", "bttv", "ffz"})
+        ->addTo(layout);
+
+    SettingWidget::intInput(
+        "Maximum emotes per row", emoteBarMaxEmotesSetting(),
+        {.min = 1, .max = 20, .singleStep = 1, .suffix = " emotes"})
+        ->setTooltip(
+            "Sets the maximum number of emotes shown in each emote-bar row.")
+        ->addTo(layout);
+
+    auto *clearEmoteBarHistory = layout.addButton(
+        "Clear emote bar history", [this] {
+            const auto reply = QMessageBox::question(
+                this, "Clear emote bar history?",
+                "Clear all recent and most-used emote history for every "
+                "channel? This cannot be undone.",
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply == QMessageBox::Yes)
+            {
+                emoteBarHistoryJsonSetting() =
+                    R"({"version":1,"channels":[]})";
+            }
+        });
+    clearEmoteBarHistory->setToolTip(
+        "Remove all saved recent and most-used emote data.");
+
+    layout.addSubtitle("Emote display");
 
     SettingWidget::checkbox("Enable", s.enableEmoteImages)->addTo(layout);
 
@@ -869,13 +944,33 @@ void GeneralPage::initLayout(GeneralPageView &layout)
 
     layout.addTitle("Link Previews");
     layout.addDescription(
-        "Extra information like \"youtube video stats\" or title of webpages "
-        "can be loaded for all links if enabled. Optionally you can also show "
-        "thumbnails for emotes, videos and more. This build does not ship a "
-        "hosted Mergerino link preview service, so previews only work if a "
+        "Rich cards can be shown below links in chat. Twitch clips use your "
+        "linked Twitch account for their title, creator, and thumbnail. Kick "
+        "clips use Kick's public clip data for the same details and a green "
+        "Kick accent. Other URLs read the page's public OpenGraph or social "
+        "metadata directly and fall back to a basic card when none is "
+        "available.");
+
+    SettingWidget::dropdown("Link embeds", linkPreviewModeSetting())
+        ->setTooltip(
+            "Media links only shows cards for Twitch and Kick clips, videos, "
+            "social-media posts, image hosts, and direct image or video "
+            "files. All links also shows cards for ordinary webpages. "
+            "Recognized Twitch and Kick bot accounts never generate cards, "
+            "including StreamElements, Nightbot, Moobot, Fossabot, WizeBot, "
+            "Streamlabs, and BotRix.")
+        ->addKeywords({"embed", "preview", "media", "youtube", "twitter",
+                       "x.com", "twitch", "kick", "clips", "imgur",
+                       "lightshot"})
+        ->addTo(layout);
+
+    layout.addDescription(
+        "Hover tooltips are separate from chat embeds. This build does not "
+        "ship a hosted Mergerino tooltip service, so these only work if a "
         "compatible resolver URL is configured for the app.");
 
-    SettingWidget::checkbox("Enable", s.linkInfoTooltip)->addTo(layout);
+    SettingWidget::checkbox("Show link info on hover", s.linkInfoTooltip)
+        ->addTo(layout);
 
     layout.addDropdown<int>(
         "Also show thumbnails if available",
@@ -983,9 +1078,15 @@ void GeneralPage::initLayout(GeneralPageView &layout)
     }
 
     layout.addDescription(
-        "This build does not bundle an official browser extension. If you "
-        "have a compatible extension, add its ID below and restart "
-        "Mergerino.");
+        "Install the Chatterino Native Host extension to keep Watching in "
+        "sync. Its Chrome/Brave and Firefox IDs are allowed automatically; "
+        "the field below is only for other compatible extensions.");
+
+    layout.addButton("Open Chrome Web Store", [] {
+        QDesktopServices::openUrl(QUrl(
+            "https://chromewebstore.google.com/detail/"
+            "chatterino-native-host/glknmaideaikkmemifbfkhnomoknepka"));
+    });
 
 #ifdef Q_OS_WIN
     layout.addDescription("Mergerino only attaches to known browsers to avoid "
@@ -1000,9 +1101,9 @@ void GeneralPage::initLayout(GeneralPageView &layout)
 
     {
         auto *note = layout.addDescription(
-            "A semicolon-separated list of Chrome or Firefox extension IDs "
-            "allowed to interact with Mergerino's browser integration "
-            "(requires restart).\n"
+            "A semicolon-separated list of additional Chrome or Firefox "
+            "extension IDs allowed to interact with Mergerino's browser "
+            "integration (requires restart).\n"
             "Using multiple extension IDs from different browsers may cause "
             "issues.");
         note->setWordWrap(true);
@@ -1116,6 +1217,17 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         ->addTo(layout);
 
     layout.addTitle("Advanced");
+
+    layout.addSubtitle("Privacy");
+    SettingWidget::checkbox("Share anonymous usage analytics",
+                            s.shareAnonymousUsageAnalytics)
+        ->setTooltip(
+            "Share a random installation ID and Mergerino version to measure "
+            "total and currently active users. No account "
+            "details, usernames, channels, messages, or hardware identifiers "
+            "are sent.")
+        ->addKeywords({"analytics", "telemetry", "privacy"})
+        ->addTo(layout);
 
     layout.addSubtitle("Chat title");
     layout.addDescription("In live channels show in the title:");
@@ -1724,6 +1836,15 @@ void GeneralPage::initLayout(GeneralPageView &layout)
     SettingWidget::dropdown("Chat send protocol", s.chatSendProtocol)
         ->setTooltip("'Helix' will use Twitch's Helix API to send message. "
                      "'IRC' will use IRC to send messages.")
+        ->addTo(layout);
+
+    SettingWidget::checkbox("Spoof messages as Twitch web chat",
+                            s.spoofTwitchChat)
+        ->setTooltip(
+            "Adds Twitch web chat's client-nonce metadata to outgoing IRC "
+            "messages and replies. This applies only when the chat send "
+            "protocol is IRC.")
+        ->addKeywords({"spoof", "official twitch chat", "client nonce"})
         ->addTo(layout);
 
     SettingWidget::checkbox("Show send message button", s.showSendButton)

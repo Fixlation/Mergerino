@@ -276,6 +276,51 @@ public:
     }
 
     /**
+     * @brief Remove the first item equal to the needle.
+     *
+     * @param[in] needle the item to remove
+     * @param[out] removedIndex (optional) the former index of the item
+     * @return true if an item was removed
+     */
+    bool removeItem(const T &needle, size_t *removedIndex = nullptr)
+    {
+        std::unique_lock lock(this->mutex_);
+
+        for (size_t i = 0; i < this->buffer_.size(); ++i)
+        {
+            if (this->buffer_[i] == needle)
+            {
+                this->buffer_.erase(this->buffer_.begin() + i);
+                if (removedIndex != nullptr)
+                {
+                    *removedIndex = i;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @brief Remove the item at the given index.
+     *
+     * @param[in] index the index of the item to remove
+     * @return true if an item was removed
+     */
+    bool removeItem(size_t index)
+    {
+        std::unique_lock lock(this->mutex_);
+
+        if (index >= this->buffer_.size())
+        {
+            return false;
+        }
+
+        this->buffer_.erase(this->buffer_.begin() + index);
+        return true;
+    }
+
+    /**
      * @brief Inserts the given item before another item
      * 
      * @param[in] needle the item to use as positional reference

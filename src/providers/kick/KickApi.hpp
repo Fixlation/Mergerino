@@ -4,7 +4,9 @@
 
 #include <boost/json/object.hpp>
 #include <QDateTime>
+#include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 #include <chrono>
 #include <cstdint>
@@ -38,6 +40,15 @@ struct KickPrivateChatroomInfo {
     std::optional<std::chrono::minutes> followersModeDuration;
 };
 
+struct KickPrivateChatSettings {
+    KickPrivateChatSettings(BoostJsonObject obj);
+
+    bool subscribersMode = false;
+    bool emotesMode = false;
+    std::optional<std::chrono::seconds> slowModeDuration;
+    std::optional<std::chrono::minutes> followersModeDuration;
+};
+
 struct KickPrivateSubscriberBadgeInfo {
     KickPrivateSubscriberBadgeInfo(BoostJsonObject obj);
 
@@ -57,6 +68,26 @@ struct KickPrivateUserBadgeInfo {
     bool active = true;
     bool selected = true;
 };
+
+struct KickChatIdentityBadge {
+    QString name;
+    QString title;
+    QString badgeType;
+    QString imageUrl;
+    uint64_t count = 0;
+    uint64_t level = 0;
+    uint64_t sortOrder = 1000;
+    bool selected = false;
+    bool legacy = false;
+};
+
+struct KickChatIdentity {
+    QString color;
+    std::vector<KickChatIdentityBadge> badges;
+};
+
+QString kickIdentityAuthHelper();
+QString parseKickIdentityToken(const QString &clipboardText);
 
 struct KickPrivateChannelInfo {
     KickPrivateChannelInfo(BoostJsonObject obj);
@@ -141,6 +172,12 @@ public:
     static void privateChannelInfo(const QString &username,
                                    Callback<KickPrivateChannelInfo> cb);
 
+    static void privateLatestPrediction(const QString &username,
+                                        Callback<QJsonObject> cb);
+
+    static void privateChatSettings(uint64_t channelID,
+                                    Callback<KickPrivateChatSettings> cb);
+
     static void privateUserInChannelInfo(
         const QString &userUsername, const QString &channelUsername,
         Callback<KickPrivateUserInChannelInfo> cb);
@@ -170,6 +207,38 @@ public:
                    Callback<void> cb);
 
     void deleteChatMessage(const QString &messageID, Callback<void> cb);
+
+    void pinChatMessage(const QString &channelSlug,
+                        const QString &chatIdentityToken,
+                        const QJsonObject &message, int durationSeconds,
+                        Callback<void> cb);
+    void unpinChatMessage(const QString &channelSlug,
+                          const QString &chatIdentityToken,
+                          Callback<void> cb);
+    void createPoll(const QString &channelSlug,
+                    const QString &chatIdentityToken, const QString &title,
+                    const QStringList &choices, int durationSeconds,
+                    int resultDisplayDurationSeconds, Callback<void> cb);
+    void deletePoll(const QString &channelSlug,
+                    const QString &chatIdentityToken, Callback<void> cb);
+    void createPrediction(const QString &channelSlug,
+                          const QString &chatIdentityToken,
+                          const QString &title, const QStringList &outcomes,
+                          int durationSeconds, Callback<void> cb);
+    void updatePrediction(const QString &channelSlug,
+                          const QString &chatIdentityToken,
+                          const QString &predictionID, const QString &state,
+                          const QString &winningOutcomeID, Callback<void> cb);
+    void validateChatIdentityToken(const QString &chatIdentityToken,
+                                   uint64_t expectedUserID,
+                                   Callback<void> cb);
+    void getChatIdentity(uint64_t channelID, uint64_t userID,
+                         const QString &chatIdentityToken,
+                         Callback<KickChatIdentity> cb);
+    void updateChatIdentity(uint64_t channelID, uint64_t userID,
+                            const QString &chatIdentityToken,
+                            const KickChatIdentity &identity,
+                            Callback<KickChatIdentity> cb);
 
     void setAuth(const QString &authToken);
 

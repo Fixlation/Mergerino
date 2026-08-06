@@ -14,6 +14,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QHostAddress>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -60,6 +61,84 @@ struct BrowserGiftEvent {
     uint32_t quantity = 1;
     uint32_t diamondCount = 0;
 };
+
+struct BrowserJoinEvent {
+    QString id;
+    QString displayName;
+    QString uniqueId;
+};
+
+struct CachedTikTokProfile {
+    QString displayName;
+    QString uniqueId;
+    QString avatarUrl;
+};
+
+QString tiktokProfileKey(QString value)
+{
+    value = value.trimmed();
+    if (value.startsWith('@'))
+    {
+        value.remove(0, 1);
+    }
+    return value.toLower();
+}
+
+QHash<QString, CachedTikTokProfile> &tiktokProfileCache()
+{
+    static QHash<QString, CachedTikTokProfile> cache;
+    return cache;
+}
+
+void rememberTikTokProfile(CachedTikTokProfile profile)
+{
+    if (profile.displayName.isEmpty() && profile.uniqueId.isEmpty())
+    {
+        return;
+    }
+
+    auto &cache = tiktokProfileCache();
+    if (cache.size() >= 10000)
+    {
+        cache.clear();
+    }
+
+    const auto displayKey = tiktokProfileKey(profile.displayName);
+    const auto idKey = tiktokProfileKey(profile.uniqueId);
+    if (!displayKey.isEmpty())
+    {
+        cache.insert(displayKey, profile);
+    }
+    if (!idKey.isEmpty())
+    {
+        cache.insert(idKey, std::move(profile));
+    }
+}
+
+CachedTikTokProfile cachedTikTokProfile(const QString &userName,
+                                        const QString &userID)
+{
+    const auto &cache = tiktokProfileCache();
+    const auto idKey = tiktokProfileKey(userID);
+    if (!idKey.isEmpty())
+    {
+        if (const auto it = cache.constFind(idKey); it != cache.cend())
+        {
+            return *it;
+        }
+    }
+
+    const auto nameKey = tiktokProfileKey(userName);
+    if (!nameKey.isEmpty())
+    {
+        if (const auto it = cache.constFind(nameKey); it != cache.cend())
+        {
+            return *it;
+        }
+    }
+
+    return {};
+}
 
 bool operator==(const BrowserChatMessage &lhs, const BrowserChatMessage &rhs)
 {
@@ -296,12 +375,16 @@ MessagePtr makeChatMessage(const BrowserChatMessage &message,
         return nullptr;
     }
 
+    const auto profile = cachedTikTokProfile(message.owner, {});
+    const auto loginName = !profile.uniqueId.isEmpty() ? profile.uniqueId
+                                                       : message.owner;
     MessageBuilder builder;
     builder->platform = MessagePlatform::TikTok;
     builder->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    builder->loginName = message.owner;
+    builder->loginName = loginName;
     builder->displayName = message.owner;
     builder->localizedName = message.owner;
+    builder->userID = profile.uniqueId;
     builder->channelName = channelName;
     builder->usernameColor = TIKTOK_USERNAME_COLOR;
     builder->messageText = message.text;
@@ -346,6 +429,7 @@ MessagePtr makeGiftMessage(const BrowserGiftEvent &event,
     builder->loginName = loginName;
     builder->displayName = displayName;
     builder->localizedName = displayName;
+    builder->userID = event.senderUniqueId;
     builder->channelName = channelName;
     builder->usernameColor = TIKTOK_USERNAME_COLOR;
     builder->messageText = text;
@@ -357,8 +441,52 @@ MessagePtr makeGiftMessage(const BrowserGiftEvent &event,
         .emplace<TextElement>(displayName + ":", MessageElementFlag::Username,
                               TIKTOK_USERNAME_COLOR,
                               FontStyle::ChatMediumBold)
-        ->setLink({Link::UserInfo, loginName});
+        ->setLink({Link::UserInfo, displayName});
     appendSimpleWords(builder, text);
+    return builder.release();
+}
+
+MessagePtr makeJoinMessage(const BrowserJoinEvent &event,
+                           const QString &channelName)
+{
+    const auto displayName = !event.displayName.trimmed().isEmpty()
+                                 ? event.displayName.trimmed()
+                                 : event.uniqueId.trimmed();
+    const auto loginName = !event.uniqueId.trimmed().isEmpty()
+                               ? event.uniqueId.trimmed()
+                               : displayName;
+    if (displayName.isEmpty())
+    {
+        return nullptr;
+    }
+
+    const auto text = QStringLiteral("joined the stream");
+    MessageBuilder builder;
+    builder->platform = MessagePlatform::TikTok;
+    builder->platformAccentColor = TIKTOK_PLATFORM_ACCENT;
+    builder->flags.set(MessageFlag::System);
+    builder->flags.set(MessageFlag::DoNotTriggerNotification);
+    builder->flags.set(MessageFlag::TikTokJoinMessage);
+    builder->id = event.id.trimmed().isEmpty()
+                      ? QUuid::createUuid().toString(QUuid::WithoutBraces)
+                      : event.id.trimmed();
+    builder->loginName = loginName;
+    builder->displayName = displayName;
+    builder->localizedName = displayName;
+    builder->userID = event.uniqueId;
+    builder->channelName = channelName;
+    builder->usernameColor = TIKTOK_USERNAME_COLOR;
+    builder->messageText = displayName + " " + text;
+    builder->searchText = builder->messageText;
+    builder->serverReceivedTime = QDateTime::currentDateTime();
+    builder.emplace<TimestampElement>(builder->serverReceivedTime.time());
+    builder
+        .emplace<TextElement>(displayName, MessageElementFlag::Username,
+                              TIKTOK_USERNAME_COLOR,
+                              FontStyle::ChatMediumBold)
+        ->setLink({Link::UserInfo, displayName});
+    builder.emplace<TextElement>(text, MessageElementFlag::Text,
+                                 MessageColor::System);
     return builder.release();
 }
 
@@ -534,12 +662,45 @@ QString browserSnapshotScript()
     showLiveChat: false,
     enableChat: false,
     messages: [],
-    giftEvents: []
+    giftEvents: [],
+    joinEvents: [],
+    profileUpdates: []
   };
 
   function safeNumber(value) {
     const numeric = Number(value ?? 0);
     return Number.isFinite(numeric) ? numeric : 0;
+  }
+
+  function profileAvatarUrl(user) {
+    const image = user?.avatar_medium || user?.avatar_thumb || user?.avatar_large;
+    const urls = image?.url_list;
+    if (!Array.isArray(urls)) {
+      return '';
+    }
+    return String(urls.find((url) => String(url).startsWith('http')) || urls[0] || '');
+  }
+
+  function queueProfile(user) {
+    const queue = window.__mergerinoTikTokGiftTap?.profileQueue;
+    if (!Array.isArray(queue) || !user) {
+      return;
+    }
+
+    const displayName = String(user.nickname || '');
+    const uniqueId = String(user.unique_id || user.display_id || '');
+    if (!displayName && !uniqueId) {
+      return;
+    }
+
+    queue.push({
+      displayName,
+      uniqueId,
+      avatarUrl: profileAvatarUrl(user)
+    });
+    if (queue.length > 200) {
+      queue.splice(0, queue.length - 200);
+    }
   }
 
   function findImContext() {
@@ -581,8 +742,17 @@ QString browserSnapshotScript()
     if (!window.__mergerinoTikTokGiftTap) {
       window.__mergerinoTikTokGiftTap = {
         installed: false,
-        queue: []
+        queue: [],
+        joinQueue: [],
+        profileQueue: []
       };
+    }
+
+    if (!Array.isArray(window.__mergerinoTikTokGiftTap.joinQueue)) {
+      window.__mergerinoTikTokGiftTap.joinQueue = [];
+    }
+    if (!Array.isArray(window.__mergerinoTikTokGiftTap.profileQueue)) {
+      window.__mergerinoTikTokGiftTap.profileQueue = [];
     }
 
     if (window.__mergerinoTikTokGiftTap.installed) {
@@ -603,6 +773,7 @@ QString browserSnapshotScript()
           const decoded = this.pbReader.decodePayload('GiftMessage', message.payload);
           Promise.resolve(decoded).then((payload) => {
             try {
+              queueProfile(payload?.user);
               const gift = payload?.gift || {};
               const quantity = Math.max(
                 safeNumber(payload?.repeat_count),
@@ -634,6 +805,44 @@ QString browserSnapshotScript()
                   window.__mergerinoTikTokGiftTap.queue.length - 40
                 );
               }
+            } catch {
+            }
+          }).catch(() => {});
+        } catch {
+        }
+      }
+
+      if (method === 'WebcastMemberMessage' && message?.payload) {
+        try {
+          const decoded = this.pbReader.decodePayload('MemberMessage', message.payload);
+          Promise.resolve(decoded).then((payload) => {
+            try {
+              queueProfile(payload?.user);
+              window.__mergerinoTikTokGiftTap.joinQueue.push({
+                id: String(message.msg_id || payload?.common?.msg_id || ''),
+                displayName: String(payload?.user?.nickname || ''),
+                uniqueId: String(payload?.user?.unique_id || payload?.user?.display_id || '')
+              });
+
+              if (window.__mergerinoTikTokGiftTap.joinQueue.length > 100) {
+                window.__mergerinoTikTokGiftTap.joinQueue.splice(
+                  0,
+                  window.__mergerinoTikTokGiftTap.joinQueue.length - 100
+                );
+              }
+            } catch {
+            }
+          }).catch(() => {});
+        } catch {
+        }
+      }
+
+      if (method === 'WebcastChatMessage' && message?.payload) {
+        try {
+          const decoded = this.pbReader.decodePayload('ChatMessage', message.payload);
+          Promise.resolve(decoded).then((payload) => {
+            try {
+              queueProfile(payload?.user);
             } catch {
             }
           }).catch(() => {});
@@ -679,8 +888,12 @@ QString browserSnapshotScript()
 
   const rows = Array.from(document.querySelectorAll('[data-e2e="chat-message"]'));
   result.messages = rows.slice(-60).map((row) => {
-    const owner =
-      row.querySelector('[data-e2e="message-owner-name"]')?.textContent?.trim() || '';
+    const ownerNode =
+      row.querySelector('[data-e2e="message-owner-name"]');
+    const owner = ownerNode?.textContent?.trim() || '';
+    const ownerHeader = ownerNode?.parentElement?.parentElement;
+    const messageNode = ownerHeader?.nextElementSibling;
+    const directText = messageNode?.innerText?.trim() || '';
     const lines = (row.innerText || '')
       .split(/\n+/)
       .map((line) => line.trim())
@@ -698,7 +911,7 @@ QString browserSnapshotScript()
 
     return {
       owner,
-      text: textLines.join(' ').trim(),
+      text: directText || textLines.join(' ').trim(),
       full: lines.join('\n')
     };
   }).filter((message) => message.owner && message.text);
@@ -708,6 +921,18 @@ QString browserSnapshotScript()
     result.giftEvents = window.__mergerinoTikTokGiftTap.queue.splice(
       0,
       window.__mergerinoTikTokGiftTap.queue.length
+    );
+  }
+  if (window.__mergerinoTikTokGiftTap?.joinQueue?.length) {
+    result.joinEvents = window.__mergerinoTikTokGiftTap.joinQueue.splice(
+      0,
+      window.__mergerinoTikTokGiftTap.joinQueue.length
+    );
+  }
+  if (window.__mergerinoTikTokGiftTap?.profileQueue?.length) {
+    result.profileUpdates = window.__mergerinoTikTokGiftTap.profileQueue.splice(
+      0,
+      window.__mergerinoTikTokGiftTap.profileQueue.length
     );
   }
 
@@ -826,8 +1051,9 @@ struct TikTokLiveChat::BrowserSession {
     WebSocketHandle socket;
 };
 
-TikTokLiveChat::TikTokLiveChat(QString source)
+TikTokLiveChat::TikTokLiveChat(QString source, bool showJoinMessages)
     : source_(std::move(source))
+    , showJoinMessages_(showJoinMessages)
     , lifetimeGuard_(std::make_shared<bool>(true))
 {
 }
@@ -835,6 +1061,11 @@ TikTokLiveChat::TikTokLiveChat(QString source)
 TikTokLiveChat::~TikTokLiveChat()
 {
     this->stop();
+}
+
+void TikTokLiveChat::setShowJoinMessages(bool enabled)
+{
+    this->showJoinMessages_ = enabled;
 }
 
 void TikTokLiveChat::start()
@@ -917,6 +1148,12 @@ const QString &TikTokLiveChat::resolvedSource() const
 QString TikTokLiveChat::normalizeSource(const QString &source)
 {
     return normalizeTikTokSource(source);
+}
+
+QString TikTokLiveChat::cachedAvatarUrl(const QString &userName,
+                                        const QString &userID)
+{
+    return cachedTikTokProfile(userName, userID).avatarUrl;
 }
 
 void TikTokLiveChat::resolveRoom()
@@ -1445,6 +1682,18 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
         return;
     }
 
+    const auto profileUpdateArray = root.value("profileUpdates").toArray();
+    for (const auto &value : profileUpdateArray)
+    {
+        const auto object = value.toObject();
+        rememberTikTokProfile({
+            .displayName =
+                object.value("displayName").toString().trimmed(),
+            .uniqueId = object.value("uniqueId").toString().trimmed(),
+            .avatarUrl = object.value("avatarUrl").toString().trimmed(),
+        });
+    }
+
     std::vector<BrowserChatMessage> currentMessages;
     const auto messageArray = root.value("messages").toArray();
     currentMessages.reserve(messageArray.size());
@@ -1488,6 +1737,28 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
         giftEvents.push_back(std::move(event));
     }
 
+    std::vector<BrowserJoinEvent> joinEvents;
+    if (this->showJoinMessages_)
+    {
+        const auto joinEventArray = root.value("joinEvents").toArray();
+        joinEvents.reserve(joinEventArray.size());
+        for (const auto &value : joinEventArray)
+        {
+            const auto object = value.toObject();
+            BrowserJoinEvent event;
+            event.id = object.value("id").toString().trimmed();
+            event.displayName =
+                object.value("displayName").toString().trimmed();
+            event.uniqueId = object.value("uniqueId").toString().trimmed();
+            if (event.displayName.isEmpty() && event.uniqueId.isEmpty())
+            {
+                continue;
+            }
+
+            joinEvents.push_back(std::move(event));
+        }
+    }
+
     const bool firstSnapshot = !this->browserSnapshotReceived_;
     this->browserSnapshotReceived_ = true;
     this->failureReported_ = false;
@@ -1526,6 +1797,15 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
     const auto channelName = !this->ownerUniqueId_.isEmpty()
                                  ? this->ownerUniqueId_
                                  : this->resolvedSource_.mid(1);
+    for (const auto &event : joinEvents)
+    {
+        auto message = makeJoinMessage(event, channelName);
+        if (message)
+        {
+            this->messageReceived.invoke(message);
+        }
+    }
+
     for (const auto &event : giftEvents)
     {
         auto message = makeGiftMessage(event, channelName);

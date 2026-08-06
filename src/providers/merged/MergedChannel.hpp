@@ -35,6 +35,7 @@ struct MergedChannelConfig {
     QString youtubeStreamUrl;
     bool tiktokEnabled{false};
     QString tiktokSource;
+    bool tiktokShowJoinMessages{true};
 
     bool operator==(const MergedChannelConfig &) const = default;
 
@@ -79,6 +80,8 @@ public:
     ChannelPtr twitchChannel() const;
     ChannelPtr kickChannel() const;
     YouTubeLiveChat *youtubeLiveChat() const;
+    void setYouTubeDiscoveryForeground(bool foreground);
+    void setTikTokShowJoinMessages(bool enabled);
     static EmotePtr platformBadge(MessagePlatform platform);
 
     pajlada::Signals::NoArgSignal streamStatusChanged;
@@ -88,6 +91,8 @@ protected:
 
 private:
     void initializeSources();
+    void createYouTubeLiveChat();
+    void restartYouTubeLiveChat();
     void connectSourceSignals(const ChannelPtr &source, MessagePlatform platform,
                               pajlada::Signals::SignalHolder &connections);
     void appendInitialMessages(const ChannelPtr &source,
@@ -96,7 +101,9 @@ private:
                                   MessagePlatform platform);
     void fillInMergedMessages(const std::vector<MessagePtr> &messages,
                               MessagePlatform platform);
-    void appendMergedMessage(const MessagePtr &source, MessagePlatform platform);
+    void appendMergedMessage(
+        const MessagePtr &source, MessagePlatform platform,
+        std::optional<MessageFlags> overridingFlags = std::nullopt);
     void replaceMergedMessage(const MessagePtr &previous,
                               const MessagePtr &replacement,
                               MessagePlatform platform);
@@ -139,6 +146,7 @@ private:
     bool kickLive_{false};
     bool youtubeLive_{false};
     bool tiktokLive_{false};
+    bool youtubeDiscoveryForeground_{false};
     bool twitchLiveJoinAnnounced_{false};
     bool kickLiveJoinAnnounced_{false};
 };

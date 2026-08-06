@@ -31,8 +31,10 @@ using namespace Qt::Literals;
 struct PaintGradientLayer {
     QString function;
     QGradientStops stops;
+    std::optional<QColor> solidColor;
     bool repeat = false;
     float angle = 0.0F;
+    qreal opacity = 1.0;
     ImagePtr image;
 };
 
@@ -89,6 +91,36 @@ std::optional<QColor> parsePaintColor(const QJsonValue &color)
     }
 
     return rgbaToQColor(*rgba);
+}
+
+std::optional<QColor> parseHexRgbaColor(QString value)
+{
+    value = value.trimmed();
+    if (value.startsWith('#'))
+    {
+        value.removeFirst();
+    }
+    if (value.size() != 6 && value.size() != 8)
+    {
+        return std::nullopt;
+    }
+
+    const auto parseByte = [&value](qsizetype offset, bool *ok) {
+        return value.sliced(offset, 2).toInt(ok, 16);
+    };
+    bool redOK = false;
+    bool greenOK = false;
+    bool blueOK = false;
+    bool alphaOK = true;
+    const int red = parseByte(0, &redOK);
+    const int green = parseByte(2, &greenOK);
+    const int blue = parseByte(4, &blueOK);
+    const int alpha = value.size() == 8 ? parseByte(6, &alphaOK) : 255;
+    if (!redOK || !greenOK || !blueOK || !alphaOK)
+    {
+        return std::nullopt;
+    }
+    return QColor(red, green, blue, alpha);
 }
 
 QGradientStops parsePaintStops(const QJsonArray &stops)
@@ -202,6 +234,60 @@ std::optional<std::shared_ptr<Paint>> parsePaint(const QJsonObject &paintJson)
     return std::nullopt;
 }
 
+QString browserPaintColor(const QColor &color)
+{
+    if (color.alpha() == 255)
+    {
+        return color.name(QColor::HexRgb);
+    }
+
+    return QStringLiteral("rgba(%1, %2, %3, %4)")
+        .arg(color.red())
+        .arg(color.green())
+        .arg(color.blue())
+        .arg(QString::number(color.alphaF(), 'f', 3));
+}
+
+QString browserGradientStops(const QGradientStops &stops)
+{
+    QStringList serialized;
+    serialized.reserve(stops.size());
+    for (const auto &[position, color] : stops)
+    {
+        serialized.append(
+            QStringLiteral("%1 %2%")
+                .arg(browserPaintColor(color))
+                .arg(QString::number(position * 100.0, 'f', 4)));
+    }
+    return serialized.join(QStringLiteral(", "));
+}
+
+QString browserGradientImage(const PaintGradientLayer &layer)
+{
+    const auto stops = browserGradientStops(layer.stops);
+    if (stops.isEmpty())
+    {
+        return {};
+    }
+
+    if (isLinearGradient(layer.function))
+    {
+        return QStringLiteral("%1linear-gradient(%2deg, %3)")
+            .arg(layer.repeat ? QStringLiteral("repeating-") : QString())
+            .arg(QString::number(layer.angle, 'f', 3))
+            .arg(stops);
+    }
+
+    if (isRadialGradient(layer.function))
+    {
+        return QStringLiteral("%1radial-gradient(circle, %2)")
+            .arg(layer.repeat ? QStringLiteral("repeating-") : QString())
+            .arg(stops);
+    }
+
+    return {};
+}
+
 class LayeredPaint final : public Paint
 {
 public:
@@ -231,6 +317,12 @@ public:
         for (auto it = this->layers_.rbegin(); it != this->layers_.rend();
              ++it)
         {
+            painter.setOpacity(std::clamp(it->opacity, 0.0, 1.0));
+            if (it->solidColor)
+            {
+                painter.fillRect(targetRect, *it->solidColor);
+                continue;
+            }
             if (isUrlGradient(it->function))
             {
                 this->drawUrlLayer(painter, target, *it);
@@ -242,6 +334,8 @@ public:
                 painter.fillRect(targetRect, *brush);
             }
         }
+
+        painter.setOpacity(1.0);
 
         painter.end();
         return {target};
@@ -262,6 +356,60 @@ public:
             }
         }
         return false;
+    }
+
+    QString animationUrl() const
+    {
+        for (const auto &layer : this->layers_)
+        {
+            if (layer.image != nullptr && layer.image->animated())
+            {
+                return layer.image->url().string;
+            }
+        }
+        return {};
+    }
+
+    QJsonArray browserLayers(const QColor &userColor) const
+    {
+        QJsonArray serializedLayers;
+        serializedLayers.append(QJsonObject{
+            {QStringLiteral("backgroundColor"),
+             browserPaintColor(this->color_.value_or(userColor))},
+            {QStringLiteral("opacity"), 1.0},
+        });
+
+        for (auto it = this->layers_.rbegin(); it != this->layers_.rend();
+             ++it)
+        {
+            QJsonObject serialized{
+                {QStringLiteral("opacity"),
+                 std::clamp(it->opacity, 0.0, 1.0)},
+            };
+            if (it->solidColor)
+            {
+                serialized.insert(QStringLiteral("backgroundColor"),
+                                  browserPaintColor(*it->solidColor));
+            }
+            else if (it->image != nullptr)
+            {
+                serialized.insert(QStringLiteral("imageUrl"),
+                                  it->image->url().string);
+            }
+            else if (const auto gradient = browserGradientImage(*it);
+                     !gradient.isEmpty())
+            {
+                serialized.insert(QStringLiteral("backgroundImage"),
+                                  gradient);
+            }
+            else
+            {
+                continue;
+            }
+            serializedLayers.append(serialized);
+        }
+
+        return serializedLayers;
     }
 
 private:
@@ -403,6 +551,182 @@ private:
     const std::vector<PaintDropShadow> dropShadows_;
 };
 
+QGradientStops parseV4PaintStops(const QJsonArray &stops)
+{
+    QGradientStops parsedStops;
+    double lastStop = -1.0;
+    for (const auto &value : stops)
+    {
+        const auto stop = value.toObject();
+        const auto color = parseHexRgbaColor(
+            stop.value(QStringLiteral("color"))
+                .toObject()
+                .value(QStringLiteral("hex"))
+                .toString());
+        if (!color)
+        {
+            continue;
+        }
+
+        auto position = stop.value(QStringLiteral("at")).toDouble();
+        if (position <= lastStop)
+        {
+            position = lastStop + 0.0000001;
+        }
+        lastStop = position;
+        parsedStops.append({position, *color});
+    }
+    return parsedStops;
+}
+
+std::vector<PaintDropShadow> parseV4PaintShadows(const QJsonArray &shadows)
+{
+    std::vector<PaintDropShadow> parsed;
+    for (const auto &value : shadows)
+    {
+        const auto shadow = value.toObject();
+        const auto color = parseHexRgbaColor(
+            shadow.value(QStringLiteral("color"))
+                .toObject()
+                .value(QStringLiteral("hex"))
+                .toString());
+        if (!color)
+        {
+            continue;
+        }
+        parsed.emplace_back(
+            shadow.value(QStringLiteral("offsetX")).toDouble(),
+            shadow.value(QStringLiteral("offsetY")).toDouble(),
+            shadow.value(QStringLiteral("blur")).toDouble(), *color);
+    }
+    return parsed;
+}
+
+QString selectV4PaintImage(const QJsonArray &images)
+{
+    if (images.isEmpty())
+    {
+        return {};
+    }
+
+    const bool animated = std::ranges::any_of(images, [](const auto &value) {
+        return value.toObject()
+                   .value(QStringLiteral("frameCount"))
+                   .toInt() > 1;
+    });
+    QJsonObject selected;
+    for (const auto &value : images)
+    {
+        const auto image = value.toObject();
+        const bool matchesAnimation =
+            (image.value(QStringLiteral("frameCount")).toInt() > 1) ==
+            animated;
+        if (image.value(QStringLiteral("scale")).toInt() == 1 &&
+            matchesAnimation)
+        {
+            selected = image;
+            break;
+        }
+        if (selected.isEmpty() && matchesAnimation)
+        {
+            selected = image;
+        }
+    }
+    if (selected.isEmpty())
+    {
+        selected = images.first().toObject();
+    }
+
+    auto url = selected.value(QStringLiteral("url")).toString();
+    if (url.startsWith(QStringLiteral("//")))
+    {
+        url.prepend(QStringLiteral("https:"));
+    }
+    return url;
+}
+
+std::optional<PaintGradientLayer> parseV4PaintLayer(
+    const QJsonObject &layerJson)
+{
+    PaintGradientLayer layer;
+    layer.opacity = std::clamp(
+        layerJson.value(QStringLiteral("opacity")).toDouble(1.0), 0.0, 1.0);
+    const auto type = layerJson.value(QStringLiteral("ty")).toObject();
+    const auto typeName =
+        type.value(QStringLiteral("__typename")).toString();
+
+    if (typeName == QStringLiteral("PaintLayerTypeSingleColor"))
+    {
+        layer.solidColor = parseHexRgbaColor(
+            type.value(QStringLiteral("color"))
+                .toObject()
+                .value(QStringLiteral("hex"))
+                .toString());
+        return layer.solidColor ? std::optional{layer} : std::nullopt;
+    }
+    if (typeName == QStringLiteral("PaintLayerTypeLinearGradient"))
+    {
+        layer.function = QStringLiteral("LINEAR_GRADIENT");
+        layer.angle =
+            static_cast<float>(type.value(QStringLiteral("angle")).toDouble());
+        layer.repeat = type.value(QStringLiteral("repeating")).toBool();
+        layer.stops =
+            parseV4PaintStops(type.value(QStringLiteral("stops")).toArray());
+        return layer.stops.isEmpty() ? std::nullopt : std::optional{layer};
+    }
+    if (typeName == QStringLiteral("PaintLayerTypeRadialGradient"))
+    {
+        layer.function = QStringLiteral("RADIAL_GRADIENT");
+        layer.repeat = type.value(QStringLiteral("repeating")).toBool();
+        layer.stops =
+            parseV4PaintStops(type.value(QStringLiteral("stops")).toArray());
+        return layer.stops.isEmpty() ? std::nullopt : std::optional{layer};
+    }
+    if (typeName == QStringLiteral("PaintLayerTypeImage"))
+    {
+        const auto url =
+            selectV4PaintImage(type.value(QStringLiteral("images")).toArray());
+        if (url.isEmpty())
+        {
+            return std::nullopt;
+        }
+        layer.function = QStringLiteral("URL");
+        layer.image = Image::fromUrl({url}, 1);
+        return layer.image == nullptr ? std::nullopt : std::optional{layer};
+    }
+    return std::nullopt;
+}
+
+std::optional<std::shared_ptr<Paint>> parseV4Paint(
+    const QJsonObject &paintJson)
+{
+    const auto id = paintJson.value(QStringLiteral("id")).toString();
+    const auto data = paintJson.value(QStringLiteral("data")).toObject();
+    if (id.isEmpty() || data.isEmpty())
+    {
+        return std::nullopt;
+    }
+
+    std::vector<PaintGradientLayer> layers;
+    for (const auto &value :
+         data.value(QStringLiteral("layers")).toArray())
+    {
+        if (auto layer = parseV4PaintLayer(value.toObject()))
+        {
+            layers.emplace_back(std::move(*layer));
+        }
+    }
+    if (layers.empty())
+    {
+        return std::nullopt;
+    }
+
+    return std::make_shared<LayeredPaint>(
+        paintJson.value(QStringLiteral("name")).toString(), id, std::nullopt,
+        std::move(layers), parseV4PaintShadows(
+                               data.value(QStringLiteral("shadows")).toArray()));
+}
+
 QString normalizeUsername(const QString &userName)
 {
     return userName.toLower();
@@ -525,6 +849,67 @@ std::optional<std::shared_ptr<Paint>> parseGraphQLPaint(
 }  // namespace
 
 namespace chatterino {
+
+QString seventvPaintAnimationUrl(const std::shared_ptr<Paint> &paint)
+{
+    if (!paint || !paint->animated())
+    {
+        return {};
+    }
+
+    if (const auto urlPaint = std::dynamic_pointer_cast<UrlPaint>(paint))
+    {
+        return urlPaint->animationUrl();
+    }
+    if (const auto layeredPaint =
+            std::dynamic_pointer_cast<LayeredPaint>(paint))
+    {
+        return layeredPaint->animationUrl();
+    }
+    return {};
+}
+
+QJsonArray seventvPaintBrowserLayers(const std::shared_ptr<Paint> &paint,
+                                     const QColor &userColor)
+{
+    if (!paint || !paint->animated())
+    {
+        return {};
+    }
+
+    if (const auto urlPaint = std::dynamic_pointer_cast<UrlPaint>(paint))
+    {
+        return {
+            QJsonObject{
+                {QStringLiteral("backgroundColor"),
+                 browserPaintColor(userColor)},
+                {QStringLiteral("opacity"), 1.0},
+            },
+            QJsonObject{
+                {QStringLiteral("imageUrl"), urlPaint->animationUrl()},
+                {QStringLiteral("opacity"), 1.0},
+            },
+        };
+    }
+    if (const auto layeredPaint =
+            std::dynamic_pointer_cast<LayeredPaint>(paint))
+    {
+        return layeredPaint->browserLayers(userColor);
+    }
+    return {};
+}
+
+std::shared_ptr<Paint> makeSeventvPaintFromGraphQL(
+    const QJsonObject &paintJson)
+{
+    if (paintJson.value(QStringLiteral("data"))
+            .toObject()
+            .contains(QStringLiteral("layers")))
+    {
+        return parseV4Paint(paintJson).value_or(nullptr);
+    }
+    return parseGraphQLPaint(paintJson).value_or(nullptr);
+}
 
 SeventvPaints::SeventvPaints() = default;
 

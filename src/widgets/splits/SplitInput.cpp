@@ -17,9 +17,13 @@
 #include "messages/Image.hpp"
 #include "messages/Link.hpp"
 #include "messages/Message.hpp"
+#include "messages/MessageElement.hpp"
 #include "providers/kick/KickAccount.hpp"
+#include "providers/kick/KickApi.hpp"
+#include "providers/kick/KickBadges.hpp"
 #include "providers/kick/KickChannel.hpp"
 #include "providers/merged/MergedChannel.hpp"
+#include "providers/seventv/SeventvAccountManager.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/api/TwitchModerationAuth.hpp"
 #include "providers/twitch/api/TwitchWebApi.hpp"
@@ -36,6 +40,7 @@
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
 #include "singletons/WindowManager.hpp"
+#include "util/FormatTime.hpp"
 #include "util/Helpers.hpp"
 #include "util/LayoutCreator.hpp"
 #include "widgets/buttons/Button.hpp"
@@ -44,7 +49,10 @@
 #include "widgets/dialogs/CreatePollDialog.hpp"
 #include "widgets/dialogs/CreatePredictionDialog.hpp"
 #include "widgets/dialogs/EmotePopup.hpp"
+#include "widgets/dialogs/GiveawayPopup.hpp"
+#include "widgets/dialogs/KickPredictionDialog.hpp"
 #include "widgets/dialogs/ManagePredictionDialog.hpp"
+#include "widgets/dialogs/SeventvAccountDialog.hpp"
 #include "widgets/helper/ChannelView.hpp"
 #include "widgets/helper/CmdDeleteKeyFilter.hpp"
 #include "widgets/helper/MessageView.hpp"
@@ -53,29 +61,37 @@
 #include "widgets/Scrollbar.hpp"
 #include "widgets/splits/InputCompletionPopup.hpp"
 #include "widgets/splits/InputHighlighter.hpp"
+#include "widgets/splits/EmoteBar.hpp"
 #include "widgets/splits/Split.hpp"
 #include "widgets/splits/SplitContainer.hpp"
 #include "widgets/splits/StreamDatabaseBadgeBar.hpp"
 #include "widgets/splits/TwitchPollsAndPredictionsBar.hpp"
 
+#include <QAbstractAnimation>
+#include <QClipboard>
 #include <QCompleter>
 #include <QCheckBox>
+#include <QCursor>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QEasingCurve>
 #include <QElapsedTimer>
 #include <QEnterEvent>
 #include <QFrame>
 #include <QFontMetrics>
 #include <QGridLayout>
 #include <QGuiApplication>
+#include <QGraphicsBlurEffect>
 #include <QGraphicsOpacityEffect>
 #include <QHash>
 #include <QHideEvent>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
+#include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -88,6 +104,7 @@
 #include <QScrollBar>
 #include <QScreen>
 #include <QSignalBlocker>
+#include <QStackedWidget>
 #include <QSvgRenderer>
 #include <QSet>
 #include <QSizePolicy>
@@ -189,6 +206,11 @@ bool isRealTwitchChatIdentityChannel(const std::shared_ptr<TwitchChannel> &chann
            !channel->getName().trimmed().startsWith(QLatin1Char('/'));
 }
 
+// Kick's public OAuth API does not expose chat-identity mutation. The user can
+// connect a validated Kick website session per account under Settings >
+// Accounts; it is stored in the OS credential store.
+constexpr bool KICK_CHAT_IDENTITY_EDITING_ENABLED = true;
+
 QString &badgeIdentityObservedAccountID()
 {
     static QString accountID;
@@ -225,6 +247,8 @@ QString chatIdentityBadgePixmapKey(const ChatIdentityBadgeSource &badge)
     }
     return {};
 }
+
+QNetworkRequest kickIdentityImageRequest(const QString &imageUrl);
 
 class ChatIdentityButton final : public QToolButton
 {
@@ -391,7 +415,19 @@ private:
         const int generation = this->badgeGeneration_;
         if (!badge.imageUrl.trimmed().isEmpty())
         {
-            auto *reply = this->network_.get(QNetworkRequest(QUrl(badge.imageUrl)));
+            if (badge.imageUrl.startsWith(QStringLiteral(":/")))
+            {
+                const QPixmap pixmap(badge.imageUrl);
+                if (!pixmap.isNull())
+                {
+                    this->badgeImageCache().insert(cacheKey, pixmap);
+                    this->badgePixmaps_.insert(pixmapKey, pixmap);
+                    this->update();
+                }
+                return;
+            }
+            auto *reply =
+                this->network_.get(kickIdentityImageRequest(badge.imageUrl));
             this->pendingReplies_.insert(reply, pixmapKey);
             QObject::connect(reply, &QNetworkReply::finished, this,
                              [this, reply, pixmapKey, cacheKey,
@@ -625,7 +661,7 @@ protected:
         const qreal trackWidth = 38.0;
         const qreal trackHeight = 20.0;
         const QRectF trackRect{
-            0.0, (this->height() - trackHeight) / 2.0, trackWidth,
+            1.0, (this->height() - trackHeight) / 2.0, trackWidth - 1.0,
             trackHeight};
         const auto progress = std::clamp(this->progress_, 0.0, 1.0);
 
@@ -744,6 +780,41 @@ bool needsModerationAuthLogin(const std::shared_ptr<TwitchChannel> &channel)
     return !TwitchModerationAuth::resolveForCurrentUser(
                 currentUser->getUserId())
                 .isValid();
+}
+
+int resubTenureMonths(const TwitchResubNotification &notification)
+{
+    return notification.cumulativeTenureMonths > 0
+               ? notification.cumulativeTenureMonths
+               : notification.months;
+}
+
+struct TwitchResubCredentials {
+    QString clientID;
+    QString oauthToken;
+
+    bool isValid() const
+    {
+        return !this->oauthToken.trimmed().isEmpty();
+    }
+};
+
+TwitchResubCredentials twitchResubCredentials()
+{
+    const auto current = getApp()->getAccounts()->twitch.getCurrent();
+    if (current == nullptr || current->isAnon())
+    {
+        return {};
+    }
+
+    const auto browserAccount =
+        TwitchModerationAuth::resolveForCurrentUser(current->getUserId());
+    if (browserAccount.isValid())
+    {
+        return {browserAccount.clientId, browserAccount.oauthToken};
+    }
+
+    return {current->getOAuthClient(), current->getOAuthToken()};
 }
 
 void showModerationAuthLoginPrompt(QWidget *parent, const QString &currentUserID,
@@ -1020,7 +1091,437 @@ QIcon badgeIdentityChevronIcon(bool collapsed)
     return QIcon(pixmap);
 }
 
+QString kickIdentityBadgeTitle(const KickChatIdentityBadge &badge)
+{
+    if (badge.name.compare(QStringLiteral("level"), Qt::CaseInsensitive) == 0 &&
+        badge.level > 0)
+    {
+        return QStringLiteral("Level %1").arg(badge.level);
+    }
+    if (badge.name.compare(QStringLiteral("subscriber"),
+                           Qt::CaseInsensitive) == 0 &&
+        badge.count > 0)
+    {
+        return QStringLiteral("%1-Month Subscriber").arg(badge.count);
+    }
+    if (!badge.title.trimmed().isEmpty())
+    {
+        return badge.title.trimmed();
+    }
+
+    auto title = badge.name;
+    title.replace('_', ' ');
+    QString spaced;
+    spaced.reserve(title.size() + 4);
+    for (qsizetype index = 0; index < title.size(); ++index)
+    {
+        if (index > 0 && title.at(index).isDigit() &&
+            title.at(index - 1).isLetter())
+        {
+            spaced.append(' ');
+        }
+        spaced.append(title.at(index));
+    }
+    const auto words = spaced.split(' ', Qt::SkipEmptyParts);
+    QStringList formatted;
+    for (auto word : words)
+    {
+        if (word.compare(QStringLiteral("kick"), Qt::CaseInsensitive) == 0)
+        {
+            formatted.append(QStringLiteral("KICK"));
+            continue;
+        }
+        if (!word.isEmpty())
+        {
+            word[0] = word[0].toUpper();
+        }
+        formatted.append(word);
+    }
+    return formatted.join(' ');
+}
+
+QString kickIdentityBadgeImageUrl(
+    const KickChatIdentityBadge &badge,
+    const std::shared_ptr<KickChannel> &channel)
+{
+    if (!badge.imageUrl.trimmed().isEmpty())
+    {
+        return badge.imageUrl.trimmed();
+    }
+
+    EmotePtr emote;
+    if (channel &&
+        badge.name.compare(QStringLiteral("subscriber"),
+                           Qt::CaseInsensitive) == 0)
+    {
+        emote = channel->subscriberBadgeForMonths(badge.count);
+    }
+    if (!emote)
+    {
+        emote = KickBadges::lookup(badge.name.toStdString()).first;
+    }
+    if (!emote)
+    {
+        return {};
+    }
+    return emote->images.getImage1()->url().string;
+}
+
+QNetworkRequest kickIdentityImageRequest(const QString &imageUrl)
+{
+    QNetworkRequest request{QUrl(imageUrl)};
+    request.setRawHeader(
+        "Accept",
+        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
+    request.setRawHeader("User-Agent", "Mozilla/5.0 Mergerino");
+    return request;
+}
+
+ChatIdentityBadgeSource kickIdentityBadgeSource(
+    const KickChatIdentityBadge &badge,
+    const std::shared_ptr<KickChannel> &channel)
+{
+    const auto imageUrl = kickIdentityBadgeImageUrl(badge, channel);
+    return {
+        .key = QStringLiteral("kick:%1:%2")
+                   .arg(badge.legacy ? QStringLiteral("legacy")
+                                     : QStringLiteral("v2"),
+                        badge.name),
+        .pixmapKey =
+            QStringLiteral("kick:%1:%2:%3")
+                .arg(badge.name, QString::number(badge.count), imageUrl),
+        .imageUrl = imageUrl,
+        .fallbackBadgeName = {},
+    };
+}
+
+int kickIdentityBadgeDisplayPriority(const KickChatIdentityBadge &badge)
+{
+    const auto name = badge.name.trimmed().toCaseFolded();
+    const auto title = badge.title.trimmed().toCaseFolded();
+    const auto matches = [&name, &title](const QString &value) {
+        return name == value || title == value;
+    };
+
+    if (matches(QStringLiteral("broadcaster")) ||
+        matches(QStringLiteral("channel owner")) ||
+        matches(QStringLiteral("owner")))
+    {
+        return 0;
+    }
+    if (matches(QStringLiteral("staff")) ||
+        matches(QStringLiteral("admin")))
+    {
+        return 1;
+    }
+    if (matches(QStringLiteral("moderator")) ||
+        matches(QStringLiteral("mod")))
+    {
+        return 2;
+    }
+    return 3;
+}
+
+std::vector<const KickChatIdentityBadge *> selectedKickIdentityBadges(
+    const KickChatIdentity &identity)
+{
+    std::vector<const KickChatIdentityBadge *> selected;
+    for (const auto &badge : identity.badges)
+    {
+        if (badge.selected)
+        {
+            selected.push_back(&badge);
+        }
+    }
+    std::stable_sort(
+        selected.begin(), selected.end(), [](const auto *left, const auto *right) {
+            const auto leftPriority = kickIdentityBadgeDisplayPriority(*left);
+            const auto rightPriority = kickIdentityBadgeDisplayPriority(*right);
+            if (leftPriority != rightPriority)
+            {
+                return leftPriority < rightPriority;
+            }
+            return left->sortOrder < right->sortOrder;
+        });
+    return selected;
+}
+
+const std::array<QStringView, 16> &kickIdentityColors()
+{
+    static constexpr std::array<QStringView, 16> COLORS{
+        u"#00F1FF", u"#4CFF75", u"#55FFC7", u"#6F87FF",
+        u"#AAA9FF", u"#BDFF28", u"#E26EFF", u"#E4D88F",
+        u"#E5FFAB", u"#FEA0CF", u"#FF2C56", u"#FF4117",
+        u"#FF55B3", u"#FFA600", u"#FFAE76", u"#FFFFFF",
+    };
+    return COLORS;
+}
+
 }  // namespace
+
+class IdentityPlatformSwitcher final : public QFrame
+{
+public:
+    explicit IdentityPlatformSwitcher(MessagePlatform active,
+                                      QWidget *parent = nullptr)
+        : QFrame(parent)
+        , active_(active)
+    {
+        this->setObjectName(QStringLiteral("ChatIdentityPlatformSwitcher"));
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(2, 2, 2, 2);
+        layout->setSpacing(2);
+        const auto addTab = [this, layout](const QString &text,
+                                           const QString &iconPath,
+                                           MessagePlatform platform) {
+            auto *button = new QToolButton(this);
+            button->setObjectName(QStringLiteral("ChatIdentityPlatformTab"));
+            button->setIcon(QIcon(iconPath));
+            button->setIconSize(QSize{18, 18});
+            button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+            button->setAccessibleName(text);
+            button->setToolTip(text);
+            button->setCheckable(true);
+            button->setAutoExclusive(true);
+            button->setChecked(platform == this->active_);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setSizePolicy(QSizePolicy::Expanding,
+                                  QSizePolicy::Preferred);
+            QObject::connect(button, &QToolButton::clicked, this,
+                             [this, platform] {
+                                 if (platform != this->active_ &&
+                                     this->switchCallback_)
+                                 {
+                                     this->switchCallback_(platform);
+                                 }
+                             });
+            layout->addWidget(button, 1);
+            return button;
+        };
+        this->twitchButton_ = addTab(
+            QStringLiteral("Twitch"), QStringLiteral(":/platforms/twitch.svg"),
+            MessagePlatform::AnyOrTwitch);
+        this->kickButton_ =
+            addTab(QStringLiteral("Kick"), QStringLiteral(":/platforms/kick.svg"),
+                   MessagePlatform::Kick);
+    }
+
+    void setSwitchCallback(
+        std::function<void(MessagePlatform)> switchCallback)
+    {
+        this->switchCallback_ = std::move(switchCallback);
+    }
+
+    void setActivePlatform(MessagePlatform platform)
+    {
+        this->active_ = platform;
+        const QSignalBlocker twitchBlocker(this->twitchButton_);
+        const QSignalBlocker kickBlocker(this->kickButton_);
+        this->twitchButton_->setChecked(
+            platform == MessagePlatform::AnyOrTwitch);
+        this->kickButton_->setChecked(platform == MessagePlatform::Kick);
+    }
+
+private:
+    MessagePlatform active_;
+    QToolButton *twitchButton_ = nullptr;
+    QToolButton *kickButton_ = nullptr;
+    std::function<void(MessagePlatform)> switchCallback_;
+};
+
+class ChatIdentityPopupHost final : public QFrame
+{
+public:
+    explicit ChatIdentityPopupHost(QWidget *parent = nullptr)
+        : QFrame(parent, Qt::Tool | Qt::FramelessWindowHint)
+    {
+        this->setObjectName(QStringLiteral("ChatIdentityPopupHost"));
+        this->setAttribute(Qt::WA_StyledBackground);
+        this->setFixedSize(352, 560);
+        QApplication::instance()->installEventFilter(this);
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        this->stack_ = new QStackedWidget(this);
+        layout->addWidget(this->stack_);
+    }
+
+    void addPage(QWidget *page)
+    {
+        if (page != nullptr && this->stack_->indexOf(page) < 0)
+        {
+            this->stack_->addWidget(page);
+        }
+    }
+
+    void setCurrentPage(QWidget *page)
+    {
+        if (page != nullptr && this->stack_->indexOf(page) >= 0)
+        {
+            this->stack_->setCurrentWidget(page);
+        }
+    }
+
+    void showForAnchor(QWidget *anchor)
+    {
+        if (anchor == nullptr)
+        {
+            return;
+        }
+        const auto anchorPosition = anchor->mapToGlobal(QPoint(0, 0));
+        auto *screen = anchor->screen();
+        if (screen == nullptr)
+        {
+            screen = QGuiApplication::screenAt(anchorPosition);
+        }
+        const auto available =
+            screen != nullptr
+                ? screen->availableGeometry()
+                : QApplication::primaryScreen()->availableGeometry();
+        int x = anchorPosition.x();
+        int y = anchorPosition.y() - this->height() - 8;
+        if (y < available.top())
+        {
+            y = anchorPosition.y() + anchor->height() + 8;
+        }
+        x = std::clamp(x, available.left(),
+                       available.right() - this->width() + 1);
+        y = std::clamp(y, available.top(),
+                       available.bottom() - this->height() + 1);
+        this->move(x, y);
+        this->show();
+        this->raise();
+        this->activateWindow();
+        this->setFocus(Qt::PopupFocusReason);
+    }
+
+    bool wasRecentlyHidden() const
+    {
+        return this->lastHideTimer_.isValid() &&
+               this->lastHideTimer_.elapsed() < 250;
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        const auto type = event->type();
+        if (this->isVisible() &&
+            (type == QEvent::MouseButtonPress ||
+             type == QEvent::NonClientAreaMouseButtonPress))
+        {
+            auto *clickedWidget = qobject_cast<QWidget *>(watched);
+            if (clickedWidget != nullptr && clickedWidget != this &&
+                !this->isAncestorOf(clickedWidget))
+            {
+                this->hide();
+            }
+        }
+        return QFrame::eventFilter(watched, event);
+    }
+
+    void hideEvent(QHideEvent *event) override
+    {
+        this->lastHideTimer_.restart();
+        QFrame::hideEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Escape)
+        {
+            this->hide();
+            event->accept();
+            return;
+        }
+        QFrame::keyPressEvent(event);
+    }
+
+private:
+    QStackedWidget *stack_ = nullptr;
+    QElapsedTimer lastHideTimer_;
+};
+
+class KickChatIdentityPopup final : public QFrame
+{
+public:
+    explicit KickChatIdentityPopup(QWidget *parent = nullptr);
+
+    void setContext(const std::shared_ptr<KickChannel> &channel,
+                    const std::shared_ptr<KickAccount> &account);
+    void setAppliedCallback(
+        std::function<void(const KickChatIdentity &)> callback);
+    void setPlatformSwitcherVisible(bool visible);
+    void setPlatformSwitcherActive(MessagePlatform platform);
+    void setPlatformSwitchCallback(
+        std::function<void(MessagePlatform)> callback);
+    void prepareToShow();
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override;
+
+private:
+    void initLayout();
+    void requestIdentity();
+    void updateAuthGate();
+    void copyAuthHelper();
+    void pasteAuthToken();
+    void finishAuth(const QString &message, bool error);
+    void rebuild();
+    void rebuildPreview();
+    void rebuildContent();
+    void addCollapsibleSection(
+        const QString &key, const QString &title,
+        const std::function<void(QVBoxLayout *)> &builder);
+    void addBadgeGrid(
+        QVBoxLayout *layout,
+        const std::vector<KickChatIdentityBadge> &badges);
+    void applyBadgeImage(QToolButton *button,
+                         const KickChatIdentityBadge &badge);
+    void applyBadgeImage(QLabel *label,
+                         const KickChatIdentityBadge &badge);
+    void toggleBadge(const QString &name, bool legacy);
+    void chooseColor(const QString &color);
+    void saveIdentity(KickChatIdentity previous);
+    void setStatus(const QString &text, bool error = false);
+
+    QLabel *contextLabel_ = nullptr;
+    IdentityPlatformSwitcher *platformSwitcher_ = nullptr;
+    QFrame *previewFrame_ = nullptr;
+    QFrame *authFrame_ = nullptr;
+    QLabel *authHelperLabel_ = nullptr;
+    QLabel *authStatusLabel_ = nullptr;
+    QPushButton *authHelperButton_ = nullptr;
+    QPushButton *authPasteButton_ = nullptr;
+    QGraphicsBlurEffect *previewBlur_ = nullptr;
+    QGraphicsBlurEffect *contentBlur_ = nullptr;
+    QWidget *previewBadgesWidget_ = nullptr;
+    QHBoxLayout *previewBadgesLayout_ = nullptr;
+    QLabel *previewName_ = nullptr;
+    QLabel *statusLabel_ = nullptr;
+    QScrollArea *scrollArea_ = nullptr;
+    QWidget *contentWidget_ = nullptr;
+    QVBoxLayout *contentLayout_ = nullptr;
+    QNetworkAccessManager network_;
+    QHash<QString, QPixmap> pixmaps_;
+    QHash<QString, bool> collapsedSections_;
+    std::weak_ptr<KickChannel> channel_;
+    std::weak_ptr<KickAccount> account_;
+    KickChatIdentity identity_;
+    KickChatIdentity fallbackPreviewIdentity_;
+    QString contextKey_;
+    QString accountName_;
+    uint64_t channelID_ = 0;
+    uint64_t userID_ = 0;
+    int requestGeneration_ = 0;
+    bool loaded_ = false;
+    bool loading_ = false;
+    bool saving_ = false;
+    int authGeneration_ = 0;
+    bool authInFlight_ = false;
+    bool authHelperCopied_ = false;
+    pajlada::Signals::SignalHolder accountConnections_;
+    std::function<void(const KickChatIdentity &)> appliedCallback_;
+};
 
 class StreamDatabaseBadgePickerPopup final : public QFrame
 {
@@ -1031,11 +1532,12 @@ public:
                     const QString &accountName,
                     const std::shared_ptr<TwitchChannel> &twitchChannel);
     void setAppliedCallback(std::function<void()> callback);
-    void showForAnchor(QWidget *anchor);
-    bool wasRecentlyHidden() const;
-
+    void setPlatformSwitcherVisible(bool visible);
+    void setPlatformSwitcherActive(MessagePlatform platform);
+    void setPlatformSwitchCallback(
+        std::function<void(MessagePlatform)> callback);
+    void prepareToShow();
 protected:
-    void hideEvent(QHideEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
 
 private:
@@ -1058,6 +1560,10 @@ private:
 
     void initLayout();
     void requestEvents();
+    void updateAuthGate();
+    void copyAuthHelper();
+    void pasteAuthToken();
+    void finishAuth(const QString &message, bool error);
     void setBadges(QVector<BadgeItem> badges);
     void rebuildGrid();
     void addCollapsibleSection(
@@ -1075,6 +1581,7 @@ private:
     void updateBadgeIconLabel(QLabel *label, const BadgeItem &badge) const;
     void updatePreview();
     void setEmptyText(const QString &text);
+    void setStatus(const QString &text, bool error = false);
     QVector<BadgeItem> globalBadges() const;
     QVector<BadgeItem> roleBadges() const;
     QVector<BadgeItem> subscriberBadges() const;
@@ -1082,9 +1589,19 @@ private:
     void chooseDefaultSelections();
 
     QLabel *contextLabel_ = nullptr;
+    IdentityPlatformSwitcher *platformSwitcher_ = nullptr;
+    QFrame *previewFrame_ = nullptr;
+    QFrame *authFrame_ = nullptr;
+    QLabel *authHelperLabel_ = nullptr;
+    QLabel *authStatusLabel_ = nullptr;
+    QPushButton *authHelperButton_ = nullptr;
+    QPushButton *authPasteButton_ = nullptr;
+    QGraphicsBlurEffect *previewBlur_ = nullptr;
+    QGraphicsBlurEffect *contentBlur_ = nullptr;
     QWidget *previewBadgesWidget_ = nullptr;
     QHBoxLayout *previewBadgesLayout_ = nullptr;
     QLabel *previewName_ = nullptr;
+    QLabel *statusLabel_ = nullptr;
     QScrollArea *scrollArea_ = nullptr;
     QWidget *contentWidget_ = nullptr;
     QVBoxLayout *contentLayout_ = nullptr;
@@ -1111,7 +1628,9 @@ private:
     int badgeRequestGeneration_ = 0;
     int nameColorRequestGeneration_ = 0;
     int displayNameRequestGeneration_ = 0;
-    QElapsedTimer lastHideTimer_;
+    int authGeneration_ = 0;
+    bool authInFlight_ = false;
+    bool authHelperCopied_ = false;
     std::function<void()> appliedCallback_;
 };
 
@@ -1537,6 +2056,30 @@ QFrame#BadgeIdentityDivider {
     max-height: 1px;
     border: 0;
 }
+QFrame#TwitchIdentityAuthFrame {
+    background: #151519;
+    border-top: 1px solid #303038;
+    border-bottom: 1px solid #303038;
+}
+QFrame#TwitchIdentityAuthFrame QLabel {
+    border: 0;
+    background: transparent;
+}
+QFrame#TwitchIdentityAuthFrame QPushButton {
+    background: #2b2b31;
+    border: 1px solid #45454e;
+    border-radius: 4px;
+    color: #efeff1;
+    padding: 5px 9px;
+}
+QFrame#TwitchIdentityAuthFrame QPushButton:hover {
+    background: #35353c;
+    border-color: #777782;
+}
+QFrame#TwitchIdentityAuthFrame QPushButton:disabled {
+    color: #777782;
+    background: #202024;
+}
 QLabel {
     color: #efeff1;
 }
@@ -1572,6 +2115,24 @@ QToolButton#BadgeIdentityCloseButton {
 }
 QToolButton#BadgeIdentityCloseButton:hover {
     background: #2f2f35;
+}
+QFrame#ChatIdentityPlatformSwitcher {
+    background: #111216;
+    border: 1px solid #303239;
+    border-radius: 5px;
+}
+QToolButton#ChatIdentityPlatformTab {
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: #9fa2aa;
+    font-weight: 650;
+    padding: 6px;
+}
+QToolButton#ChatIdentityPlatformTab:hover { background: #24262b; }
+QToolButton#ChatIdentityPlatformTab:checked {
+    background: #31343a;
+    color: #ffffff;
 }
 QToolButton#BadgeIdentitySectionHeader {
     background: transparent;
@@ -1628,13 +2189,1082 @@ QString badgeSectionTitle(const QString &title, int count)
 
 }  // namespace
 
+KickChatIdentityPopup::KickChatIdentityPopup(QWidget *parent)
+    : QFrame(parent)
+    , network_(this)
+{
+    this->initLayout();
+}
+
+void KickChatIdentityPopup::initLayout()
+{
+    this->setObjectName(QStringLiteral("KickChatIdentityPopup"));
+    this->setAttribute(Qt::WA_StyledBackground);
+    this->setFixedSize(352, 560);
+    this->setStyleSheet(QStringLiteral(
+        "#KickChatIdentityPopup { background:#1f1f23; color:#efeff1; "
+        "border:1px solid #3a3a40; border-radius:6px; }"
+        "#KickChatIdentityPopup QLabel { color:#efeff1; }"
+        "#KickChatIdentityPopup QLabel[muted=\"true\"] { color:#adadb8; }"
+        "#BadgeIdentityPreview { background:#1f1f23; border:0; }"
+        "#BadgeIdentityPreview QLabel { border:0; background:transparent; }"
+        "#BadgeIdentityDivider { color:#303038; background:#303038; "
+        "min-height:1px; max-height:1px; border:0; }"
+        "#KickIdentityContent { background:#0e0e10; }"
+        "#KickIdentityAuthFrame { background:#151519; border-top:1px solid "
+        "#303038; border-bottom:1px solid #303038; }"
+        "#KickIdentityAuthFrame QLabel { border:0; background:transparent; }"
+        "#KickIdentityAuthFrame QPushButton { background:#2b2b31; "
+        "border:1px solid #45454e; border-radius:4px; color:#efeff1; "
+        "padding:5px 9px; }"
+        "#KickIdentityAuthFrame QPushButton:hover { background:#35353c; "
+        "border-color:#777782; }"
+        "#KickIdentityAuthFrame QPushButton:disabled { color:#777782; "
+        "background:#202024; }"
+        "#KickChatIdentityPopup QScrollArea { border:0; "
+        "background:transparent; }"
+        "#BadgeIdentityCloseButton { background:transparent; border:0; "
+        "border-radius:4px; color:#dedee3; padding:0; font-weight:700; }"
+        "#BadgeIdentityCloseButton:hover { background:#2f2f35; }"
+        "#ChatIdentityPlatformSwitcher { background:#111216; "
+        "border:1px solid #303239; border-radius:5px; }"
+        "#ChatIdentityPlatformTab { background:transparent; border:0; "
+        "border-radius:4px; color:#9fa2aa; font-weight:650; "
+        "padding:6px; }"
+        "#ChatIdentityPlatformTab:hover { background:#24262b; }"
+        "#ChatIdentityPlatformTab:checked { background:#31343a; "
+        "color:#ffffff; }"
+        "#BadgeIdentitySectionHeader { background:transparent; border:0; "
+        "color:#efeff1; font-weight:700; text-align:left; padding:4px 0; }"
+        "#BadgeIdentitySectionHeader:hover { color:#53fc18; }"
+        "#KickIdentityBadgeOption { background:#111114; "
+        "border:1px solid #2d2d35; border-radius:3px; padding:1px; }"
+        "#KickIdentityBadgeOption:hover { border-color:#777782; "
+        "background:#19191f; }"
+        "#KickIdentityBadgeOption:checked { border:2px solid #53fc18; "
+        "background:#1e2b1a; }"
+        "#BadgeIdentityColorSwatch { border:2px solid #2f2f35; "
+        "border-radius:14px; }"
+        "#BadgeIdentityColorSwatch:hover, #BadgeIdentityColorSwatch:checked { "
+        "border-color:#53fc18; }"
+        "#KickChatIdentityPopup QScrollBar:vertical { background:transparent; "
+        "width:10px; }"
+        "#KickChatIdentityPopup QScrollBar::handle:vertical { background:#555860; "
+        "border-radius:4px; min-height:28px; }"
+        "#KickChatIdentityPopup QScrollBar::add-line:vertical, "
+        "#KickChatIdentityPopup QScrollBar::sub-line:vertical { height:0; }"));
+
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    auto *header = new QHBoxLayout;
+    header->setContentsMargins(12, 8, 12, 8);
+    header->setSpacing(6);
+    auto *headerSpacer = new QWidget(this);
+    headerSpacer->setFixedWidth(24);
+    header->addWidget(headerSpacer);
+    auto *title = new QLabel(QStringLiteral("Chat Identity"), this);
+    auto titleFont = title->font();
+    titleFont.setWeight(QFont::Bold);
+    titleFont.setPointSize(titleFont.pointSize() + 1);
+    title->setFont(titleFont);
+    title->setAlignment(Qt::AlignCenter);
+    header->addWidget(title, 1);
+    auto *close = new QToolButton(this);
+    close->setObjectName(QStringLiteral("BadgeIdentityCloseButton"));
+    close->setText(QStringLiteral("x"));
+    close->setCursor(Qt::PointingHandCursor);
+    close->setFixedSize(24, 24);
+    QObject::connect(close, &QToolButton::clicked, this, [this] {
+        this->window()->hide();
+    });
+    header->addWidget(close);
+    root->addLayout(header);
+
+    this->platformSwitcher_ = new IdentityPlatformSwitcher(
+        MessagePlatform::Kick, this);
+    this->platformSwitcher_->hide();
+    root->addWidget(this->platformSwitcher_);
+
+    this->previewFrame_ = new QFrame(this);
+    this->previewFrame_->setObjectName(QStringLiteral("BadgeIdentityPreview"));
+    auto *previewLayout = new QVBoxLayout(this->previewFrame_);
+    previewLayout->setContentsMargins(12, 8, 12, 12);
+    previewLayout->setSpacing(7);
+    auto *previewHeading =
+        new QLabel(QStringLiteral("Identity Preview"), this->previewFrame_);
+    auto previewHeadingFont = previewHeading->font();
+    previewHeadingFont.setWeight(QFont::Bold);
+    previewHeading->setFont(previewHeadingFont);
+    previewLayout->addWidget(previewHeading);
+
+    this->contextLabel_ = new QLabel(this->previewFrame_);
+    this->contextLabel_->setWordWrap(true);
+    previewLayout->addWidget(this->contextLabel_);
+
+    auto *previewRow = new QHBoxLayout;
+    previewRow->setContentsMargins(0, 2, 0, 0);
+    previewRow->setSpacing(4);
+    this->previewBadgesWidget_ = new QWidget(this->previewFrame_);
+    this->previewBadgesLayout_ =
+        new QHBoxLayout(this->previewBadgesWidget_);
+    this->previewBadgesLayout_->setContentsMargins(0, 0, 0, 0);
+    this->previewBadgesLayout_->setSpacing(3);
+    previewRow->addWidget(this->previewBadgesWidget_, 0, Qt::AlignVCenter);
+    this->previewName_ = new QLabel(this->previewFrame_);
+    auto nameFont = this->previewName_->font();
+    nameFont.setWeight(QFont::Bold);
+    nameFont.setPointSize(nameFont.pointSize() + 2);
+    this->previewName_->setFont(nameFont);
+    previewRow->addWidget(this->previewName_, 1);
+    previewLayout->addLayout(previewRow);
+    root->addWidget(this->previewFrame_);
+    this->previewBlur_ = new QGraphicsBlurEffect(this->previewFrame_);
+    this->previewBlur_->setBlurRadius(4.5);
+    this->previewBlur_->setEnabled(false);
+    this->previewFrame_->setGraphicsEffect(this->previewBlur_);
+
+    auto *topDivider = new QFrame(this);
+    topDivider->setObjectName(QStringLiteral("BadgeIdentityDivider"));
+    topDivider->setFrameShape(QFrame::HLine);
+    root->addWidget(topDivider);
+
+    this->statusLabel_ = new QLabel(this);
+    this->statusLabel_->setWordWrap(true);
+    this->statusLabel_->setContentsMargins(12, 6, 12, 6);
+    this->statusLabel_->hide();
+    root->addWidget(this->statusLabel_);
+
+    this->authFrame_ = new QFrame(this);
+    this->authFrame_->setObjectName(QStringLiteral("KickIdentityAuthFrame"));
+    auto *authLayout = new QVBoxLayout(this->authFrame_);
+    authLayout->setContentsMargins(12, 9, 12, 10);
+    authLayout->setSpacing(5);
+    auto *authTitle =
+        new QLabel(QStringLiteral("Connect Kick chat identity"),
+                   this->authFrame_);
+    auto authTitleFont = authTitle->font();
+    authTitleFont.setWeight(QFont::Bold);
+    authTitle->setFont(authTitleFont);
+    authLayout->addWidget(authTitle);
+    auto *authDescription = new QLabel(
+        QStringLiteral(
+            "Connect Kick’s website session to change Kick badges and name "
+            "colour. The token is validated against the selected Kick account "
+            "and stored securely in the Windows credential store."),
+        this->authFrame_);
+    authDescription->setWordWrap(true);
+    authLayout->addWidget(authDescription);
+    auto *authInstructions = new QLabel(
+        QStringLiteral(
+            "1. Click Copy Helper; kick.com opens and this menu stays open.\n"
+            "2. Sign in to the selected Kick account.\n"
+            "3. Press F12, open Console, paste the helper, and press Enter.\n"
+            "4. Return to Mergerino and click Paste Token."),
+        this->authFrame_);
+    authInstructions->setWordWrap(true);
+    authInstructions->setProperty("muted", true);
+    authLayout->addWidget(authInstructions);
+    auto *authButtons = new QHBoxLayout;
+    authButtons->setContentsMargins(0, 2, 0, 0);
+    authButtons->setSpacing(7);
+    this->authHelperButton_ =
+        new QPushButton(QStringLiteral("Copy Helper"), this->authFrame_);
+    this->authPasteButton_ =
+        new QPushButton(QStringLiteral("Paste Token"), this->authFrame_);
+    this->authHelperButton_->setCursor(Qt::PointingHandCursor);
+    this->authPasteButton_->setCursor(Qt::PointingHandCursor);
+    authButtons->addWidget(this->authHelperButton_);
+    authButtons->addWidget(this->authPasteButton_);
+    authButtons->addStretch(1);
+    authLayout->addLayout(authButtons);
+    this->authHelperLabel_ =
+        new QLabel(QStringLiteral("Helper: not copied"), this->authFrame_);
+    this->authHelperLabel_->setProperty("muted", true);
+    auto helperFont = this->authHelperLabel_->font();
+    helperFont.setBold(true);
+    helperFont.setFamily(QStringLiteral("monospace"));
+    this->authHelperLabel_->setFont(helperFont);
+    authLayout->addWidget(this->authHelperLabel_);
+    this->authStatusLabel_ = new QLabel(this->authFrame_);
+    this->authStatusLabel_->setWordWrap(true);
+    this->authStatusLabel_->setProperty("muted", true);
+    authLayout->addWidget(this->authStatusLabel_);
+    root->addWidget(this->authFrame_);
+
+    QObject::connect(this->authHelperButton_, &QPushButton::clicked, this,
+                     [this] {
+                         this->copyAuthHelper();
+                     });
+    QObject::connect(this->authPasteButton_, &QPushButton::clicked, this,
+                     [this] {
+                         this->pasteAuthToken();
+                     });
+
+    this->scrollArea_ = new QScrollArea(this);
+    this->scrollArea_->setWidgetResizable(true);
+    this->scrollArea_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    this->scrollArea_->setFrameShape(QFrame::NoFrame);
+    this->contentWidget_ = new QWidget(this->scrollArea_);
+    this->contentWidget_->setObjectName(QStringLiteral("KickIdentityContent"));
+    this->contentLayout_ = new QVBoxLayout(this->contentWidget_);
+    this->contentLayout_->setContentsMargins(12, 10, 12, 12);
+    this->contentLayout_->setSpacing(8);
+    this->scrollArea_->setWidget(this->contentWidget_);
+    root->addWidget(this->scrollArea_, 1);
+    this->contentBlur_ = new QGraphicsBlurEffect(this->scrollArea_);
+    this->contentBlur_->setBlurRadius(4.5);
+    this->contentBlur_->setEnabled(false);
+    this->scrollArea_->setGraphicsEffect(this->contentBlur_);
+    this->rebuild();
+    this->updateAuthGate();
+}
+
+void KickChatIdentityPopup::setContext(
+    const std::shared_ptr<KickChannel> &channel,
+    const std::shared_ptr<KickAccount> &account)
+{
+    const auto channelID = channel ? channel->channelID() : 0;
+    const auto userID = account ? account->userID() : 0;
+    const auto key = QStringLiteral("%1:%2").arg(channelID).arg(userID);
+    this->channel_ = channel;
+    this->account_ = account;
+    this->accountConnections_.clear();
+    if (account)
+    {
+        this->accountConnections_.managedConnect(
+            account->chatIdentityAuthUpdated,
+            [guard = QPointer<KickChatIdentityPopup>(this)] {
+                if (guard == nullptr)
+                {
+                    return;
+                }
+                ++guard->authGeneration_;
+                ++guard->requestGeneration_;
+                guard->authInFlight_ = false;
+                guard->authHelperCopied_ = false;
+                guard->loaded_ = false;
+                guard->loading_ = false;
+                guard->updateAuthGate();
+                guard->rebuild();
+                if (guard->isVisible())
+                {
+                    guard->requestIdentity();
+                }
+            });
+    }
+    this->fallbackPreviewIdentity_ = {};
+    QString previewAccountName = account ? account->username().trimmed()
+                                         : QString{};
+    if (channel)
+    {
+        if (const auto *ownIdentity = channel->ownIdentity())
+        {
+            if (!ownIdentity->displayName.trimmed().isEmpty())
+            {
+                previewAccountName = ownIdentity->displayName.trimmed();
+            }
+            if (ownIdentity->usernameColor.isValid())
+            {
+                this->fallbackPreviewIdentity_.color =
+                    ownIdentity->usernameColor.name();
+            }
+            for (const auto &element : ownIdentity->badges)
+            {
+                const auto *badgeElement =
+                    dynamic_cast<const BadgeElement *>(element.get());
+                const auto emote = badgeElement ? badgeElement->getEmote()
+                                                : EmotePtr{};
+                if (!emote)
+                {
+                    continue;
+                }
+                const auto image = emote->images.getImage1();
+                this->fallbackPreviewIdentity_.badges.push_back({
+                    .name = emote->name.string,
+                    .title = emote->tooltip.string,
+                    .badgeType = {},
+                    .imageUrl = image ? image->url().string : QString{},
+                    .count = 0,
+                    .level = 0,
+                    .sortOrder = static_cast<uint64_t>(
+                        this->fallbackPreviewIdentity_.badges.size()),
+                    .selected = true,
+                    .legacy = false,
+                });
+            }
+        }
+    }
+    if (this->contextKey_ != key || this->accountName_.isEmpty() ||
+        this->accountName_.compare(previewAccountName, Qt::CaseInsensitive) != 0)
+    {
+        this->accountName_ = previewAccountName;
+    }
+    this->channelID_ = channelID;
+    this->userID_ = userID;
+    const auto safeChannel =
+        channel && !channel->getName().trimmed().isEmpty()
+            ? channel->getName().trimmed()
+            : QStringLiteral("this channel");
+    this->contextLabel_->setText(
+        QStringLiteral("How your name will appear in chat on %1:")
+            .arg(channelPossessiveForIdentity(safeChannel)));
+    this->updateAuthGate();
+    if (this->contextKey_ == key)
+    {
+        this->rebuildPreview();
+        if (this->isVisible() && !this->loaded_ && !this->loading_)
+        {
+            this->requestIdentity();
+        }
+        return;
+    }
+    ++this->authGeneration_;
+    this->authInFlight_ = false;
+    this->authHelperCopied_ = false;
+    this->contextKey_ = key;
+    this->identity_ = {};
+    this->loaded_ = false;
+    this->loading_ = false;
+    this->saving_ = false;
+    ++this->requestGeneration_;
+    this->rebuild();
+    if (this->isVisible())
+    {
+        this->requestIdentity();
+    }
+}
+
+void KickChatIdentityPopup::setAppliedCallback(
+    std::function<void(const KickChatIdentity &)> callback)
+{
+    this->appliedCallback_ = std::move(callback);
+}
+
+void KickChatIdentityPopup::setPlatformSwitcherVisible(bool visible)
+{
+    this->platformSwitcher_->setVisible(visible);
+}
+
+void KickChatIdentityPopup::setPlatformSwitcherActive(
+    MessagePlatform platform)
+{
+    this->platformSwitcher_->setActivePlatform(platform);
+}
+
+void KickChatIdentityPopup::setPlatformSwitchCallback(
+    std::function<void(MessagePlatform)> callback)
+{
+    this->platformSwitcher_->setSwitchCallback(std::move(callback));
+}
+
+void KickChatIdentityPopup::prepareToShow()
+{
+    this->updateAuthGate();
+    const auto account = this->account_.lock();
+    if (account && !account->chatIdentityToken().isEmpty() &&
+        !this->loaded_ && !this->loading_)
+    {
+        this->requestIdentity();
+    }
+}
+
+void KickChatIdentityPopup::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Escape)
+    {
+        this->window()->hide();
+        event->accept();
+        return;
+    }
+    QFrame::keyPressEvent(event);
+}
+
+void KickChatIdentityPopup::setStatus(const QString &text, bool error)
+{
+    this->statusLabel_->setText(text);
+    this->statusLabel_->setVisible(!text.trimmed().isEmpty());
+    this->statusLabel_->setStyleSheet(
+        QStringLiteral("color:%1;")
+            .arg(error ? QStringLiteral("#ff8585")
+                       : QStringLiteral("#aeb1b7")));
+}
+
+void KickChatIdentityPopup::updateAuthGate()
+{
+    const auto account = this->account_.lock();
+    const bool hasAccount = account && !account->isAnonymous();
+    const bool connected =
+        hasAccount && !account->chatIdentityToken().isEmpty();
+
+    this->authFrame_->setVisible(!connected);
+    this->previewFrame_->setEnabled(connected);
+    this->scrollArea_->setEnabled(connected);
+    this->previewBlur_->setEnabled(!connected);
+    this->contentBlur_->setEnabled(!connected);
+
+    this->authHelperLabel_->setText(
+        this->authHelperCopied_
+            ? QStringLiteral("Helper: copied to clipboard")
+            : QStringLiteral("Helper: not copied"));
+    this->authHelperButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+    this->authPasteButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+
+    if (!this->authInFlight_)
+    {
+        if (connected)
+        {
+            this->authStatusLabel_->clear();
+        }
+        else if (hasAccount)
+        {
+            this->authStatusLabel_->setText(
+                QStringLiteral("Not connected for Kick chat identity."));
+        }
+        else
+        {
+            this->authStatusLabel_->setText(
+                QStringLiteral("Log in to a Kick account first."));
+        }
+        this->authStatusLabel_->setStyleSheet(
+            QStringLiteral("color:#aeb1b7;"));
+    }
+}
+
+void KickChatIdentityPopup::copyAuthHelper()
+{
+    const auto account = this->account_.lock();
+    if (!account || account->isAnonymous())
+    {
+        this->finishAuth(QStringLiteral("Log in to a Kick account first."),
+                         true);
+        return;
+    }
+
+    this->authHelperCopied_ = true;
+    QGuiApplication::clipboard()->setText(kickIdentityAuthHelper());
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://kick.com/")));
+    this->finishAuth(
+        QStringLiteral(
+            "Helper copied and kick.com opened. Follow the steps above, then "
+            "click Paste Token."),
+        false);
+}
+
+void KickChatIdentityPopup::pasteAuthToken()
+{
+    if (this->authInFlight_)
+    {
+        return;
+    }
+    const auto account = this->account_.lock();
+    if (!account || account->isAnonymous())
+    {
+        this->finishAuth(QStringLiteral("Log in to a Kick account first."),
+                         true);
+        return;
+    }
+
+    const auto clipboardText =
+        QGuiApplication::clipboard()->text().trimmed();
+    if (clipboardText.isEmpty() ||
+        clipboardText.contains(QStringLiteral("document.cookie")) ||
+        clipboardText.contains(
+            QStringLiteral("Mergerino Kick token copied")))
+    {
+        this->finishAuth(
+            QStringLiteral(
+                "Run the copied helper in the Kick console first, then click "
+                "Paste Token."),
+            true);
+        return;
+    }
+    const auto token = parseKickIdentityToken(clipboardText);
+    if (token.isEmpty())
+    {
+        this->finishAuth(
+            QStringLiteral("Clipboard text is not a Kick session token."),
+            true);
+        return;
+    }
+    if (token.size() > 8192)
+    {
+        this->finishAuth(
+            QStringLiteral(
+                "Clipboard token is too long to be a Kick session token."),
+            true);
+        return;
+    }
+
+    this->authInFlight_ = true;
+    const int generation = ++this->authGeneration_;
+    const auto expectedUserID = account->userID();
+    this->finishAuth(
+        QStringLiteral("Validating Kick website session…"), false);
+    getKickApi()->validateChatIdentityToken(
+        token, expectedUserID,
+        [guard = QPointer<KickChatIdentityPopup>(this), generation, account,
+         token](const ExpectedStr<void> &result) {
+            if (guard == nullptr || generation != guard->authGeneration_)
+            {
+                return;
+            }
+            guard->authInFlight_ = false;
+            if (!result)
+            {
+                guard->finishAuth(result.error(), true);
+                return;
+            }
+
+            account->setChatIdentityToken(token);
+            const auto currentClipboard =
+                QGuiApplication::clipboard()->text().trimmed();
+            if (currentClipboard == token ||
+                parseKickIdentityToken(currentClipboard) == token)
+            {
+                QGuiApplication::clipboard()->clear();
+            }
+            guard->authHelperCopied_ = false;
+            guard->finishAuth(
+                QStringLiteral("Connected as %1 for Kick chat identity.")
+                    .arg(account->username()),
+                false);
+            guard->updateAuthGate();
+        });
+}
+
+void KickChatIdentityPopup::finishAuth(const QString &message, bool error)
+{
+    this->authHelperLabel_->setText(
+        this->authHelperCopied_
+            ? QStringLiteral("Helper: copied to clipboard")
+            : QStringLiteral("Helper: not copied"));
+    this->authStatusLabel_->setText(message);
+    this->authStatusLabel_->setStyleSheet(
+        QStringLiteral("color:%1;")
+            .arg(error ? QStringLiteral("#ff8585")
+                       : QStringLiteral("#aeb1b7")));
+
+    const auto account = this->account_.lock();
+    const bool hasAccount = account && !account->isAnonymous();
+    const bool connected =
+        hasAccount && !account->chatIdentityToken().isEmpty();
+    this->authHelperButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+    this->authPasteButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+}
+
+void KickChatIdentityPopup::requestIdentity()
+{
+    if (this->loading_ || this->channelID_ == 0 || this->userID_ == 0)
+    {
+        return;
+    }
+    const auto account = this->account_.lock();
+    if (!account || account->chatIdentityToken().isEmpty())
+    {
+        this->loaded_ = false;
+        this->setStatus({});
+        this->updateAuthGate();
+        this->rebuildContent();
+        return;
+    }
+    this->loading_ = true;
+    const int generation = ++this->requestGeneration_;
+    this->setStatus(QStringLiteral("Loading Kick chat identity…"));
+    this->rebuildContent();
+    getKickApi()->getChatIdentity(
+        this->channelID_, this->userID_, account->chatIdentityToken(),
+        [guard = QPointer<KickChatIdentityPopup>(this),
+         generation](const ExpectedStr<KickChatIdentity> &result) {
+            if (guard == nullptr || generation != guard->requestGeneration_)
+            {
+                return;
+            }
+            guard->loading_ = false;
+            if (!result)
+            {
+                guard->loaded_ = false;
+                guard->setStatus(
+                    QStringLiteral("Unable to load Kick chat identity: %1")
+                        .arg(result.error()),
+                    true);
+                guard->rebuildContent();
+                return;
+            }
+            guard->identity_ = *result;
+            guard->loaded_ = true;
+            guard->setStatus(QString{});
+            guard->rebuild();
+        });
+}
+
+void KickChatIdentityPopup::rebuild()
+{
+    this->rebuildPreview();
+    this->rebuildContent();
+}
+
+void KickChatIdentityPopup::rebuildPreview()
+{
+    while (auto *item = this->previewBadgesLayout_->takeAt(0))
+    {
+        if (auto *widget = item->widget())
+        {
+            widget->deleteLater();
+        }
+        delete item;
+    }
+    const auto &previewIdentity =
+        this->loaded_ ? this->identity_ : this->fallbackPreviewIdentity_;
+    int shown = 0;
+    for (const auto *badge : selectedKickIdentityBadges(previewIdentity))
+    {
+        if (shown >= 4)
+        {
+            break;
+        }
+        auto *label = new QLabel(this->previewBadgesWidget_);
+        label->setFixedSize(22, 22);
+        label->setAlignment(Qt::AlignCenter);
+        const auto title = kickIdentityBadgeTitle(*badge);
+        label->setToolTip(title);
+        label->setText(title.left(1));
+        this->previewBadgesLayout_->addWidget(label);
+        this->applyBadgeImage(label, *badge);
+        ++shown;
+    }
+    this->previewName_->setText(
+        this->accountName_.isEmpty() ? QStringLiteral("Kick user")
+                                     : this->accountName_);
+    const QColor color(previewIdentity.color);
+    this->previewName_->setStyleSheet(
+        QStringLiteral("color:%1;")
+            .arg(color.isValid() ? color.name() : QStringLiteral("#ffffff")));
+}
+
+void KickChatIdentityPopup::rebuildContent()
+{
+    clearBadgePickerLayout(this->contentLayout_);
+
+    if (!this->loaded_)
+    {
+        const auto account = this->account_.lock();
+        const bool connected =
+            account && !account->chatIdentityToken().isEmpty();
+        this->contentLayout_->addWidget(makeBadgePickerText(
+            this->contentWidget_,
+            this->loading_
+                ? QStringLiteral("Loading badges...")
+                : (connected
+                       ? QStringLiteral("Kick identity is unavailable.")
+                       : QStringLiteral(
+                             "Badge and name colour controls unlock after "
+                             "connecting.")),
+            false));
+        this->contentLayout_->addStretch(1);
+        return;
+    }
+
+    std::vector<KickChatIdentityBadge> globalBadges;
+    std::vector<KickChatIdentityBadge> channelBadges;
+    for (const auto &badge : this->identity_.badges)
+    {
+        if (badge.badgeType.compare(QStringLiteral("global"),
+                                    Qt::CaseInsensitive) == 0)
+        {
+            globalBadges.push_back(badge);
+        }
+        else
+        {
+            channelBadges.push_back(badge);
+        }
+    }
+    const auto selectedFirst = [](const auto &left, const auto &right) {
+        if (left.selected != right.selected)
+        {
+            return left.selected;
+        }
+        if (left.sortOrder != right.sortOrder)
+        {
+            return left.sortOrder < right.sortOrder;
+        }
+        return kickIdentityBadgeTitle(left).compare(
+                   kickIdentityBadgeTitle(right), Qt::CaseInsensitive) < 0;
+    };
+    std::stable_sort(globalBadges.begin(), globalBadges.end(), selectedFirst);
+    std::stable_sort(channelBadges.begin(), channelBadges.end(), selectedFirst);
+
+    this->addCollapsibleSection(
+        QStringLiteral("global"),
+        badgeSectionTitle(QStringLiteral("Global Badges"),
+                          globalBadges.size()),
+        [this, globalBadges](QVBoxLayout *sectionLayout) {
+            sectionLayout->addWidget(makeBadgePickerText(
+                this->contentWidget_,
+                QStringLiteral(
+                    "This badge appears across channels and whispers."),
+                false));
+            this->addBadgeGrid(sectionLayout, globalBadges);
+        });
+
+    addBadgePickerDivider(this->contentLayout_, this->contentWidget_);
+
+    this->addCollapsibleSection(
+        QStringLiteral("channel"),
+        badgeSectionTitle(QStringLiteral("Channel Badges"),
+                          channelBadges.size()),
+        [this, channelBadges](QVBoxLayout *sectionLayout) {
+            const auto channel = this->channel_.lock();
+            const auto channelName =
+                channel ? channel->getName() : QStringLiteral("this channel");
+            sectionLayout->addWidget(makeBadgePickerText(
+                this->contentWidget_,
+                QStringLiteral("These badges appear on %1.")
+                    .arg(channelPossessiveForIdentity(channelName)),
+                false));
+            this->addBadgeGrid(sectionLayout, channelBadges);
+        });
+
+    addBadgePickerDivider(this->contentLayout_, this->contentWidget_);
+
+    this->addCollapsibleSection(
+        QStringLiteral("color"), QStringLiteral("Name Color"),
+        [this](QVBoxLayout *sectionLayout) {
+            sectionLayout->addWidget(makeBadgePickerText(
+                this->contentWidget_,
+                QStringLiteral(
+                    "Pick the color used for your name in Kick chat."),
+                false));
+            auto *colorGrid = new QWidget(this->contentWidget_);
+            auto *colors = new QGridLayout(colorGrid);
+            colors->setContentsMargins(0, 2, 0, 0);
+            colors->setHorizontalSpacing(11);
+            colors->setVerticalSpacing(9);
+            int colorIndex = 0;
+            for (const auto colorView : kickIdentityColors())
+            {
+                const auto color = colorView.toString();
+                auto *button = new QToolButton(colorGrid);
+                button->setObjectName(
+                    QStringLiteral("BadgeIdentityColorSwatch"));
+                button->setFixedSize(30, 30);
+                button->setCheckable(true);
+                button->setCursor(Qt::PointingHandCursor);
+                button->setChecked(color.compare(this->identity_.color,
+                                                  Qt::CaseInsensitive) == 0);
+                button->setEnabled(!this->saving_);
+                button->setToolTip(color);
+                button->setStyleSheet(
+                    QStringLiteral("background:%1; border-radius:15px;")
+                        .arg(color));
+                QObject::connect(button, &QToolButton::clicked, this,
+                                 [this, color] {
+                                     this->chooseColor(color);
+                                 });
+                colors->addWidget(button, colorIndex / 7, colorIndex % 7);
+                ++colorIndex;
+            }
+            sectionLayout->addWidget(colorGrid);
+        });
+
+    this->contentLayout_->addStretch(1);
+}
+
+void KickChatIdentityPopup::addCollapsibleSection(
+    const QString &key, const QString &title,
+    const std::function<void(QVBoxLayout *)> &builder)
+{
+    const bool collapsed = this->collapsedSections_.value(key, false);
+    auto *header = new QToolButton(this->contentWidget_);
+    header->setObjectName(QStringLiteral("BadgeIdentitySectionHeader"));
+    header->setCursor(Qt::PointingHandCursor);
+    header->setText(title);
+    header->setIcon(badgeIdentityChevronIcon(collapsed));
+    header->setIconSize(QSize{18, 18});
+    header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    QObject::connect(header, &QToolButton::clicked, this, [this, key] {
+        this->collapsedSections_.insert(
+            key, !this->collapsedSections_.value(key, false));
+        this->rebuildContent();
+    });
+    this->contentLayout_->addWidget(header);
+
+    if (collapsed)
+    {
+        return;
+    }
+    auto *sectionWidget = new QWidget(this->contentWidget_);
+    auto *sectionLayout = new QVBoxLayout(sectionWidget);
+    sectionLayout->setContentsMargins(0, 0, 0, 0);
+    sectionLayout->setSpacing(8);
+    builder(sectionLayout);
+    this->contentLayout_->addWidget(sectionWidget);
+}
+
+void KickChatIdentityPopup::addBadgeGrid(
+    QVBoxLayout *layout,
+    const std::vector<KickChatIdentityBadge> &badges)
+{
+    if (badges.empty())
+    {
+        layout->addWidget(makeBadgePickerText(
+            this->contentWidget_, QStringLiteral("No badges available."), true));
+        return;
+    }
+
+    auto *gridWidget = new QWidget(this->contentWidget_);
+    auto *grid = new QGridLayout(gridWidget);
+    grid->setContentsMargins(0, 3, 0, 0);
+    grid->setHorizontalSpacing(7);
+    grid->setVerticalSpacing(7);
+    grid->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    int row = 0;
+    int column = 0;
+    constexpr int columns = 7;
+    for (const auto &badge : badges)
+    {
+        auto *button = new QToolButton(gridWidget);
+        button->setObjectName(QStringLiteral("KickIdentityBadgeOption"));
+        button->setFixedSize(34, 34);
+        button->setIconSize(QSize(32, 32));
+        button->setCheckable(true);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setChecked(badge.selected);
+        button->setEnabled(!this->saving_);
+        const auto titleText = kickIdentityBadgeTitle(badge);
+        button->setToolTip(titleText);
+        button->setText(titleText.left(1));
+        this->applyBadgeImage(button, badge);
+        QObject::connect(button, &QToolButton::clicked, this,
+                         [this, name = badge.name, legacy = badge.legacy] {
+                             this->toggleBadge(name, legacy);
+                         });
+        grid->addWidget(button, row, column);
+        if (++column >= columns)
+        {
+            column = 0;
+            ++row;
+        }
+    }
+    layout->addWidget(gridWidget);
+}
+
+void KickChatIdentityPopup::applyBadgeImage(
+    QToolButton *button, const KickChatIdentityBadge &badge)
+{
+    const auto imageUrl =
+        kickIdentityBadgeImageUrl(badge, this->channel_.lock());
+    if (imageUrl.isEmpty())
+    {
+        return;
+    }
+    const auto setPixmap = [button](const QPixmap &pixmap) {
+        if (button == nullptr || pixmap.isNull())
+        {
+            return;
+        }
+        button->setText({});
+        button->setIcon(QIcon(pixmap));
+    };
+    if (imageUrl.startsWith(QStringLiteral(":/")))
+    {
+        const QPixmap pixmap(imageUrl);
+        this->pixmaps_.insert(imageUrl, pixmap);
+        setPixmap(pixmap);
+        return;
+    }
+    if (const auto cached = this->pixmaps_.constFind(imageUrl);
+        cached != this->pixmaps_.cend())
+    {
+        setPixmap(cached.value());
+        return;
+    }
+
+    auto *reply = this->network_.get(kickIdentityImageRequest(imageUrl));
+    QObject::connect(
+        reply, &QNetworkReply::finished, this,
+        [guard = QPointer<KickChatIdentityPopup>(this),
+         button = QPointer<QToolButton>(button), reply, imageUrl] {
+            const auto cleanup = qScopeGuard([reply] {
+                reply->deleteLater();
+            });
+            if (guard == nullptr || button == nullptr ||
+                reply->error() != QNetworkReply::NoError)
+            {
+                return;
+            }
+            QPixmap pixmap;
+            pixmap.loadFromData(reply->readAll());
+            if (pixmap.isNull())
+            {
+                return;
+            }
+            guard->pixmaps_.insert(imageUrl, pixmap);
+            button->setText({});
+            button->setIcon(QIcon(pixmap));
+        });
+}
+
+void KickChatIdentityPopup::applyBadgeImage(
+    QLabel *label, const KickChatIdentityBadge &badge)
+{
+    const auto imageUrl =
+        kickIdentityBadgeImageUrl(badge, this->channel_.lock());
+    if (imageUrl.isEmpty())
+    {
+        return;
+    }
+    const auto setPixmap = [label](const QPixmap &pixmap) {
+        if (label == nullptr || pixmap.isNull())
+        {
+            return;
+        }
+        label->setText({});
+        label->setPixmap(pixmap.scaled(label->size(), Qt::KeepAspectRatio,
+                                       Qt::SmoothTransformation));
+    };
+    if (imageUrl.startsWith(QStringLiteral(":/")))
+    {
+        const QPixmap pixmap(imageUrl);
+        this->pixmaps_.insert(imageUrl, pixmap);
+        setPixmap(pixmap);
+        return;
+    }
+    if (const auto cached = this->pixmaps_.constFind(imageUrl);
+        cached != this->pixmaps_.cend())
+    {
+        setPixmap(cached.value());
+        return;
+    }
+
+    auto *reply = this->network_.get(kickIdentityImageRequest(imageUrl));
+    QObject::connect(
+        reply, &QNetworkReply::finished, this,
+        [guard = QPointer<KickChatIdentityPopup>(this),
+         label = QPointer<QLabel>(label), reply, imageUrl] {
+            const auto cleanup = qScopeGuard([reply] {
+                reply->deleteLater();
+            });
+            if (guard == nullptr || label == nullptr ||
+                reply->error() != QNetworkReply::NoError)
+            {
+                return;
+            }
+            QPixmap pixmap;
+            pixmap.loadFromData(reply->readAll());
+            if (pixmap.isNull())
+            {
+                return;
+            }
+            guard->pixmaps_.insert(imageUrl, pixmap);
+            label->setText({});
+            label->setPixmap(pixmap.scaled(label->size(), Qt::KeepAspectRatio,
+                                           Qt::SmoothTransformation));
+        });
+}
+
+void KickChatIdentityPopup::toggleBadge(const QString &name, bool legacy)
+{
+    auto badge = std::ranges::find_if(
+        this->identity_.badges, [&name, legacy](const auto &item) {
+            return item.legacy == legacy && item.name == name;
+        });
+    if (badge == this->identity_.badges.end())
+    {
+        return;
+    }
+    if (!badge->selected &&
+        std::ranges::count_if(this->identity_.badges, [](const auto &item) {
+            return item.selected;
+        }) >= 4)
+    {
+        this->setStatus(
+            QStringLiteral("Kick allows a maximum of 4 selected badges."),
+            true);
+        this->rebuild();
+        return;
+    }
+
+    auto previous = this->identity_;
+    badge->selected = !badge->selected;
+    this->saveIdentity(std::move(previous));
+}
+
+void KickChatIdentityPopup::chooseColor(const QString &color)
+{
+    if (!QColor(color).isValid() ||
+        color.compare(this->identity_.color, Qt::CaseInsensitive) == 0)
+    {
+        return;
+    }
+    auto previous = this->identity_;
+    this->identity_.color = color.toUpper();
+    this->saveIdentity(std::move(previous));
+}
+
+void KickChatIdentityPopup::saveIdentity(KickChatIdentity previous)
+{
+    if (this->saving_ || this->channelID_ == 0 || this->userID_ == 0)
+    {
+        return;
+    }
+    const auto account = this->account_.lock();
+    if (!account)
+    {
+        this->identity_ = std::move(previous);
+        this->setStatus(QStringLiteral("Log in to Kick to change chat identity."),
+                        true);
+        this->rebuild();
+        return;
+    }
+    this->saving_ = true;
+    const int generation = ++this->requestGeneration_;
+    this->setStatus(QStringLiteral("Saving Kick chat identity…"));
+    this->rebuild();
+    getKickApi()->updateChatIdentity(
+        this->channelID_, this->userID_, account->chatIdentityToken(),
+        this->identity_,
+        [guard = QPointer<KickChatIdentityPopup>(this), generation,
+         previous = std::move(previous)](
+            const ExpectedStr<KickChatIdentity> &result) mutable {
+            if (guard == nullptr || generation != guard->requestGeneration_)
+            {
+                return;
+            }
+            guard->saving_ = false;
+            if (!result)
+            {
+                guard->identity_ = previous;
+                guard->setStatus(
+                    QStringLiteral("Unable to save Kick chat identity: %1")
+                        .arg(result.error()),
+                    true);
+                guard->rebuild();
+                return;
+            }
+            guard->identity_ = *result;
+            guard->loaded_ = true;
+            guard->setStatus(QStringLiteral("Kick chat identity updated."));
+            guard->rebuild();
+            if (guard->appliedCallback_)
+            {
+                guard->appliedCallback_(guard->identity_);
+            }
+        });
+}
+
 StreamDatabaseBadgePickerPopup::StreamDatabaseBadgePickerPopup(QWidget *parent)
-    : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint)
+    : QFrame(parent)
     , network_(this)
 {
     this->setObjectName(QStringLiteral("StreamDatabaseBadgePickerPopup"));
     this->setAttribute(Qt::WA_StyledBackground);
-    this->setFixedSize(358, 650);
+    this->setFixedSize(352, 560);
     this->setStyleSheet(badgePickerStyleSheet());
 
     this->initLayout();
@@ -1647,6 +3277,7 @@ void StreamDatabaseBadgePickerPopup::setContext(const QString &channelName,
                                                 const std::shared_ptr<TwitchChannel>
                                                     &twitchChannel)
 {
+    this->setStatus(QString{});
     this->twitchChannel_ = twitchChannel;
     const QString safeChannel =
         channelName.trimmed().isEmpty() ? QStringLiteral("this channel")
@@ -1655,9 +3286,15 @@ void StreamDatabaseBadgePickerPopup::setContext(const QString &channelName,
         QStringLiteral("How your name will appear in chat on %1:")
             .arg(channelPossessiveForIdentity(safeChannel)));
 
-    this->accountName_ = accountName.trimmed().isEmpty()
-                             ? QStringLiteral("Twitch user")
-                             : accountName.trimmed();
+    const auto requestedAccountName =
+        accountName.trimmed().isEmpty() ? QStringLiteral("Twitch user")
+                                        : accountName.trimmed();
+    if (this->accountName_.isEmpty() ||
+        this->accountName_.compare(requestedAccountName,
+                                   Qt::CaseInsensitive) != 0)
+    {
+        this->accountName_ = requestedAccountName;
+    }
     this->previewName_->setText(this->accountName_);
     this->requestCurrentUserDisplayName();
 
@@ -1684,7 +3321,7 @@ void StreamDatabaseBadgePickerPopup::setContext(const QString &channelName,
         this->rebuildGrid();
     }
 
-    this->requestEvents();
+    this->updateAuthGate();
 }
 
 void StreamDatabaseBadgePickerPopup::setAppliedCallback(
@@ -1693,63 +3330,278 @@ void StreamDatabaseBadgePickerPopup::setAppliedCallback(
     this->appliedCallback_ = std::move(callback);
 }
 
-void StreamDatabaseBadgePickerPopup::showForAnchor(QWidget *anchor)
+void StreamDatabaseBadgePickerPopup::setPlatformSwitcherVisible(bool visible)
 {
-    if (anchor == nullptr)
-    {
-        this->show();
-        return;
-    }
-
-    QPoint position = anchor->mapToGlobal(QPoint{0, 0});
-    int x = position.x();
-    int y = position.y() - this->height() - 8;
-
-    auto *screen = anchor->screen();
-    if (screen == nullptr)
-    {
-        screen = QGuiApplication::screenAt(position);
-    }
-    if (screen != nullptr)
-    {
-        const QRect bounds = screen->availableGeometry();
-        x = std::clamp(x, bounds.left(),
-                       std::max(bounds.left(), bounds.right() - this->width()));
-        if (y < bounds.top())
-        {
-            y = position.y() + anchor->height() + 8;
-        }
-    }
-
-    this->move(x, y);
-    this->show();
-    this->raise();
-    this->activateWindow();
-    this->setFocus(Qt::PopupFocusReason);
+    this->platformSwitcher_->setVisible(visible);
 }
 
-bool StreamDatabaseBadgePickerPopup::wasRecentlyHidden() const
+void StreamDatabaseBadgePickerPopup::setPlatformSwitcherActive(
+    MessagePlatform platform)
 {
-    return this->lastHideTimer_.isValid() &&
-           this->lastHideTimer_.elapsed() < 250;
+    this->platformSwitcher_->setActivePlatform(platform);
 }
 
-void StreamDatabaseBadgePickerPopup::hideEvent(QHideEvent *event)
+void StreamDatabaseBadgePickerPopup::setPlatformSwitchCallback(
+    std::function<void(MessagePlatform)> callback)
 {
-    this->lastHideTimer_.restart();
-    QFrame::hideEvent(event);
+    this->platformSwitcher_->setSwitchCallback(std::move(callback));
+}
+
+void StreamDatabaseBadgePickerPopup::prepareToShow()
+{
+    this->updateAuthGate();
+    this->requestEvents();
 }
 
 void StreamDatabaseBadgePickerPopup::keyPressEvent(QKeyEvent *event)
 {
     if (event->key() == Qt::Key_Escape)
     {
-        this->hide();
+        this->window()->hide();
         event->accept();
         return;
     }
 
     QFrame::keyPressEvent(event);
+}
+
+void StreamDatabaseBadgePickerPopup::setStatus(const QString &text, bool error)
+{
+    this->statusLabel_->setText(text);
+    this->statusLabel_->setVisible(!text.trimmed().isEmpty());
+    this->statusLabel_->setStyleSheet(
+        QStringLiteral("color:%1;")
+            .arg(error ? QStringLiteral("#ff8585")
+                       : QStringLiteral("#aeb1b7")));
+}
+
+void StreamDatabaseBadgePickerPopup::updateAuthGate()
+{
+    const auto account = getApp()->getAccounts()->twitch.getCurrent();
+    const bool hasAccount = account != nullptr && !account->isAnon();
+    const auto auth =
+        hasAccount
+            ? TwitchModerationAuth::resolveForCurrentUser(account->getUserId())
+            : TwitchModerationAuth::Account{};
+    const bool connected = hasAccount && auth.supportsWebGql();
+
+    this->authFrame_->setVisible(!connected);
+    this->previewFrame_->setEnabled(connected);
+    this->scrollArea_->setEnabled(connected);
+    this->previewBlur_->setEnabled(!connected);
+    this->contentBlur_->setEnabled(!connected);
+    this->authHelperLabel_->setText(
+        this->authHelperCopied_
+            ? QStringLiteral("Helper: copied to clipboard")
+            : QStringLiteral("Helper: not copied"));
+    this->authHelperButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+    this->authPasteButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+
+    if (!connected)
+    {
+        this->emptyLabel_->hide();
+    }
+    if (!this->authInFlight_)
+    {
+        this->authStatusLabel_->setText(
+            connected
+                ? QString{}
+                : hasAccount
+                      ? QStringLiteral(
+                            "Not connected for Twitch chat identity.")
+                      : QStringLiteral("Log in to a Twitch account first."));
+        this->authStatusLabel_->setStyleSheet(
+            QStringLiteral("color:#aeb1b7;"));
+    }
+}
+
+void StreamDatabaseBadgePickerPopup::copyAuthHelper()
+{
+    const auto account = getApp()->getAccounts()->twitch.getCurrent();
+    if (account == nullptr || account->isAnon())
+    {
+        this->finishAuth(QStringLiteral("Log in to a Twitch account first."),
+                         true);
+        return;
+    }
+
+    this->authHelperCopied_ = true;
+    TwitchModerationAuth::copyHelperToClipboard();
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.twitch.tv/")));
+    this->finishAuth(
+        QStringLiteral(
+            "Helper copied and twitch.tv opened. Follow the steps above, then "
+            "click Paste Token."),
+        false);
+}
+
+void StreamDatabaseBadgePickerPopup::pasteAuthToken()
+{
+    if (this->authInFlight_)
+    {
+        return;
+    }
+    const auto currentAccount = getApp()->getAccounts()->twitch.getCurrent();
+    if (currentAccount == nullptr || currentAccount->isAnon())
+    {
+        this->finishAuth(QStringLiteral("Log in to a Twitch account first."),
+                         true);
+        return;
+    }
+
+    const auto clipboardText = TwitchModerationAuth::clipboardText().trimmed();
+    if (clipboardText.isEmpty() ||
+        clipboardText.contains(QStringLiteral("localStorage")) ||
+        clipboardText.contains(QStringLiteral("Mergerino token copied")))
+    {
+        this->finishAuth(
+            QStringLiteral(
+                "Run the copied helper in the Twitch console first, then click "
+                "Paste Token."),
+            true);
+        return;
+    }
+
+    const auto payload =
+        TwitchModerationAuth::parseClipboardPayload(clipboardText);
+    if (payload.oauthToken.isEmpty())
+    {
+        this->finishAuth(
+            QStringLiteral("Clipboard text is not a Twitch token."), true);
+        return;
+    }
+    if (payload.oauthToken.size() > TwitchModerationAuth::maxTokenLength())
+    {
+        this->finishAuth(
+            QStringLiteral(
+                "Clipboard token is too long to be a Twitch token."),
+            true);
+        return;
+    }
+
+    this->authInFlight_ = true;
+    const int generation = ++this->authGeneration_;
+    const auto expectedUserID = currentAccount->getUserId().trimmed();
+    this->finishAuth(QStringLiteral("Validating Twitch website session&"),
+                     false);
+    TwitchModerationAuth::validateToken(
+        payload.oauthToken,
+        [guard = QPointer<StreamDatabaseBadgePickerPopup>(this), generation,
+         expectedUserID, payload,
+         clipboardText](TwitchModerationAuth::Account account) mutable {
+            if (guard == nullptr)
+            {
+                return;
+            }
+            QTimer::singleShot(
+                0, guard.data(),
+                [guard, generation, expectedUserID, payload, account,
+                 clipboardText]() mutable {
+                    if (guard == nullptr ||
+                        generation != guard->authGeneration_)
+                    {
+                        return;
+                    }
+                    guard->authInFlight_ = false;
+                    if (!account.supportsWebGql())
+                    {
+                        guard->finishAuth(
+                            QStringLiteral(
+                                "That token is not a Twitch browser token. Run "
+                                "the copied helper on twitch.tv."),
+                            true);
+                        return;
+                    }
+                    if (!expectedUserID.isEmpty() &&
+                        !account.userId.isEmpty() &&
+                        account.userId != expectedUserID)
+                    {
+                        guard->finishAuth(
+                            QStringLiteral(
+                                "That token belongs to a different Twitch "
+                                "account. Sign in to twitch.tv with the "
+                                "selected Mergerino account and try again."),
+                            true);
+                        return;
+                    }
+                    const auto activeAccount =
+                        getApp()->getAccounts()->twitch.getCurrent();
+                    if (activeAccount == nullptr || activeAccount->isAnon() ||
+                        activeAccount->getUserId().trimmed() != expectedUserID)
+                    {
+                        guard->finishAuth(
+                            QStringLiteral(
+                                "The selected Twitch account changed. Try "
+                                "again with the currently selected account."),
+                            true);
+                        return;
+                    }
+
+                    account.clientIntegrity = payload.clientIntegrity;
+                    account.deviceId = payload.deviceId;
+                    TwitchModerationAuth::saveAccount(account);
+                    const auto currentClipboard =
+                        TwitchModerationAuth::clipboardText().trimmed();
+                    if (currentClipboard == clipboardText ||
+                        TwitchModerationAuth::parseClipboardPayload(
+                            currentClipboard)
+                                .oauthToken == payload.oauthToken)
+                    {
+                        QGuiApplication::clipboard()->clear();
+                    }
+                    guard->authHelperCopied_ = false;
+                    guard->finishAuth(
+                        QStringLiteral(
+                            "Connected as %1 for Twitch chat identity.")
+                            .arg(account.displayLabel()),
+                        false);
+                    guard->updateAuthGate();
+                    guard->requestEvents();
+                });
+        },
+        [guard = QPointer<StreamDatabaseBadgePickerPopup>(this),
+         generation](const QString &error) {
+            if (guard == nullptr)
+            {
+                return;
+            }
+            QTimer::singleShot(0, guard.data(), [guard, generation, error] {
+                if (guard == nullptr || generation != guard->authGeneration_)
+                {
+                    return;
+                }
+                guard->authInFlight_ = false;
+                guard->finishAuth(error, true);
+            });
+        });
+}
+
+void StreamDatabaseBadgePickerPopup::finishAuth(const QString &message,
+                                                bool error)
+{
+    this->authHelperLabel_->setText(
+        this->authHelperCopied_
+            ? QStringLiteral("Helper: copied to clipboard")
+            : QStringLiteral("Helper: not copied"));
+    this->authStatusLabel_->setText(message);
+    this->authStatusLabel_->setStyleSheet(
+        QStringLiteral("color:%1;")
+            .arg(error ? QStringLiteral("#ff8585")
+                       : QStringLiteral("#aeb1b7")));
+
+    const auto account = getApp()->getAccounts()->twitch.getCurrent();
+    const bool hasAccount = account != nullptr && !account->isAnon();
+    const auto auth =
+        hasAccount
+            ? TwitchModerationAuth::resolveForCurrentUser(account->getUserId())
+            : TwitchModerationAuth::Account{};
+    const bool connected = hasAccount && auth.supportsWebGql();
+    this->authHelperButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
+    this->authPasteButton_->setEnabled(
+        hasAccount && !connected && !this->authInFlight_);
 }
 
 void StreamDatabaseBadgePickerPopup::initLayout()
@@ -1780,49 +3632,129 @@ void StreamDatabaseBadgePickerPopup::initLayout()
     close->setFixedSize(24, 24);
     titleRow->addWidget(close);
     QObject::connect(close, &QToolButton::clicked, this, [this] {
-        this->hide();
+        this->window()->hide();
     });
     layout->addLayout(titleRow);
 
-    auto *previewFrame = new QFrame(this);
-    previewFrame->setObjectName(QStringLiteral("BadgeIdentityPreview"));
-    auto *previewLayout = new QVBoxLayout(previewFrame);
+    this->platformSwitcher_ = new IdentityPlatformSwitcher(
+        MessagePlatform::AnyOrTwitch, this);
+    this->platformSwitcher_->hide();
+    layout->addWidget(this->platformSwitcher_);
+
+    this->previewFrame_ = new QFrame(this);
+    this->previewFrame_->setObjectName(QStringLiteral("BadgeIdentityPreview"));
+    auto *previewLayout = new QVBoxLayout(this->previewFrame_);
     previewLayout->setContentsMargins(12, 8, 12, 12);
     previewLayout->setSpacing(7);
 
     auto *identityLabel =
-        new QLabel(QStringLiteral("Identity Preview"), previewFrame);
+        new QLabel(QStringLiteral("Identity Preview"), this->previewFrame_);
     QFont sectionFont = identityLabel->font();
     sectionFont.setBold(true);
     identityLabel->setFont(sectionFont);
     previewLayout->addWidget(identityLabel);
 
-    this->contextLabel_ = new QLabel(previewFrame);
+    this->contextLabel_ = new QLabel(this->previewFrame_);
     this->contextLabel_->setWordWrap(true);
     previewLayout->addWidget(this->contextLabel_);
 
     auto *previewRow = new QHBoxLayout;
     previewRow->setContentsMargins(0, 2, 0, 0);
     previewRow->setSpacing(4);
-    this->previewBadgesWidget_ = new QWidget(previewFrame);
+    this->previewBadgesWidget_ = new QWidget(this->previewFrame_);
     this->previewBadgesLayout_ = new QHBoxLayout(this->previewBadgesWidget_);
     this->previewBadgesLayout_->setContentsMargins(0, 0, 0, 0);
     this->previewBadgesLayout_->setSpacing(3);
     previewRow->addWidget(this->previewBadgesWidget_, 0, Qt::AlignVCenter);
 
-    this->previewName_ = new QLabel(previewFrame);
+    this->previewName_ = new QLabel(this->previewFrame_);
     QFont previewFont = this->previewName_->font();
     previewFont.setBold(true);
     previewFont.setPointSize(previewFont.pointSize() + 2);
     this->previewName_->setFont(previewFont);
     previewRow->addWidget(this->previewName_, 1);
     previewLayout->addLayout(previewRow);
-    layout->addWidget(previewFrame);
+    layout->addWidget(this->previewFrame_);
+    this->previewBlur_ = new QGraphicsBlurEffect(this->previewFrame_);
+    this->previewBlur_->setBlurRadius(4.5);
+    this->previewBlur_->setEnabled(false);
+    this->previewFrame_->setGraphicsEffect(this->previewBlur_);
 
     auto *topDivider = new QFrame(this);
     topDivider->setObjectName(QStringLiteral("BadgeIdentityDivider"));
     topDivider->setFrameShape(QFrame::HLine);
     layout->addWidget(topDivider);
+
+    this->statusLabel_ = new QLabel(this);
+    this->statusLabel_->setWordWrap(true);
+    this->statusLabel_->setContentsMargins(12, 6, 12, 6);
+    this->statusLabel_->hide();
+    layout->addWidget(this->statusLabel_);
+
+    this->authFrame_ = new QFrame(this);
+    this->authFrame_->setObjectName(QStringLiteral("TwitchIdentityAuthFrame"));
+    auto *authLayout = new QVBoxLayout(this->authFrame_);
+    authLayout->setContentsMargins(12, 9, 12, 10);
+    authLayout->setSpacing(5);
+    auto *authTitle = new QLabel(
+        QStringLiteral("Connect Twitch chat identity"), this->authFrame_);
+    auto authTitleFont = authTitle->font();
+    authTitleFont.setWeight(QFont::Bold);
+    authTitle->setFont(authTitleFont);
+    authLayout->addWidget(authTitle);
+    auto *authDescription = new QLabel(
+        QStringLiteral(
+            "Connect Twitch's website session to change Twitch badges and "
+            "name colour. The token is validated against the selected Twitch "
+            "account and saved locally for Twitch website features."),
+        this->authFrame_);
+    authDescription->setWordWrap(true);
+    authLayout->addWidget(authDescription);
+    auto *authInstructions = new QLabel(
+        QStringLiteral(
+            "1. Click Copy Helper; twitch.tv opens and this menu stays open.\n"
+            "2. Sign in to the selected Twitch account.\n"
+            "3. Press F12, open Console, paste the helper, and press Enter.\n"
+            "4. Return to Mergerino and click Paste Token."),
+        this->authFrame_);
+    authInstructions->setWordWrap(true);
+    authInstructions->setProperty("muted", true);
+    authLayout->addWidget(authInstructions);
+    auto *authButtons = new QHBoxLayout;
+    authButtons->setContentsMargins(0, 2, 0, 0);
+    authButtons->setSpacing(7);
+    this->authHelperButton_ =
+        new QPushButton(QStringLiteral("Copy Helper"), this->authFrame_);
+    this->authPasteButton_ =
+        new QPushButton(QStringLiteral("Paste Token"), this->authFrame_);
+    this->authHelperButton_->setCursor(Qt::PointingHandCursor);
+    this->authPasteButton_->setCursor(Qt::PointingHandCursor);
+    authButtons->addWidget(this->authHelperButton_);
+    authButtons->addWidget(this->authPasteButton_);
+    authButtons->addStretch(1);
+    authLayout->addLayout(authButtons);
+    this->authHelperLabel_ =
+        new QLabel(QStringLiteral("Helper: not copied"), this->authFrame_);
+    this->authHelperLabel_->setProperty("muted", true);
+    auto helperFont = this->authHelperLabel_->font();
+    helperFont.setBold(true);
+    helperFont.setFamily(QStringLiteral("monospace"));
+    this->authHelperLabel_->setFont(helperFont);
+    authLayout->addWidget(this->authHelperLabel_);
+    this->authStatusLabel_ = new QLabel(this->authFrame_);
+    this->authStatusLabel_->setWordWrap(true);
+    this->authStatusLabel_->setProperty("muted", true);
+    authLayout->addWidget(this->authStatusLabel_);
+    layout->addWidget(this->authFrame_);
+
+    QObject::connect(this->authHelperButton_, &QPushButton::clicked, this,
+                     [this] {
+                         this->copyAuthHelper();
+                     });
+    QObject::connect(this->authPasteButton_, &QPushButton::clicked, this,
+                     [this] {
+                         this->pasteAuthToken();
+                     });
 
     this->scrollArea_ = new QScrollArea(this);
     this->scrollArea_->setWidgetResizable(true);
@@ -1834,6 +3766,10 @@ void StreamDatabaseBadgePickerPopup::initLayout()
     this->contentLayout_->setSpacing(8);
     this->scrollArea_->setWidget(this->contentWidget_);
     layout->addWidget(this->scrollArea_, 1);
+    this->contentBlur_ = new QGraphicsBlurEffect(this->scrollArea_);
+    this->contentBlur_->setBlurRadius(4.5);
+    this->contentBlur_->setEnabled(false);
+    this->scrollArea_->setGraphicsEffect(this->contentBlur_);
 
     this->emptyLabel_ =
         new QLabel(QStringLiteral("Loading Twitch badges..."), this);
@@ -1842,6 +3778,7 @@ void StreamDatabaseBadgePickerPopup::initLayout()
     this->emptyLabel_->setWordWrap(true);
     this->emptyLabel_->hide();
     layout->addWidget(this->emptyLabel_);
+    this->updateAuthGate();
 }
 
 void StreamDatabaseBadgePickerPopup::requestEvents()
@@ -1885,17 +3822,8 @@ void StreamDatabaseBadgePickerPopup::requestEvents()
         {
             this->setBadges({});
         }
-        this->setEmptyText(
-            QStringLiteral("Twitch browser helper token required."));
-        showModerationAuthLoginPrompt(
-            this, account->getUserId(),
-            QStringLiteral("load Twitch chat badges"),
-            [guard = QPointer<StreamDatabaseBadgePickerPopup>(this)] {
-                if (guard != nullptr)
-                {
-                    guard->requestEvents();
-                }
-            });
+        this->updateAuthGate();
+        this->emptyLabel_->hide();
         return;
     }
 
@@ -2095,6 +4023,13 @@ void StreamDatabaseBadgePickerPopup::rebuildGrid()
                                  this->hideBadgeFlair_ = checked;
                                  twitch::setCurrentUserHidesBadgeFlair(
                                      this->channelName_, checked);
+                                 this->updatePreview();
+                                 this->setStatus(QStringLiteral(
+                                     "Twitch chat identity updated."));
+                                 if (this->appliedCallback_)
+                                 {
+                                     this->appliedCallback_();
+                                 }
                              });
             sectionLayout->addWidget(flairToggle);
             sectionLayout->addWidget(makeBadgePickerText(
@@ -2144,6 +4079,8 @@ void StreamDatabaseBadgePickerPopup::rebuildGrid()
                                  restoreScroll();
                                  QTimer::singleShot(0, this, restoreScroll);
                                  QTimer::singleShot(80, this, restoreScroll);
+                                 this->setStatus(QStringLiteral(
+                                     "Twitch chat identity updated."));
                                  if (this->appliedCallback_)
                                  {
                                      this->appliedCallback_();
@@ -2177,8 +4114,7 @@ void StreamDatabaseBadgePickerPopup::rebuildGrid()
             sectionLayout->addWidget(makeBadgePickerText(
                 this->contentWidget_,
                 QStringLiteral(
-                    "Pick a color, any color! It may take several minutes for "
-                    "your color to update in the chat room."),
+                    "Pick the color used for your name in Twitch chat."),
                 false));
 
             const std::array<QString, 14> colors{
@@ -2310,6 +4246,7 @@ void StreamDatabaseBadgePickerPopup::addBadgeGrid(QVBoxLayout *layout,
     grid->setContentsMargins(0, 3, 0, 0);
     grid->setHorizontalSpacing(7);
     grid->setVerticalSpacing(7);
+    grid->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
     int row = 0;
     int column = 0;
@@ -2457,6 +4394,12 @@ void StreamDatabaseBadgePickerPopup::applyNameColor(const QString &color)
             {
                 guard->emptyLabel_->hide();
             }
+            guard->setStatus(
+                QStringLiteral("Twitch chat identity updated."));
+            if (guard->appliedCallback_)
+            {
+                guard->appliedCallback_();
+            }
         },
         [guard = QPointer<StreamDatabaseBadgePickerPopup>(this), previousColor,
          requestGeneration](auto error, const QString &message) {
@@ -2468,7 +4411,9 @@ void StreamDatabaseBadgePickerPopup::applyNameColor(const QString &color)
 
             guard->selectedColor_ = previousColor;
             guard->rebuildGrid();
-            guard->setEmptyText(nameColorErrorText(error, message));
+            const auto errorText = nameColorErrorText(error, message);
+            guard->setEmptyText(errorText);
+            guard->setStatus(errorText, true);
             if (guard->emptyLabel_ != nullptr)
             {
                 guard->emptyLabel_->show();
@@ -2540,15 +4485,11 @@ void StreamDatabaseBadgePickerPopup::applyBadgeSelection(
         TwitchModerationAuth::resolveForCurrentUser(account->getUserId());
     if (!badgeAuth.supportsWebGql())
     {
-        showModerationAuthLoginPrompt(
-            this, account->getUserId(),
-            QStringLiteral("change Twitch chat badges"),
-            [guard = QPointer<StreamDatabaseBadgePickerPopup>(this)] {
-                if (guard != nullptr)
-                {
-                    guard->requestEvents();
-                }
-            });
+        this->updateAuthGate();
+        this->finishAuth(
+            QStringLiteral(
+                "Connect Twitch chat identity before changing badges."),
+            true);
         return;
     }
 
@@ -2570,6 +4511,8 @@ void StreamDatabaseBadgePickerPopup::applyBadgeSelection(
             this->pendingSelectionRequest_ = nullptr;
             twitch::setCurrentUserAppliedBadge(this->channelName_, badge,
                                                channelSpecific);
+            this->setStatus(
+                QStringLiteral("Twitch chat identity updated."));
             if (this->appliedCallback_)
             {
                 this->appliedCallback_();
@@ -2577,9 +4520,11 @@ void StreamDatabaseBadgePickerPopup::applyBadgeSelection(
         },
         [this](const QString &error) {
             this->pendingSelectionRequest_ = nullptr;
-            this->setEmptyText(error.isEmpty()
-                                   ? QStringLiteral("Failed to change badge.")
-                                   : error);
+            const auto errorText =
+                error.isEmpty() ? QStringLiteral("Failed to change badge.")
+                                : error;
+            this->setEmptyText(errorText);
+            this->setStatus(errorText, true);
         });
 }
 
@@ -3083,6 +5028,7 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
     , enableInlineReplying_(enableInlineReplying)
     , backgroundColorAnimation(this, "backgroundColor"_ba)
     , badgeButtonVisibilityAnimation_(this)
+    , sendWaitLockVisibilityAnimation_(this)
 {
     this->installEventFilter(this);
     this->initLayout();
@@ -3143,6 +5089,58 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
                          }
                      });
 
+    this->sendWaitLockVisibilityAnimation_.setDuration(170);
+    this->sendWaitLockVisibilityAnimation_.setEasingCurve(
+        QEasingCurve::OutCubic);
+    QObject::connect(
+        &this->sendWaitLockVisibilityAnimation_,
+        &QVariantAnimation::valueChanged, this,
+        [this](const QVariant &value) {
+            const auto progress = std::clamp(value.toReal(), 0.0, 1.0);
+            if (this->ui_.sendWaitLockWrapper != nullptr)
+            {
+                this->ui_.sendWaitLockWrapper->setFixedWidth(int(std::round(
+                    this->sendWaitLockTargetWidth() * progress)));
+                this->positionSendWaitLockIcon();
+            }
+            if (this->ui_.sendWaitLockIcon != nullptr)
+            {
+                if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(
+                        this->ui_.sendWaitLockIcon->graphicsEffect()))
+                {
+                    effect->setOpacity(progress);
+                }
+            }
+        });
+    QObject::connect(
+        &this->sendWaitLockVisibilityAnimation_,
+        &QVariantAnimation::finished, this, [this] {
+            if (this->ui_.sendWaitLockWrapper == nullptr ||
+                this->ui_.sendWaitLockIcon == nullptr)
+            {
+                return;
+            }
+
+            if (this->sendWaitLockShown_)
+            {
+                this->ui_.sendWaitLockWrapper->setFixedWidth(
+                    this->sendWaitLockTargetWidth());
+                this->ui_.sendWaitLockIcon->show();
+                this->positionSendWaitLockIcon();
+            }
+            else
+            {
+                this->ui_.sendWaitLockWrapper->setFixedWidth(0);
+                this->ui_.sendWaitLockIcon->hide();
+            }
+
+            if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(
+                    this->ui_.sendWaitLockIcon->graphicsEffect()))
+            {
+                effect->setOpacity(this->sendWaitLockShown_ ? 1.0 : 0.0);
+            }
+        });
+
     this->ui_.textEdit->setCompleter(
         this->createCompleter(this->split_->getChannel()));
 
@@ -3158,8 +5156,14 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
         this->updatePlatformSelector();
         this->updateBadgeButton();
         this->updateBadgePickerContext();
+        this->updateSeventvCosmeticsForInput();
         this->updatePollPredictionButtons();
         this->updateEmotePopupChannel();
+        if (this->ui_.emoteBar != nullptr)
+        {
+            this->ui_.emoteBar->refresh();
+        }
+        this->refreshResubNotification();
     });
     this->signalHolder_.managedConnect(this->sendPlatformChanged, [this] {
         this->ui_.textEdit->resetCompletion();
@@ -3168,24 +5172,77 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
         this->updateBadgePickerContext();
         this->updatePollPredictionButtons();
         this->updateCompletionPopup();
+        if (this->ui_.emoteBar != nullptr)
+        {
+            this->ui_.emoteBar->refresh();
+        }
+        this->refreshResubNotification();
     });
     this->managedConnections_.managedConnect(
         TwitchModerationAuth::accountChanged(), [this] {
             this->resetBadgeIdentityButtonFetch(false);
             this->updatePollPredictionButtons();
             this->updateBadgeButton();
+            this->refreshResubNotification();
         });
+    showSeventvChatButtonSetting().connect(
+        [this](const bool &) {
+            this->updatePollPredictionButtons();
+        },
+        this->signalHolder_);
+    showPredictionChatButtonSetting().connect(
+        [this](const bool &) {
+            this->updatePollPredictionButtons();
+        },
+        this->signalHolder_);
+    showPollChatButtonSetting().connect(
+        [this](const bool &) {
+            this->updatePollPredictionButtons();
+        },
+        this->signalHolder_);
+    showGiveawayChatButtonSetting().connect(
+        [this](const bool &) {
+            this->updatePollPredictionButtons();
+        },
+        this->signalHolder_);
+    this->resubAccountConnection_ =
+        getApp()->getAccounts()->twitch.currentUserChanged.connect(
+            [guard = QPointer<SplitInput>(this)] {
+                if (guard != nullptr)
+                {
+                    QTimer::singleShot(0, guard, [guard] {
+                        if (guard != nullptr)
+                        {
+                            guard->refreshResubNotification();
+                        }
+                    });
+                }
+            });
     this->managedConnections_.managedConnect(
         twitch::streamDatabaseBadgeOwnershipChanged(), [this] {
             this->updateBadgeButton();
+        });
+    this->signalHolder_.managedConnect(
+        getApp()->getAccounts()->kick.currentUserChanged, [this] {
+            this->resetBadgeIdentityButtonFetch(false);
+            this->updateBadgeButton();
+            this->updateBadgePickerContext();
         });
 
     auto *pollPredictionButtonTimer = new QTimer(this);
     pollPredictionButtonTimer->setInterval(1000);
     QObject::connect(pollPredictionButtonTimer, &QTimer::timeout, this, [this] {
         this->updatePollPredictionButtons();
+        this->updateBadgeButton();
     });
     pollPredictionButtonTimer->start();
+
+    auto *resubRefreshTimer = new QTimer(this);
+    resubRefreshTimer->setInterval(120000);
+    QObject::connect(resubRefreshTimer, &QTimer::timeout, this, [this] {
+        this->refreshResubNotification();
+    });
+    resubRefreshTimer->start();
 
     getSettings()->enableSpellChecking.connect(
         [this] {
@@ -3204,6 +5261,9 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
     this->scaleChangedEvent(this->scale());
     this->updatePlatformSelector();
     this->updatePollPredictionButtons();
+    QTimer::singleShot(0, this, [this] {
+        this->refreshResubNotification();
+    });
     this->signalHolder_.managedConnect(getApp()->getHotkeys()->onItemsUpdated,
                                        [this]() {
                                            this->clearShortcuts();
@@ -3226,6 +5286,62 @@ void SplitInput::initLayout()
             &this->ui_.vbox);
     layout->setSpacing(0);
     this->applyOuterMargin();
+
+    this->ui_.resubCalloutWrapper = new QWidget(this);
+    this->ui_.resubCalloutWrapper->setObjectName(
+        QStringLiteral("ResubCallout"));
+    this->ui_.resubCalloutWrapper->setSizePolicy(QSizePolicy::Expanding,
+                                                 QSizePolicy::Fixed);
+    auto *resubLayout = new QHBoxLayout(this->ui_.resubCalloutWrapper);
+    resubLayout->setContentsMargins(8, 1, 3, 4);
+    resubLayout->setSpacing(6);
+    this->ui_.resubCalloutLabel = new QLabel(this->ui_.resubCalloutWrapper);
+    this->ui_.resubCalloutLabel->setSizePolicy(QSizePolicy::Expanding,
+                                               QSizePolicy::Preferred);
+    this->ui_.resubCalloutButton =
+        new QPushButton(QStringLiteral("Share"), this->ui_.resubCalloutWrapper);
+    this->ui_.resubCalloutButton->setObjectName(
+        QStringLiteral("ResubCalloutButton"));
+    this->ui_.resubCalloutButton->setCursor(Qt::PointingHandCursor);
+    this->ui_.resubCalloutButton->setFocusPolicy(Qt::NoFocus);
+
+    auto *resubButtonOffset = new QWidget(this->ui_.resubCalloutWrapper);
+    auto *resubButtonLayout = new QVBoxLayout(resubButtonOffset);
+    resubButtonLayout->setContentsMargins(0, 2, 0, 0);
+    resubButtonLayout->setSpacing(0);
+    resubButtonLayout->addWidget(this->ui_.resubCalloutButton);
+
+    resubLayout->addWidget(this->ui_.resubCalloutLabel, 1);
+    resubLayout->addWidget(resubButtonOffset, 0, Qt::AlignVCenter);
+    layout->addWidget(this->ui_.resubCalloutWrapper);
+    this->ui_.resubCalloutWrapper->hide();
+
+    QObject::connect(this->ui_.resubCalloutButton, &QPushButton::clicked, this,
+                     [this] {
+                         this->openShareResubDialog();
+                     });
+
+    this->ui_.emoteBar = new EmoteBar(
+        this,
+        [this] {
+            return this->split_->getChannel();
+        },
+        [this] {
+            return this->emoteBarSendChannels();
+        },
+        [this](const QString &token, Qt::KeyboardModifiers modifiers) {
+            this->activateEmoteBarToken(token, modifiers);
+        },
+        [this] {
+            QTimer::singleShot(0, this, [this] {
+                if (!this->hidden)
+                {
+                    this->setMaximumHeight(this->scaledMaxHeight());
+                    this->updateGeometry();
+                }
+            });
+        });
+    layout->addWidget(this->ui_.emoteBar);
 
     // reply label stuff
     auto replyWrapper =
@@ -3294,6 +5410,20 @@ void SplitInput::initLayout()
     badgeLayout->addWidget(this->ui_.badgeButton, 0,
                            Qt::AlignLeft | Qt::AlignVCenter);
 
+    this->ui_.sendWaitLockWrapper = new QWidget(this->ui_.inputWrapper);
+    this->ui_.sendWaitLockWrapper->setSizePolicy(QSizePolicy::Fixed,
+                                                 QSizePolicy::Fixed);
+    this->ui_.sendWaitLockWrapper->setFixedSize(0, 0);
+
+    this->ui_.sendWaitLockIcon = new QLabel(this->ui_.inputWrapper);
+    this->ui_.sendWaitLockIcon->setAlignment(Qt::AlignCenter);
+    this->ui_.sendWaitLockIcon->hide();
+    auto *sendWaitLockOpacity =
+        new QGraphicsOpacityEffect(this->ui_.sendWaitLockIcon);
+    sendWaitLockOpacity->setOpacity(0.0);
+    this->ui_.sendWaitLockIcon->setGraphicsEffect(sendWaitLockOpacity);
+    this->ui_.inputHbox->addWidget(this->ui_.sendWaitLockWrapper);
+
     // input
     auto textEdit =
         hboxLayout.emplace<ResizingTextEdit>().assign(&this->ui_.textEdit);
@@ -3339,11 +5469,6 @@ void SplitInput::initLayout()
         this->ui_.textEditLength->setHidden(true);
         hbox->addWidget(this->ui_.textEditLength);
 
-        this->ui_.sendWaitStatus = new QLabel();
-        this->ui_.sendWaitStatus->setAlignment(Qt::AlignRight);
-        this->ui_.sendWaitStatus->setHidden(true);
-        hbox->addWidget(this->ui_.sendWaitStatus);
-
         auto buttonHbox =
             box.emplace<QHBoxLayout>().withoutMargin().assign(
                 &this->ui_.buttonHbox);
@@ -3377,6 +5502,29 @@ void SplitInput::initLayout()
         this->ui_.pollButton->setToolTip(QStringLiteral("Start poll"));
         this->ui_.pollButton->installEventFilter(this);
         buttonHbox->addWidget(this->ui_.pollButton);
+
+        this->ui_.seventvButton = new SvgButton(
+            {
+                .dark = ":/buttons/seventv.svg",
+                .light = ":/buttons/seventvDark.svg",
+            },
+            nullptr, QSize{4, 1});
+        this->ui_.seventvButton->setContentSize(QSize{19, 15});
+        this->ui_.seventvButton->setPaintOffset(QPoint{0, 0});
+        this->ui_.seventvButton->setToolTip(
+            QStringLiteral("Manage 7TV cosmetics and emotes"));
+        buttonHbox->addWidget(this->ui_.seventvButton);
+
+        this->ui_.giveawayButton = new SvgButton(
+            {
+                .dark = ":/buttons/giveaway.svg",
+                .light = ":/buttons/giveawayDark.svg",
+            },
+            nullptr, QSize{4, 1});
+        this->ui_.giveawayButton->setContentSize(QSize{19, 19});
+        this->ui_.giveawayButton->setPaintOffset(QPoint{0, 0});
+        this->ui_.giveawayButton->setToolTip(QStringLiteral("Giveaway"));
+        buttonHbox->addWidget(this->ui_.giveawayButton);
 
         this->ui_.emoteButton = new SvgButton(
             {
@@ -3416,6 +5564,22 @@ void SplitInput::initLayout()
     QObject::connect(this->ui_.emoteButton, &Button::leftClicked, [this] {
         this->openEmotePopup();
     });
+    QObject::connect(this->ui_.seventvButton, &Button::leftClicked, [this] {
+        const auto channel = this->channelForSendPlatform(
+            MessagePlatform::AnyOrTwitch);
+        const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel);
+        if (twitch != nullptr)
+        {
+            SeventvAccountDialog::showDialog(
+                this, twitch->roomId(), twitch->getName(),
+                twitch->getDisplayName());
+            return;
+        }
+        SeventvAccountDialog::showDialog(this);
+    });
+    QObject::connect(this->ui_.giveawayButton, &Button::leftClicked, [this] {
+        this->openGiveawayPopup();
+    });
     QObject::connect(this->ui_.predictionButton, &Button::leftClicked, [this] {
         this->updatePollPredictionButtons();
         this->openPredictionDialog();
@@ -3424,6 +5588,30 @@ void SplitInput::initLayout()
         this->updatePollPredictionButtons();
         this->openPollDialog();
     });
+
+    auto connectHideMenu = [this](Button *button, BoolSetting *setting) {
+        QObject::connect(
+            button, &Button::clicked, this,
+            [this, setting](Qt::MouseButton mouseButton) {
+                if (mouseButton != Qt::RightButton)
+                {
+                    return;
+                }
+
+                QMenu menu(this);
+                menu.addAction(QStringLiteral("Hide"), this, [setting] {
+                    setting->setValue(false);
+                });
+                menu.exec(QCursor::pos());
+            });
+    };
+    connectHideMenu(this->ui_.seventvButton,
+                    &showSeventvChatButtonSetting());
+    connectHideMenu(this->ui_.predictionButton,
+                    &showPredictionChatButtonSetting());
+    connectHideMenu(this->ui_.pollButton, &showPollChatButtonSetting());
+    connectHideMenu(this->ui_.giveawayButton,
+                    &showGiveawayChatButtonSetting());
 
     QObject::connect(this->ui_.platformButton, &Button::leftClicked, [this] {
         const auto platforms = this->availableSendPlatforms();
@@ -3458,14 +5646,9 @@ void SplitInput::initLayout()
         },
         this->managedConnections_);
 
-    // sendWaitStatus visibility
+    // Send-wait indicator visibility
     getSettings()->showSendWaitTimer.connect(
-        [this](bool value, const auto &) {
-            if (!this->ui_.sendWaitStatus->text().isEmpty())
-            {
-                this->ui_.sendWaitStatus->setHidden(!value);
-            }
-        },
+        [this](bool, const auto &) { this->refreshSendWaitStatus(); },
         this->managedConnections_);
 }
 
@@ -3504,10 +5687,27 @@ void SplitInput::scaleChangedEvent(float scale)
 {
     // update the icon size of the buttons
     this->updateBadgeButton();
+    this->updateSendWaitLockIcon();
+    if (this->sendWaitLockVisibilityAnimation_.state() !=
+        QAbstractAnimation::Running)
+    {
+        this->ui_.sendWaitLockWrapper->setFixedWidth(
+            this->sendWaitLockShown_ ? this->sendWaitLockTargetWidth() : 0);
+    }
     this->updateEmoteButton();
     this->updatePlatformButtonLayout(
         static_cast<int>(this->selectedSendPlatforms().size()));
     this->updateCancelReplyButton();
+    if (this->ui_.resubCalloutButton != nullptr)
+    {
+        const int buttonHeight = std::max(21, int(22 * scale));
+        const int buttonWidth = std::max(52, int(54 * scale));
+        this->ui_.resubCalloutButton->setFixedSize(buttonWidth, buttonHeight);
+        if (auto *offset = this->ui_.resubCalloutButton->parentWidget())
+        {
+            offset->setFixedSize(buttonWidth, buttonHeight + 2);
+        }
+    }
 
     // set maximum height
     if (!this->hidden)
@@ -3528,7 +5728,7 @@ void SplitInput::themeChangedEvent()
     palette.setColor(QPalette::WindowText, this->theme->splits.input.text);
 
     this->ui_.textEditLength->setPalette(palette);
-    this->ui_.sendWaitStatus->setPalette(palette);
+    this->updateSendWaitLockIcon();
 
     // Theme changed, reset current background color
     this->setBackgroundColor(this->theme->splits.input.background);
@@ -3540,6 +5740,33 @@ void SplitInput::themeChangedEvent()
     this->updateTextEditPalette();
     this->updateBadgeButton();
     this->updatePlatformSelector();
+
+    if (this->ui_.resubCalloutWrapper != nullptr)
+    {
+        const auto background =
+            this->theme->splits.input.background.name();
+        const auto border = this->theme->splits.header.border.name();
+        const auto text = this->theme->splits.input.text.name();
+        const auto buttonBackground =
+            this->theme->splits.header.background.name();
+        const auto buttonBorder =
+            this->theme->splits.header.focusedBorder.name();
+        const auto buttonHover =
+            this->theme->splits.header.focusedBackground.name();
+        this->ui_.resubCalloutWrapper->setStyleSheet(
+            QStringLiteral(
+                "#ResubCallout { background-color: %1; border: 1px solid %2; }"
+                "#ResubCallout QLabel { color: %3; background: transparent; "
+                "border: 0; }"
+                "#ResubCalloutButton { background-color: %4; color: %3; "
+                "border: 1px solid %5; border-radius: 3px; padding: "
+                "0px 8px 2px 8px; "
+                "font-weight: 600; }"
+                "#ResubCalloutButton:hover { background-color: %6; }"
+                "#ResubCalloutButton:pressed { background-color: %2; }")
+                .arg(background, border, text, buttonBackground, buttonBorder,
+                     buttonHover));
+    }
 
     if (this->theme->isLightTheme())
     {
@@ -3578,6 +5805,8 @@ void SplitInput::updateBadgeButton()
     const auto platforms = this->selectedSendPlatforms();
     const bool canUseTwitch =
         containsPlatform(platforms, MessagePlatform::AnyOrTwitch);
+    const bool canUseKick =
+        containsPlatform(platforms, MessagePlatform::Kick);
     auto currentAccount = getApp()->getAccounts()->twitch.getCurrent();
     const bool hasTwitchAccount =
         currentAccount != nullptr && !currentAccount->isAnon();
@@ -3601,40 +5830,195 @@ void SplitInput::updateBadgeButton()
     }
 
     QString channelName;
-    auto channel = this->channelForSendPlatform(MessagePlatform::AnyOrTwitch);
-    auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel);
+    auto twitch = std::dynamic_pointer_cast<TwitchChannel>(
+        this->channelForSendPlatform(MessagePlatform::AnyOrTwitch));
     if (twitch)
     {
         channelName = twitch->getName();
     }
 
     const bool isRealTwitchChannel = isRealTwitchChatIdentityChannel(twitch);
-    const bool showBadgeButton =
+    const bool useTwitch =
         canUseTwitch && hasTwitchAccount && isRealTwitchChannel;
-    this->setBadgeButtonShown(showBadgeButton, true);
-    if (!showBadgeButton)
+    auto kick = std::dynamic_pointer_cast<KickChannel>(
+        this->channelForSendPlatform(MessagePlatform::Kick));
+    auto kickAccount = getApp()->getAccounts()->kick.current();
+    const bool useKick =
+        KICK_CHAT_IDENTITY_EDITING_ENABLED && canUseKick && kick != nullptr &&
+        kick->channelID() != 0 && kickAccount != nullptr &&
+        !kickAccount->isAnonymous();
+    this->ui_.badgeButton->setCursor(
+        (useTwitch || useKick) ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    this->ui_.badgeButton->setToolTip(
+        (useTwitch || useKick) ? QStringLiteral("Chat identity") : QString{});
+    if (!useTwitch && useKick)
+    {
+        this->chatIdentityPlatform_ = MessagePlatform::Kick;
+    }
+    else if (useTwitch && !useKick)
+    {
+        this->chatIdentityPlatform_ = MessagePlatform::AnyOrTwitch;
+    }
+
+    const bool showTwitch =
+        useTwitch &&
+        (!useKick || this->chatIdentityPlatform_ != MessagePlatform::Kick);
+    if (showTwitch)
+    {
+        if (!useKick && this->chatIdentityPopupHost_ != nullptr &&
+            this->chatIdentityPopupHost_->isVisible() &&
+            this->badgePickerPopup_ != nullptr)
+        {
+            this->chatIdentityPopupHost_->setCurrentPage(
+                this->badgePickerPopup_);
+        }
+        this->requestBadgeIdentityForCurrentTwitchChannel(twitch);
+        auto identityBadges = twitch::currentUserIdentityBadges(channelName);
+        const auto hasRoleBadge = [&identityBadges](
+                                      std::initializer_list<QString> setIDs) {
+            return std::ranges::any_of(
+                identityBadges, [&setIDs](const auto &badge) {
+                    const auto setID = badge.setID.trimmed().toCaseFolded();
+                    return std::ranges::any_of(
+                        setIDs, [&setID](const auto &candidate) {
+                            return setID == candidate;
+                        });
+                });
+        };
+        QString fallbackRole;
+        if (twitch->isBroadcaster() &&
+            !hasRoleBadge({QStringLiteral("broadcaster")}))
+        {
+            fallbackRole = QStringLiteral("broadcaster");
+        }
+        else if (twitch->isMod() &&
+                 !hasRoleBadge({QStringLiteral("lead_moderator"),
+                                QStringLiteral("lead-moderator"),
+                                QStringLiteral("moderator")}))
+        {
+            fallbackRole = QStringLiteral("moderator");
+        }
+        else if (twitch->isVip() &&
+                 !hasRoleBadge({QStringLiteral("vip")}))
+        {
+            fallbackRole = QStringLiteral("vip");
+        }
+        else if (twitch->isStaff() &&
+                 !hasRoleBadge({QStringLiteral("staff")}))
+        {
+            fallbackRole = QStringLiteral("staff");
+        }
+        if (!fallbackRole.isEmpty())
+        {
+            twitch::CurrentUserBadgeIdentity badge;
+            badge.setID = fallbackRole;
+            badge.versionID = QStringLiteral("1");
+            badge.channelLogin = channelName;
+            badge.displayed = true;
+            identityBadges.prepend(std::move(badge));
+        }
+
+        QVector<ChatIdentityBadgeSource> badgeSources;
+        for (const auto &badge : identityBadges)
+        {
+            const auto source =
+                chatIdentitySourceForBadge(badge, twitch.get());
+            if (!source.key.isEmpty())
+            {
+                badgeSources.push_back(source);
+            }
+        }
+        identityButton->setBadgeSources(std::move(badgeSources));
+        this->setBadgeButtonShown(true, true);
+        return;
+    }
+
+    if (!useKick)
     {
         identityButton->setBadgeSources({});
-        if (this->badgePickerPopup_ != nullptr &&
-            this->badgePickerPopup_->isVisible())
+        this->setBadgeButtonShown(false, true);
+        if (this->chatIdentityPopupHost_ != nullptr &&
+            this->chatIdentityPopupHost_->isVisible())
         {
-            this->badgePickerPopup_->hide();
+            this->chatIdentityPopupHost_->hide();
         }
         return;
     }
 
-    this->requestBadgeIdentityForCurrentTwitchChannel(twitch);
+    if (!useTwitch && this->chatIdentityPopupHost_ != nullptr &&
+        this->chatIdentityPopupHost_->isVisible() &&
+        this->kickIdentityPopup_ != nullptr)
+    {
+        this->chatIdentityPopupHost_->setCurrentPage(this->kickIdentityPopup_);
+        this->kickIdentityPopup_->prepareToShow();
+    }
+    const auto identityKey =
+        QStringLiteral("%1:%2")
+            .arg(kick->channelID())
+            .arg(kickAccount->userID());
+    if (this->kickChatIdentityKey_ != identityKey)
+    {
+        this->kickChatIdentityKey_ = identityKey;
+        this->kickChatIdentity_.reset();
+        this->kickIdentityRequestPending_ = false;
+        ++this->kickIdentityRequestGeneration_;
+    }
+    this->requestKickIdentityForCurrentChannel(kick);
+    if (useTwitch && !this->kickChatIdentity_)
+    {
+        // Keep the currently rendered Twitch badge in place during the brief
+        // handoff instead of replacing it with a generic identity glyph.
+        this->setBadgeButtonShown(true, true);
+        return;
+    }
 
     QVector<ChatIdentityBadgeSource> badgeSources;
-    for (const auto &badge : twitch::currentUserIdentityBadges(channelName))
+    if (this->kickChatIdentity_)
     {
-        const auto source = chatIdentitySourceForBadge(badge, twitch.get());
-        if (!source.key.isEmpty())
+        for (const auto *badge :
+             selectedKickIdentityBadges(*this->kickChatIdentity_))
         {
-            badgeSources.push_back(source);
+            auto source = kickIdentityBadgeSource(*badge, kick);
+            if (!source.imageUrl.isEmpty())
+            {
+                badgeSources.push_back(std::move(source));
+            }
         }
     }
+    else if (const auto *ownIdentity = kick->ownIdentity())
+    {
+        int badgeIndex = 0;
+        for (const auto &element : ownIdentity->badges)
+        {
+            const auto *badgeElement =
+                dynamic_cast<const BadgeElement *>(element.get());
+            const auto emote =
+                badgeElement != nullptr ? badgeElement->getEmote() : EmotePtr{};
+            if (!emote)
+            {
+                continue;
+            }
+            const auto image = emote->images.getImage1();
+            const auto imageUrl = image ? image->url().string : QString{};
+            if (imageUrl.isEmpty())
+            {
+                continue;
+            }
+            const auto key =
+                QStringLiteral("kick:cached:%1:%2")
+                    .arg(badgeIndex++)
+                    .arg(emote->name.string);
+            badgeSources.push_back({
+                .key = key,
+                .pixmapKey = key + QLatin1Char(':') + imageUrl,
+                .imageUrl = imageUrl,
+                .fallbackBadgeName = {},
+            });
+        }
+    }
+    const bool showKickIdentity = useKick;
     identityButton->setBadgeSources(std::move(badgeSources));
+    this->setBadgeButtonShown(showKickIdentity, true);
 }
 
 int SplitInput::badgeButtonTargetWidth() const
@@ -3642,6 +6026,114 @@ int SplitInput::badgeButtonTargetWidth() const
     const int size = std::max(24, int(26 * this->scale()));
     const int paintNudge = std::max(4, int(std::round(4 * this->scale())));
     return size + paintNudge - 1;
+}
+
+int SplitInput::sendWaitLockTargetWidth() const
+{
+    return std::max(22, int(std::round(23 * this->scale())));
+}
+
+void SplitInput::updateSendWaitLockIcon()
+{
+    if (this->ui_.sendWaitLockIcon == nullptr)
+    {
+        return;
+    }
+
+    const int size = std::max(17, int(std::round(17 * this->scale())));
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const auto color = this->theme->messages.textColors.chatPlaceholder;
+    const qreal stroke = std::max(1.35, 1.45 * this->scale());
+    painter.setPen(
+        QPen(color, stroke, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+
+    const qreal side = size * 0.23;
+    const qreal bodyTop = size * 0.43;
+    const QRectF body(side, bodyTop, size - (side * 2), size * 0.48);
+    painter.drawRoundedRect(body, size * 0.08, size * 0.08);
+
+    QPainterPath shackle;
+    shackle.moveTo(size * 0.32, bodyTop);
+    shackle.lineTo(size * 0.32, size * 0.31);
+    shackle.cubicTo(size * 0.32, size * 0.12, size * 0.68, size * 0.12,
+                    size * 0.68, size * 0.31);
+    shackle.lineTo(size * 0.68, bodyTop);
+    painter.drawPath(shackle);
+
+    this->ui_.sendWaitLockIcon->setFixedSize(size, size);
+    this->ui_.sendWaitLockIcon->setPixmap(pixmap);
+    this->positionSendWaitLockIcon();
+}
+
+void SplitInput::positionSendWaitLockIcon()
+{
+    if (this->ui_.sendWaitLockWrapper == nullptr ||
+        this->ui_.sendWaitLockIcon == nullptr ||
+        this->ui_.textEdit == nullptr)
+    {
+        return;
+    }
+
+    const int iconSize = this->ui_.sendWaitLockIcon->height();
+    const int x = this->ui_.sendWaitLockWrapper->geometry().x() +
+                  (this->sendWaitLockTargetWidth() - iconSize) / 2 + 2;
+    const auto *viewport = this->ui_.textEdit->viewport();
+    const int lineTop = this->ui_.textEdit->geometry().top() +
+                        viewport->geometry().top() +
+                        int(std::round(
+                            this->ui_.textEdit->document()->documentMargin()));
+    const int lineHeight = QFontMetrics(this->ui_.textEdit->font()).height();
+    const int y = lineTop + (lineHeight - iconSize) / 2;
+
+    this->ui_.sendWaitLockIcon->move(x, y);
+    this->ui_.sendWaitLockIcon->raise();
+}
+
+void SplitInput::setSendWaitLockShown(bool shown, bool animate)
+{
+    if (this->ui_.sendWaitLockWrapper == nullptr ||
+        this->ui_.sendWaitLockIcon == nullptr ||
+        this->sendWaitLockShown_ == shown)
+    {
+        return;
+    }
+
+    this->sendWaitLockShown_ = shown;
+    this->sendWaitLockVisibilityAnimation_.stop();
+    this->ui_.sendWaitLockIcon->show();
+    this->positionSendWaitLockIcon();
+
+    auto *effect = qobject_cast<QGraphicsOpacityEffect *>(
+        this->ui_.sendWaitLockIcon->graphicsEffect());
+    const int targetWidth = this->sendWaitLockTargetWidth();
+    const qreal start =
+        targetWidth > 0
+            ? std::clamp(this->ui_.sendWaitLockWrapper->width() /
+                             qreal(targetWidth),
+                         0.0, 1.0)
+            : 0.0;
+    const qreal end = shown ? 1.0 : 0.0;
+
+    if (!animate || qFuzzyCompare(start + 1.0, end + 1.0))
+    {
+        this->ui_.sendWaitLockWrapper->setFixedWidth(shown ? targetWidth : 0);
+        this->ui_.sendWaitLockIcon->setVisible(shown);
+        this->positionSendWaitLockIcon();
+        if (effect != nullptr)
+        {
+            effect->setOpacity(end);
+        }
+        return;
+    }
+
+    this->sendWaitLockVisibilityAnimation_.setStartValue(start);
+    this->sendWaitLockVisibilityAnimation_.setEndValue(end);
+    this->sendWaitLockVisibilityAnimation_.start();
 }
 
 void SplitInput::setBadgeButtonShown(bool shown, bool animate)
@@ -3780,6 +6272,59 @@ void SplitInput::requestBadgeIdentityForCurrentTwitchChannel(
     }
 }
 
+void SplitInput::requestKickIdentityForCurrentChannel(
+    const std::shared_ptr<KickChannel> &kick)
+{
+    auto account = getApp()->getAccounts()->kick.current();
+    if (kick == nullptr || kick->channelID() == 0 || account == nullptr ||
+        account->isAnonymous() || this->kickIdentityRequestPending_)
+    {
+        return;
+    }
+    if (account->chatIdentityToken().isEmpty())
+    {
+        this->kickIdentityFailedKey_.clear();
+        this->kickChatIdentity_.reset();
+        return;
+    }
+    const auto key =
+        QStringLiteral("%1:%2")
+            .arg(kick->channelID())
+            .arg(account->userID());
+    if ((this->kickChatIdentityKey_ == key && this->kickChatIdentity_) ||
+        this->kickIdentityFailedKey_ == key)
+    {
+        return;
+    }
+
+    this->kickChatIdentityKey_ = key;
+    this->kickIdentityRequestPending_ = true;
+    const int generation = ++this->kickIdentityRequestGeneration_;
+    getKickApi()->getChatIdentity(
+        kick->channelID(), account->userID(), account->chatIdentityToken(),
+        [guard = QPointer<SplitInput>(this), generation, key](
+            const ExpectedStr<KickChatIdentity> &result) {
+            if (guard == nullptr ||
+                generation != guard->kickIdentityRequestGeneration_ ||
+                key != guard->kickChatIdentityKey_)
+            {
+                return;
+            }
+            guard->kickIdentityRequestPending_ = false;
+            if (result)
+            {
+                guard->kickIdentityFailedKey_.clear();
+                guard->kickChatIdentity_ = *result;
+            }
+            else
+            {
+                guard->kickIdentityFailedKey_ = key;
+                guard->kickChatIdentity_.reset();
+            }
+            guard->updateBadgeButton();
+        });
+}
+
 void SplitInput::resetBadgeIdentityButtonFetch(bool clearBadges)
 {
     for (auto *reply : this->pendingBadgeIdentityRequests_)
@@ -3792,6 +6337,11 @@ void SplitInput::resetBadgeIdentityButtonFetch(bool clearBadges)
     this->pendingBadgeIdentityRequests_.clear();
     this->failedBadgeIdentityChannels_.clear();
     ++this->badgeIdentityRequestGeneration_;
+    this->kickChatIdentity_.reset();
+    this->kickChatIdentityKey_.clear();
+    this->kickIdentityFailedKey_.clear();
+    this->kickIdentityRequestPending_ = false;
+    ++this->kickIdentityRequestGeneration_;
 
     if (clearBadges)
     {
@@ -3812,6 +6362,7 @@ void SplitInput::updateEmoteButton()
 
     for (auto *button :
          {this->ui_.predictionButton, this->ui_.pollButton,
+          this->ui_.seventvButton, this->ui_.giveawayButton,
           this->ui_.emoteButton})
     {
         if (button == nullptr)
@@ -3860,6 +6411,7 @@ void SplitInput::updatePlatformButtonLayout(int platformCount)
     {
         this->ui_.rightVbox->setContentsMargins(0, 0, int(3 * scale), 0);
     }
+    this->positionSendWaitLockIcon();
 }
 
 std::vector<MessagePlatform> SplitInput::availableSendPlatforms() const
@@ -3899,10 +6451,49 @@ std::vector<MessagePlatform> SplitInput::availableSendPlatforms() const
     return platforms;
 }
 
+std::vector<MessagePlatform> SplitInput::giveawayPlatforms() const
+{
+    std::vector<MessagePlatform> platforms;
+    const auto channel = this->split_->getChannel();
+    const auto *merged = dynamic_cast<MergedChannel *>(channel.get());
+    if (merged != nullptr)
+    {
+        const auto &config = merged->config();
+        if (config.twitchEnabled)
+        {
+            platforms.push_back(MessagePlatform::AnyOrTwitch);
+        }
+        if (config.kickEnabled)
+        {
+            platforms.push_back(MessagePlatform::Kick);
+        }
+        if (config.youtubeEnabled)
+        {
+            platforms.push_back(MessagePlatform::YouTube);
+        }
+        if (config.tiktokEnabled)
+        {
+            platforms.push_back(MessagePlatform::TikTok);
+        }
+        return platforms;
+    }
+
+    if (channel != nullptr && channel->isKickChannel())
+    {
+        platforms.push_back(MessagePlatform::Kick);
+    }
+    else if (channel != nullptr && channel->isTwitchChannel())
+    {
+        platforms.push_back(MessagePlatform::AnyOrTwitch);
+    }
+    return platforms;
+}
+
 std::vector<MessagePlatform> SplitInput::cycleSendPlatforms(
     const std::vector<MessagePlatform> &availablePlatforms) const
 {
-    if (this->enabledSendPlatforms_.empty())
+    if (availablePlatforms.size() < 3 ||
+        this->enabledSendPlatforms_.empty())
     {
         return availablePlatforms;
     }
@@ -4040,11 +6631,17 @@ bool SplitInput::canSendToPlatform(MessagePlatform platform) const
 void SplitInput::updatePlatformSelector(bool animate)
 {
     const auto platforms = this->availableSendPlatforms();
+    if (this->giveawayPopup_)
+    {
+        this->giveawayPopup_->setContext(this->split_->getChannel(),
+                                         this->giveawayPlatforms());
+    }
 
     if (platforms.empty())
     {
         this->updateBadgeButton();
         this->ui_.platformButton->hide();
+        this->refreshSendWaitStatus();
         return;
     }
 
@@ -4060,6 +6657,7 @@ void SplitInput::updatePlatformSelector(bool animate)
     {
         this->updateBadgeButton();
         this->ui_.platformButton->hide();
+        this->refreshSendWaitStatus();
         return;
     }
 
@@ -4078,6 +6676,20 @@ void SplitInput::updatePlatformSelector(bool animate)
         !replyLocked && (canChoosePlatforms || targetCount > 1));
     this->ui_.platformButton->setPlatforms(selectedPlatforms,
                                            animate && targetCount > 1);
+
+    if (canChoosePlatforms && this->ui_.platformButton->menu() == nullptr)
+    {
+        auto menu = std::make_unique<QMenu>(this->ui_.platformButton);
+        QObject::connect(menu.get(), &QMenu::aboutToShow, this, [this] {
+            this->showPlatformSelectionMenu();
+        });
+        this->ui_.platformButton->setMenu(std::move(menu));
+    }
+    else if (!canChoosePlatforms &&
+             this->ui_.platformButton->menu() != nullptr)
+    {
+        this->ui_.platformButton->setMenu(nullptr);
+    }
 
     auto tooltip =
         QString(replyLocked ? u"Replying on %1"_s : u"Sending to %1"_s)
@@ -4121,6 +6733,7 @@ void SplitInput::updatePlatformSelector(bool animate)
     }
 
     this->updatePollPredictionButtons();
+    this->refreshSendWaitStatus();
 }
 
 void SplitInput::updatePollPredictionButtons()
@@ -4131,34 +6744,173 @@ void SplitInput::updatePollPredictionButtons()
         return;
     }
 
-    auto *pollPredictionBar = this->split_->twitchPollsAndPredictionsBar_;
-    if (pollPredictionBar == nullptr)
+    if (this->ui_.seventvButton != nullptr)
     {
-        this->ui_.predictionButton->setVisible(false);
-        this->ui_.predictionButton->setEnabled(false);
-        this->ui_.pollButton->setVisible(false);
-        this->ui_.pollButton->setEnabled(false);
-        return;
+        this->ui_.seventvButton->setVisible(
+            showSeventvChatButtonSetting().getValue());
+    }
+    if (this->ui_.giveawayButton != nullptr)
+    {
+        const auto giveawayChannel = this->split_->getChannel();
+        const bool canStartGiveaway =
+            giveawayChannel != nullptr && giveawayChannel->hasModRights();
+        this->ui_.giveawayButton->setVisible(
+            showGiveawayChatButtonSetting().getValue() &&
+            canStartGiveaway && !this->giveawayPlatforms().empty());
+        this->ui_.giveawayButton->setEnabled(canStartGiveaway);
+        if (!canStartGiveaway && this->giveawayPopup_)
+        {
+            this->giveawayPopup_->close();
+        }
     }
 
+    const auto selectedPlatforms = this->selectedSendPlatforms();
     const auto channel = this->split_->getChannel();
     const auto twitchChannel = twitchChannelForPollPrediction(channel);
+    auto *pollPredictionBar = this->split_->twitchPollsAndPredictionsBar_;
     const bool sendingToTwitch =
-        containsPlatform(this->selectedSendPlatforms(),
-                         MessagePlatform::AnyOrTwitch);
+        containsPlatform(selectedPlatforms, MessagePlatform::AnyOrTwitch);
     const bool twitchVisible = twitchChannel != nullptr && sendingToTwitch;
-    const bool canManage = canManagePollPredictions(twitchChannel);
+    const bool canManageTwitch = canManagePollPredictions(twitchChannel);
+    const bool hasOpenTwitchPrediction =
+        pollPredictionBar != nullptr &&
+        pollPredictionBar->hasOpenTwitchPrediction();
+    const bool hasActiveTwitchPoll =
+        pollPredictionBar != nullptr &&
+        pollPredictionBar->hasActiveTwitchPoll();
+    const bool twitchPredictionAvailable =
+        twitchVisible && (canManageTwitch || hasOpenTwitchPrediction);
+    const bool twitchPollAvailable =
+        twitchVisible && (canManageTwitch || hasActiveTwitchPoll);
+
+    const auto kickChannel = std::dynamic_pointer_cast<KickChannel>(
+        this->channelForSendPlatform(MessagePlatform::Kick));
+    const bool sendingToKick =
+        containsPlatform(selectedPlatforms, MessagePlatform::Kick);
+    const bool hasOpenKickPrediction =
+        pollPredictionBar != nullptr &&
+        pollPredictionBar->hasOpenKickPrediction();
+    const bool hasActiveKickPoll =
+        pollPredictionBar != nullptr &&
+        pollPredictionBar->hasActiveKickPoll();
+    const bool canManageKick =
+        sendingToKick && kickChannel != nullptr && kickChannel->hasModRights();
+    const bool kickPredictionAvailable =
+        sendingToKick && kickChannel != nullptr &&
+        (canManageKick || hasOpenKickPrediction);
+    const bool kickPollAvailable =
+        sendingToKick && kickChannel != nullptr &&
+        (canManageKick || hasActiveKickPoll);
+    const auto kickAccount = getApp()->getAccounts()->kick.current();
+    const bool kickWebsiteConnected =
+        kickAccount != nullptr && !kickAccount->isAnonymous() &&
+        !kickAccount->chatIdentityToken().trimmed().isEmpty();
+
+    const auto configurePlatformMenu =
+        [this](SvgButton *button, bool needsMenu, bool prediction) {
+            constexpr auto MENU_PROPERTY =
+                "mergerinoPollPredictionPlatformMenu";
+            button->setProperty("mergerinoMenuOpensAbove", needsMenu);
+            if (button->property(MENU_PROPERTY).toBool() == needsMenu &&
+                (needsMenu == (button->menu() != nullptr)))
+            {
+                return;
+            }
+
+            button->setProperty(MENU_PROPERTY, needsMenu);
+            if (!needsMenu)
+            {
+                button->setMenu(nullptr);
+                return;
+            }
+
+            auto menu = std::make_unique<QMenu>(button);
+            menu->addAction(
+                QIcon(platformIconPath(MessagePlatform::AnyOrTwitch)),
+                QStringLiteral("Twitch"), this, [this, prediction] {
+                    if (prediction)
+                    {
+                        this->openTwitchPredictionDialog();
+                    }
+                    else
+                    {
+                        this->openTwitchPollDialog();
+                    }
+                });
+            menu->addAction(
+                QIcon(platformIconPath(MessagePlatform::Kick)),
+                QStringLiteral("Kick"), this, [this, prediction] {
+                    if (prediction)
+                    {
+                        this->openKickPredictionDialog();
+                    }
+                    else
+                    {
+                        this->openKickPollDialog();
+                    }
+                });
+            button->setMenu(std::move(menu));
+        };
+
+    configurePlatformMenu(this->ui_.predictionButton,
+                          twitchPredictionAvailable &&
+                              kickPredictionAvailable,
+                          true);
+    configurePlatformMenu(this->ui_.pollButton,
+                          twitchPollAvailable && kickPollAvailable, false);
+
+    const auto updateButtonSource = [](SvgButton *button,
+                                       const QString &path) {
+        constexpr auto SOURCE_PROPERTY =
+            "mergerinoPollPredictionIconSource";
+        if (button->property(SOURCE_PROPERTY).toString() == path)
+        {
+            return;
+        }
+        button->setProperty(SOURCE_PROPERTY, path);
+        button->setSource({.dark = path, .light = path});
+    };
+    updateButtonSource(
+        this->ui_.predictionButton,
+        kickPredictionAvailable && !twitchPredictionAvailable
+            ? QStringLiteral(":/buttons/startKickPrediction.svg")
+            : QStringLiteral(":/buttons/startPrediction.svg"));
+    updateButtonSource(
+        this->ui_.pollButton,
+        kickPollAvailable && !twitchPollAvailable
+            ? QStringLiteral(":/buttons/startKickPoll.svg")
+            : QStringLiteral(":/buttons/startPoll.svg"));
+
     const bool predictionVisible =
-        twitchVisible && (canManage || pollPredictionBar->hasOpenPrediction());
+        showPredictionChatButtonSetting().getValue() &&
+        (twitchPredictionAvailable || kickPredictionAvailable);
     const bool pollVisible =
-        twitchVisible && (canManage || pollPredictionBar->hasActivePoll());
+        showPollChatButtonSetting().getValue() &&
+        (twitchPollAvailable || kickPollAvailable);
 
     this->ui_.predictionButton->setVisible(predictionVisible);
     this->ui_.predictionButton->setEnabled(predictionVisible);
     QString predictionTooltip = QStringLiteral("Start prediction");
-    if (predictionVisible)
+    if (kickPredictionAvailable && twitchPredictionAvailable)
     {
-        if (!canManage && pollPredictionBar->hasOpenPrediction())
+        predictionTooltip =
+            QStringLiteral("Start or open a prediction — choose platform");
+    }
+    else if (hasOpenKickPrediction)
+    {
+        predictionTooltip = QStringLiteral("Open Kick prediction");
+    }
+    else if (canManageKick)
+    {
+        predictionTooltip =
+            kickWebsiteConnected
+                ? QStringLiteral("Start Kick prediction")
+                : QStringLiteral(
+                      "Connect Kick’s website session to start predictions");
+    }
+    else if (twitchPredictionAvailable)
+    {
+        if (!canManageTwitch && hasOpenTwitchPrediction)
         {
             predictionTooltip = QStringLiteral("Open prediction on Twitch");
         }
@@ -4167,10 +6919,10 @@ void SplitInput::updatePollPredictionButtons()
             predictionTooltip = QStringLiteral(
                 "Login to Twitch mod actions to start or manage predictions");
         }
-        else
+        else if (pollPredictionBar != nullptr)
         {
             predictionTooltip =
-                pollPredictionBar->predictionButtonTooltip(canManage);
+                pollPredictionBar->predictionButtonTooltip(canManageTwitch);
         }
     }
     this->ui_.predictionButton->setToolTip(predictionTooltip);
@@ -4178,9 +6930,25 @@ void SplitInput::updatePollPredictionButtons()
     this->ui_.pollButton->setVisible(pollVisible);
     this->ui_.pollButton->setEnabled(pollVisible);
     QString pollTooltip = QStringLiteral("Start poll");
-    if (pollVisible)
+    if (kickPollAvailable && twitchPollAvailable)
     {
-        if (!canManage && pollPredictionBar->hasActivePoll())
+        pollTooltip = QStringLiteral("Start or open a poll — choose platform");
+    }
+    else if (hasActiveKickPoll)
+    {
+        pollTooltip = QStringLiteral("Open Kick poll");
+    }
+    else if (canManageKick)
+    {
+        pollTooltip =
+            kickWebsiteConnected
+                ? QStringLiteral("Start Kick poll")
+                : QStringLiteral(
+                      "Connect Kick’s website session to start polls");
+    }
+    else if (twitchPollAvailable)
+    {
+        if (!canManageTwitch && hasActiveTwitchPoll)
         {
             pollTooltip = QStringLiteral("Open poll on Twitch");
         }
@@ -4189,9 +6957,9 @@ void SplitInput::updatePollPredictionButtons()
             pollTooltip =
                 QStringLiteral("Login to Twitch mod actions to start polls");
         }
-        else
+        else if (pollPredictionBar != nullptr)
         {
-            pollTooltip = pollPredictionBar->pollButtonTooltip(canManage);
+            pollTooltip = pollPredictionBar->pollButtonTooltip(canManageTwitch);
         }
     }
     this->ui_.pollButton->setToolTip(pollTooltip);
@@ -4504,24 +7272,25 @@ void SplitInput::setSelectedSendPlatforms(
 void SplitInput::showPlatformSelectionMenu()
 {
     const auto availablePlatforms = this->availableSendPlatforms();
-    if (availablePlatforms.size() < 3 || this->replySendPlatform().has_value())
+    auto *menu = this->ui_.platformButton->menu();
+    if (menu == nullptr || availablePlatforms.size() < 3 ||
+        this->replySendPlatform().has_value())
     {
-        this->tryCycleSendPlatform();
         return;
     }
 
-    QMenu menu(this);
+    menu->clear();
     const auto enabledPlatforms = this->cycleSendPlatforms(availablePlatforms);
     for (const auto platform : availablePlatforms)
     {
-        auto *action = new QWidgetAction(&menu);
-        auto *checkBox = new QCheckBox(platformDisplayName(platform), &menu);
+        auto *action = new QWidgetAction(menu);
+        auto *checkBox = new QCheckBox(platformDisplayName(platform), menu);
         checkBox->setIcon(QIcon(platformIconPath(platform)));
         checkBox->setChecked(
             containsPlatform(enabledPlatforms, platform));
         checkBox->setFocusPolicy(Qt::NoFocus);
         action->setDefaultWidget(checkBox);
-        menu.addAction(action);
+        menu->addAction(action);
 
         QObject::connect(checkBox, &QCheckBox::toggled, this,
                          [this, checkBox, platform](bool checked) {
@@ -4551,9 +7320,6 @@ void SplitInput::showPlatformSelectionMenu()
                                  std::move(selectedPlatforms));
                          });
     }
-
-    menu.exec(this->ui_.platformButton->mapToGlobal(
-        QPoint{0, this->ui_.platformButton->height()}));
 }
 
 bool SplitInput::tryCycleSendPlatform()
@@ -4610,14 +7376,548 @@ void SplitInput::updateCancelReplyButton()
     this->ui_.cancelReplyButton->setFixedWidth(int(20 * scale));
 }
 
+void SplitInput::refreshResubNotification()
+{
+    const int generation = ++this->resubRequestGeneration_;
+    const auto clearCurrent = [this] {
+        this->resubChannelLogin_.clear();
+        this->resubNotification_.reset();
+        this->updateResubCallout();
+    };
+
+    if (!containsPlatform(this->selectedSendPlatforms(),
+                          MessagePlatform::AnyOrTwitch))
+    {
+        clearCurrent();
+        return;
+    }
+
+    const auto channel =
+        this->channelForSendPlatform(MessagePlatform::AnyOrTwitch);
+    const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel);
+    if (!isRealTwitchChatIdentityChannel(twitch))
+    {
+        clearCurrent();
+        return;
+    }
+
+    const auto credentials = twitchResubCredentials();
+    if (!credentials.isValid())
+    {
+        clearCurrent();
+        return;
+    }
+
+    const auto login = twitch->getName().trimmed().toLower();
+    if (login.isEmpty())
+    {
+        clearCurrent();
+        return;
+    }
+    if (this->resubChannelLogin_ != login)
+    {
+        this->resubChannelLogin_ = login;
+        this->resubNotification_.reset();
+        this->updateResubCallout();
+    }
+
+    TwitchWebApi::getResubNotification(
+        login, credentials.clientID, credentials.oauthToken,
+        [guard = QPointer<SplitInput>(this), generation,
+         login](std::optional<TwitchResubNotification> notification) mutable {
+            if (guard == nullptr)
+            {
+                return;
+            }
+            QTimer::singleShot(
+                0, guard,
+                [guard, generation, login,
+                 notification = std::move(notification)]() mutable {
+                    if (guard == nullptr ||
+                        generation != guard->resubRequestGeneration_)
+                    {
+                        return;
+                    }
+
+                    const auto current =
+                        std::dynamic_pointer_cast<TwitchChannel>(
+                            guard->channelForSendPlatform(
+                                MessagePlatform::AnyOrTwitch));
+                    if (current == nullptr ||
+                        current->getName().trimmed().compare(
+                            login, Qt::CaseInsensitive) != 0)
+                    {
+                        return;
+                    }
+
+                    guard->resubChannelLogin_ = login;
+                    guard->resubNotification_ = std::move(notification);
+                    guard->updateResubCallout();
+                });
+        },
+        [guard = QPointer<SplitInput>(this), generation,
+         login](const QString &error) {
+            if (guard == nullptr)
+            {
+                return;
+            }
+            QTimer::singleShot(0, guard, [guard, generation, login, error] {
+                if (guard == nullptr ||
+                    generation != guard->resubRequestGeneration_)
+                {
+                    return;
+                }
+                qCDebug(chatterinoTwitch)
+                    << "Could not query resub notification for" << login
+                    << error;
+            });
+        });
+}
+
+void SplitInput::updateResubCallout()
+{
+    if (this->ui_.resubCalloutWrapper == nullptr)
+    {
+        return;
+    }
+
+    const auto current = std::dynamic_pointer_cast<TwitchChannel>(
+        this->channelForSendPlatform(MessagePlatform::AnyOrTwitch));
+    const bool correctChannel =
+        current != nullptr &&
+        current->getName().trimmed().compare(this->resubChannelLogin_,
+                                             Qt::CaseInsensitive) == 0;
+    const bool show = this->resubNotification_.has_value() && correctChannel &&
+                      containsPlatform(this->selectedSendPlatforms(),
+                                       MessagePlatform::AnyOrTwitch) &&
+                      resubTenureMonths(*this->resubNotification_) > 0;
+
+    if (show)
+    {
+        const int tenure = resubTenureMonths(*this->resubNotification_);
+        const auto monthWord =
+            tenure == 1 ? QStringLiteral("month") : QStringLiteral("months");
+        this->ui_.resubCalloutLabel->setText(
+            QStringLiteral("It's your %1 %2 sub anniversary!")
+                .arg(tenure)
+                .arg(monthWord));
+    }
+
+    this->ui_.resubCalloutWrapper->setVisible(show);
+    if (!this->isHidden())
+    {
+        this->setMaximumHeight(this->scaledMaxHeight());
+    }
+    this->updateGeometry();
+}
+
+void SplitInput::openShareResubDialog()
+{
+    if (this->resubDialog_ != nullptr)
+    {
+        this->resubDialog_->show();
+        this->resubDialog_->raise();
+        this->resubDialog_->activateWindow();
+        return;
+    }
+    if (!this->resubNotification_.has_value())
+    {
+        this->refreshResubNotification();
+        return;
+    }
+
+    const auto channel =
+        this->channelForSendPlatform(MessagePlatform::AnyOrTwitch);
+    const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel);
+    if (!isRealTwitchChatIdentityChannel(twitch) ||
+        twitch->getName().trimmed().compare(this->resubChannelLogin_,
+                                            Qt::CaseInsensitive) != 0)
+    {
+        this->refreshResubNotification();
+        return;
+    }
+
+    const auto notification = *this->resubNotification_;
+    const auto channelLogin = this->resubChannelLogin_;
+    const int tenure = resubTenureMonths(notification);
+    const auto monthWord =
+        tenure == 1 ? QStringLiteral("month") : QStringLiteral("months");
+
+    auto *dialog = new QDialog(this->window());
+    this->resubDialog_ = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->setWindowModality(Qt::WindowModal);
+    dialog->setWindowTitle(QStringLiteral("Share Sub Anniversary"));
+    dialog->setFixedWidth(460);
+    dialog->setPalette(getTheme()->palette);
+
+    auto *layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->setSpacing(8);
+
+    auto *title = new QLabel(
+        QStringLiteral("Share your Sub anniversary in chat!"), dialog);
+    auto titleFont = title->font();
+    titleFont.setBold(true);
+    titleFont.setPointSize(titleFont.pointSize() + 2);
+    title->setFont(titleFont);
+    layout->addWidget(title);
+
+    auto channelDisplayName = twitch->getDisplayName().trimmed();
+    if (channelDisplayName.isEmpty())
+    {
+        channelDisplayName = twitch->getName();
+    }
+    auto *body = new QLabel(
+        QStringLiteral("Let %1 know you've been subbed for %2 %3.")
+            .arg(channelDisplayName, QString::number(tenure), monthWord),
+        dialog);
+    body->setWordWrap(true);
+    layout->addWidget(body);
+
+    auto *messageFrame = new QWidget(dialog);
+    auto *messageLayout = new QGridLayout(messageFrame);
+    messageLayout->setContentsMargins(0, 0, 0, 0);
+    messageLayout->setSpacing(0);
+
+    auto *message = new ResizingTextEdit;
+    message->setObjectName(QStringLiteral("ResubMessage"));
+    message->setAcceptRichText(false);
+    message->setPlaceholderText(QStringLiteral("Add a message (optional)"));
+    message->setFixedHeight(82);
+    if (auto *completer = this->createCompleter(channel))
+    {
+        completer->setParent(message);
+        message->setCompleter(completer);
+    }
+    if (notification.isGiftSubscription &&
+        !notification.gifterDisplayName.trimmed().isEmpty())
+    {
+        message->setPlainText(
+            QStringLiteral("Thanks to @%1 for my sub gift!")
+                .arg(notification.gifterDisplayName.trimmed()));
+    }
+    messageLayout->addWidget(message, 0, 0);
+
+    auto *emoteButtonSlot = new QWidget(messageFrame);
+    emoteButtonSlot->setFixedSize(34, 34);
+    auto *emoteButtonLayout = new QHBoxLayout(emoteButtonSlot);
+    emoteButtonLayout->setContentsMargins(3, 3, 5, 5);
+    emoteButtonLayout->setSpacing(0);
+    auto *emoteButton = new SvgButton(
+        {
+            .dark = ":/buttons/emote.svg",
+            .light = ":/buttons/emoteDark.svg",
+        },
+        nullptr, QSize{4, 1});
+    emoteButton->setFixedSize(26, 26);
+    emoteButton->setContentSize(QSize{16, 16});
+    emoteButton->setPaintOffset(QPoint{0, 0});
+    emoteButton->setToolTip(QStringLiteral("Open emote picker"));
+    emoteButtonLayout->addWidget(emoteButton);
+    messageLayout->addWidget(emoteButtonSlot, 0, 0,
+                             Qt::AlignRight | Qt::AlignBottom);
+    emoteButtonSlot->raise();
+    layout->addWidget(messageFrame);
+
+    auto *errorLabel = new QLabel(dialog);
+    errorLabel->setObjectName(QStringLiteral("ResubError"));
+    errorLabel->setWordWrap(true);
+    errorLabel->setStyleSheet(QStringLiteral("QLabel { color: #ff6b6b; }"));
+    errorLabel->hide();
+    layout->addWidget(errorLabel);
+
+    auto *messageMeta = new QHBoxLayout;
+    messageMeta->setContentsMargins(0, 0, 0, 0);
+    messageMeta->setSpacing(8);
+    auto *streak = new QCheckBox(dialog);
+    streak->setObjectName(QStringLiteral("ResubStreak"));
+    streak->setText(
+        QStringLiteral("Show my %1 month streak in the chat message.")
+            .arg(notification.streakTenureMonths));
+    streak->setChecked(false);
+    streak->setVisible(notification.streakTenureMonths > 0);
+    messageMeta->addWidget(streak, 0, Qt::AlignVCenter);
+    messageMeta->addStretch(1);
+    auto *countLabel = new QLabel(dialog);
+    countLabel->setObjectName(QStringLiteral("ResubCount"));
+    messageMeta->addWidget(countLabel, 0, Qt::AlignRight | Qt::AlignVCenter);
+    layout->addLayout(messageMeta);
+
+    auto *buttonRow = new QHBoxLayout;
+    buttonRow->setContentsMargins(0, 2, 0, 0);
+    buttonRow->setSpacing(8);
+    auto *cancel = new QPushButton(QStringLiteral("Cancel"), dialog);
+    auto *share = new QPushButton(QStringLiteral("Share"), dialog);
+    cancel->setFixedSize(78, 30);
+    share->setFixedSize(78, 30);
+    share->setObjectName(QStringLiteral("ResubShare"));
+    share->setDefault(true);
+    share->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #9147ff; color: white; border: 0; "
+        "padding: 7px 18px; border-radius: 4px; font-weight: 600; }"
+        "QPushButton:hover { background: #772ce8; }"
+        "QPushButton:disabled { background: #5c4a73; color: #c8c4cc; }"));
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(cancel);
+    buttonRow->addWidget(share);
+    layout->addLayout(buttonRow);
+
+    QObject::connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
+    const auto resubEmotePopup =
+        std::make_shared<QPointer<EmotePopup>>();
+    QObject::connect(
+        emoteButton, &Button::leftClicked, dialog,
+        [guard = QPointer<SplitInput>(this),
+         dialogGuard = QPointer<QDialog>(dialog),
+         messageGuard = QPointer<QTextEdit>(message),
+         resubEmotePopup] {
+            if (guard == nullptr || dialogGuard == nullptr ||
+                messageGuard == nullptr)
+            {
+                return;
+            }
+
+            auto *popup = resubEmotePopup->data();
+            if (popup == nullptr)
+            {
+                popup = new EmotePopup(dialogGuard);
+                *resubEmotePopup = popup;
+                popup->setObjectName(QStringLiteral("ResubEmotePopup"));
+                popup->setAttribute(Qt::WA_DeleteOnClose);
+                std::ignore = popup->linkClicked.connect(
+                    [messageGuard](const Link &link) {
+                        if (messageGuard == nullptr ||
+                            link.type != Link::InsertText)
+                        {
+                            return;
+                        }
+
+                        auto cursor = messageGuard->textCursor();
+                        const auto currentText = messageGuard->toPlainText();
+                        QString textToInsert(link.value + " ");
+                        if (cursor.position() > 0 &&
+                            !currentText[cursor.position() - 1].isSpace())
+                        {
+                            textToInsert.prepend(' ');
+                        }
+                        cursor.insertText(textToInsert);
+                        messageGuard->setTextCursor(cursor);
+                        messageGuard->activateWindow();
+                        messageGuard->setFocus();
+                    });
+            }
+
+            const auto channel = guard->channelForSendPlatform(
+                MessagePlatform::AnyOrTwitch);
+            if (channel != nullptr)
+            {
+                popup->loadChannel(channel, guard->selectedSendPlatforms());
+            }
+            popup->show();
+            popup->raise();
+            popup->activateWindow();
+        });
+    QObject::connect(
+        message, &QTextEdit::textChanged, dialog, [message, countLabel] {
+            auto text = message->toPlainText();
+            if (text.size() > 255)
+            {
+                text.truncate(255);
+                const QSignalBlocker blocker(message);
+                message->setPlainText(text);
+                message->moveCursor(QTextCursor::End);
+            }
+            countLabel->setText(QStringLiteral("%1 / 255").arg(text.size()));
+        });
+    countLabel->setText(
+        QStringLiteral("%1 / 255").arg(message->toPlainText().size()));
+
+    const std::weak_ptr<TwitchChannel> twitchWeak = twitch;
+    QObject::connect(
+        share, &QPushButton::clicked, dialog,
+        [guard = QPointer<SplitInput>(this),
+         dialogGuard = QPointer<QDialog>(dialog), message, streak, share,
+         errorLabel, notification, channelLogin, tenure, twitchWeak] {
+            if (guard == nullptr || dialogGuard == nullptr)
+            {
+                return;
+            }
+
+            errorLabel->clear();
+            errorLabel->hide();
+            message->setEnabled(false);
+            streak->setEnabled(false);
+            share->setEnabled(false);
+            share->setText(QStringLiteral("Sharing..."));
+
+            const auto credentials = twitchResubCredentials();
+            if (!credentials.isValid())
+            {
+                errorLabel->setText(
+                    QStringLiteral("No Twitch account token is available."));
+                errorLabel->show();
+                message->setEnabled(true);
+                streak->setEnabled(true);
+                share->setEnabled(true);
+                share->setText(QStringLiteral("Share"));
+                return;
+            }
+
+            TwitchWebApi::shareResubNotification(
+                channelLogin, notification.id, message->toPlainText(),
+                streak->isChecked(), credentials.clientID,
+                credentials.oauthToken,
+                [guard, dialogGuard, notification, channelLogin, tenure,
+                 twitchWeak] {
+                    if (guard == nullptr)
+                    {
+                        return;
+                    }
+                    QTimer::singleShot(
+                        0, guard,
+                        [guard, dialogGuard, notification, channelLogin, tenure,
+                         twitchWeak] {
+                            if (guard == nullptr)
+                            {
+                                return;
+                            }
+                            if (dialogGuard != nullptr)
+                            {
+                                dialogGuard->accept();
+                            }
+                            if (guard->resubNotification_.has_value() &&
+                                guard->resubNotification_->id ==
+                                    notification.id &&
+                                guard->resubChannelLogin_ == channelLogin)
+                            {
+                                guard->resubNotification_.reset();
+                                guard->updateResubCallout();
+                            }
+                            if (const auto channel = twitchWeak.lock())
+                            {
+                                channel->addSystemMessage(
+                                    QStringLiteral("Your %1-month subscription "
+                                                   "anniversary was shared.")
+                                        .arg(tenure));
+                            }
+                            QTimer::singleShot(1000, guard, [guard] {
+                                if (guard != nullptr)
+                                {
+                                    guard->refreshResubNotification();
+                                }
+                            });
+                        });
+                },
+                [dialogGuard](const QString &error) {
+                    if (dialogGuard == nullptr)
+                    {
+                        return;
+                    }
+                    QTimer::singleShot(0, dialogGuard, [dialogGuard, error] {
+                        if (dialogGuard == nullptr)
+                        {
+                            return;
+                        }
+                        auto *errorLabel = dialogGuard->findChild<QLabel *>(
+                            QStringLiteral("ResubError"));
+                        auto *message = dialogGuard->findChild<QTextEdit *>(
+                            QStringLiteral("ResubMessage"));
+                        auto *streak = dialogGuard->findChild<QCheckBox *>(
+                            QStringLiteral("ResubStreak"));
+                        auto *share = dialogGuard->findChild<QPushButton *>(
+                            QStringLiteral("ResubShare"));
+                        if (errorLabel != nullptr)
+                        {
+                            errorLabel->setText(error);
+                            errorLabel->show();
+                        }
+                        if (message != nullptr)
+                        {
+                            message->setEnabled(true);
+                        }
+                        if (streak != nullptr)
+                        {
+                            streak->setEnabled(true);
+                        }
+                        if (share != nullptr)
+                        {
+                            share->setEnabled(true);
+                            share->setText(QStringLiteral("Share"));
+                        }
+                    });
+                });
+        });
+
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    message->setFocus();
+}
+
 void SplitInput::openPollDialog()
 {
+    {
+        const auto selectedPlatforms = this->selectedSendPlatforms();
+        auto kickChannel = std::dynamic_pointer_cast<KickChannel>(
+            this->channelForSendPlatform(MessagePlatform::Kick));
+        const bool kickAvailable =
+            containsPlatform(selectedPlatforms, MessagePlatform::Kick) &&
+            kickChannel != nullptr &&
+            (kickChannel->hasModRights() || kickChannel->activePoll());
+        auto choiceChannel = this->split_->getChannel();
+        auto twitchChoice = twitchChannelForPollPrediction(choiceChannel);
+        auto *bar = this->split_->twitchPollsAndPredictionsBar_;
+        const bool twitchAvailable =
+            containsPlatform(selectedPlatforms,
+                             MessagePlatform::AnyOrTwitch) &&
+            twitchChoice != nullptr &&
+            (canManagePollPredictions(twitchChoice) ||
+             (bar != nullptr && bar->hasActiveTwitchPoll()));
+
+        if (kickAvailable && twitchAvailable)
+        {
+            QMenu platformMenu(this);
+            auto *twitchAction = platformMenu.addAction(
+                QIcon(platformIconPath(MessagePlatform::AnyOrTwitch)),
+                QStringLiteral("Twitch"));
+            auto *kickAction = platformMenu.addAction(
+                QIcon(platformIconPath(MessagePlatform::Kick)),
+                QStringLiteral("Kick"));
+            auto *selected = platformMenu.exec(
+                this->ui_.pollButton->mapToGlobal(
+                    QPoint(0, -platformMenu.sizeHint().height())));
+            if (selected == nullptr)
+            {
+                return;
+            }
+            if (selected == kickAction)
+            {
+                this->openKickPollDialog();
+                return;
+            }
+            if (selected != twitchAction)
+            {
+                return;
+            }
+        }
+        else if (kickAvailable)
+        {
+            this->openKickPollDialog();
+            return;
+        }
+    }
     if (!containsPlatform(this->selectedSendPlatforms(),
                           MessagePlatform::AnyOrTwitch))
     {
         return;
     }
 
+    this->openTwitchPollDialog();
+}
+
+void SplitInput::openTwitchPollDialog()
+{
     auto channel = this->split_->getChannel();
     auto twitchChannel = twitchChannelForPollPrediction(channel);
     if (twitchChannel == nullptr)
@@ -4626,7 +7926,8 @@ void SplitInput::openPollDialog()
     }
     const bool canManage = canManagePollPredictions(twitchChannel);
     const bool hasActivePoll =
-        this->split_->twitchPollsAndPredictionsBar_->hasActivePoll();
+        this->split_->twitchPollsAndPredictionsBar_ != nullptr &&
+        this->split_->twitchPollsAndPredictionsBar_->hasActiveTwitchPoll();
     if (!canManage)
     {
         if (hasActivePoll)
@@ -4643,6 +7944,123 @@ void SplitInput::openPollDialog()
             channel->addSystemMessage(
                 QStringLiteral("You must be logged in to create a poll!"));
         }
+        return;
+    }
+
+    if (hasActivePoll)
+    {
+        QMessageBox dialog(
+            QMessageBox::NoIcon, QStringLiteral("Poll already active"),
+            QStringLiteral("You can’t start another poll while one is "
+                           "running. End the current poll first."),
+            QMessageBox::NoButton, this);
+        auto *endButton =
+            dialog.addButton(QStringLiteral("End poll"),
+                             QMessageBox::AcceptRole);
+        dialog.addButton(QStringLiteral("Close"), QMessageBox::RejectRole);
+        dialog.exec();
+        if (dialog.clickedButton() != endButton)
+        {
+            return;
+        }
+
+        const auto roomID = twitchChannel->roomId();
+        const auto finishSuccess =
+            [guard = QPointer<SplitInput>(this), channel](
+                const QString &title) {
+                if (channel != nullptr)
+                {
+                    channel->addSystemMessage(
+                        QStringLiteral("Ended poll: '%1'").arg(title));
+                }
+                if (guard != nullptr &&
+                    guard->split_->twitchPollsAndPredictionsBar_ != nullptr)
+                {
+                    guard->split_->twitchPollsAndPredictionsBar_->refreshNow();
+                }
+            };
+        const auto finishFailure = [channel](const QString &error) {
+            if (channel != nullptr)
+            {
+                channel->addSystemMessage(
+                    QStringLiteral("Failed to end the poll - %1").arg(error));
+            }
+        };
+
+        if (hasBroadcasterPollPredictionToken(twitchChannel))
+        {
+            getHelix()->getPolls(
+                roomID, {}, 1, {},
+                [roomID, finishSuccess,
+                 finishFailure](const HelixPolls &result) {
+                    const auto active = std::ranges::find_if(
+                        result.polls, [](const HelixPoll &poll) {
+                            return poll.status == QStringLiteral("ACTIVE");
+                        });
+                    if (active == result.polls.end())
+                    {
+                        finishFailure(
+                            QStringLiteral("Could not find the active poll."));
+                        return;
+                    }
+                    const auto title = active->title;
+                    getHelix()->endPoll(
+                        roomID, active->id, false,
+                        [finishSuccess, title](const HelixPoll &) {
+                            finishSuccess(title);
+                        },
+                        finishFailure);
+                },
+                finishFailure);
+            return;
+        }
+
+        auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
+        QString authError;
+        const auto moderationAccount =
+            TwitchModerationAuth::resolveForCurrentUser(
+                currentUser != nullptr ? currentUser->getUserId() : QString{},
+                &authError);
+        if (!moderationAccount.isValid())
+        {
+            showModerationAuthLoginPrompt(
+                this,
+                currentUser != nullptr ? currentUser->getUserId() : QString{},
+                QStringLiteral("end Twitch polls"),
+                [guard = QPointer<SplitInput>(this)] {
+                    if (guard != nullptr)
+                    {
+                        guard->openTwitchPollDialog();
+                    }
+                });
+            return;
+        }
+
+        TwitchWebApi::getPolls(
+            roomID, {}, 1, {}, moderationAccount.clientId,
+            moderationAccount.oauthToken,
+            [roomID, moderationAccount, finishSuccess,
+             finishFailure](const HelixPolls &result) {
+                const auto active = std::ranges::find_if(
+                    result.polls, [](const HelixPoll &poll) {
+                        return poll.status == QStringLiteral("ACTIVE");
+                    });
+                if (active == result.polls.end())
+                {
+                    finishFailure(
+                        QStringLiteral("Could not find the active poll."));
+                    return;
+                }
+                const auto title = active->title;
+                TwitchWebApi::endPoll(
+                    roomID, active->id, moderationAccount.clientId,
+                    moderationAccount.oauthToken,
+                    [finishSuccess, title] {
+                        finishSuccess(title);
+                    },
+                    finishFailure);
+            },
+            finishFailure);
         return;
     }
 
@@ -4663,7 +8081,7 @@ void SplitInput::openPollDialog()
                 [guard = QPointer<SplitInput>(this)] {
                     if (guard != nullptr)
                     {
-                        guard->openPollDialog();
+                        guard->openTwitchPollDialog();
                     }
                 });
             return;
@@ -4673,14 +8091,189 @@ void SplitInput::openPollDialog()
     CreatePollDialog::showDialog(std::move(channel), *twitchChannel);
 }
 
+void SplitInput::openKickPollDialog()
+{
+    auto channel = this->split_->getChannel();
+    auto kickChannel = std::dynamic_pointer_cast<KickChannel>(
+        this->channelForSendPlatform(MessagePlatform::Kick));
+    if (kickChannel == nullptr)
+    {
+        return;
+    }
+
+    if (!kickChannel->activePoll())
+    {
+        if (kickChannel->hasModRights())
+        {
+            CreatePollDialog::showKickDialog(std::move(channel), *kickChannel);
+        }
+        return;
+    }
+
+    const auto poll = *kickChannel->activePoll();
+    QMessageBox dialog(
+        QMessageBox::NoIcon, QStringLiteral("Kick poll active"),
+        QStringLiteral("End the active Kick poll '%1'?").arg(poll.title),
+        QMessageBox::NoButton, this);
+    auto *endButton =
+        dialog.addButton(QStringLiteral("End poll"), QMessageBox::AcceptRole);
+    dialog.addButton(QStringLiteral("Close"), QMessageBox::RejectRole);
+    dialog.exec();
+    if (dialog.clickedButton() != endButton)
+    {
+        return;
+    }
+
+    auto kickAccount = getApp()->getAccounts()->kick.current();
+    if (kickAccount == nullptr || kickAccount->isAnonymous() ||
+        kickAccount->chatIdentityToken().trimmed().isEmpty())
+    {
+        if (channel != nullptr)
+        {
+            channel->addSystemMessage(QStringLiteral(
+                "Connect Kick's website session under Settings > Accounts "
+                "before ending polls."));
+        }
+        return;
+    }
+
+    auto requestSlug = kickChannel->slug().trimmed();
+    if (requestSlug.isEmpty())
+    {
+        requestSlug = kickChannel->getName().trimmed();
+    }
+    const auto websiteToken = kickAccount->chatIdentityToken().trimmed();
+    const std::weak_ptr<KickChannel> kickChannelWeak = kickChannel;
+    QPointer<SplitInput> guard(this);
+    getKickApi()->deletePoll(
+        requestSlug, websiteToken,
+        [guard, channel, kickChannelWeak,
+         title = poll.title](ExpectedStr<void> result) mutable {
+            if (guard == nullptr)
+            {
+                return;
+            }
+            QTimer::singleShot(
+                0, guard.data(),
+                [guard, channel, kickChannelWeak, title,
+                 result = std::move(result)] {
+                    if (guard == nullptr)
+                    {
+                        return;
+                    }
+                    if (!result)
+                    {
+                        if (channel != nullptr)
+                        {
+                            channel->addSystemMessage(
+                                QStringLiteral(
+                                    "Failed to end the Kick poll - %1")
+                                    .arg(result.error()));
+                        }
+                        return;
+                    }
+
+                    if (auto kick = kickChannelWeak.lock(); kick != nullptr)
+                    {
+                        kick->updatePoll(std::nullopt);
+                    }
+                    if (channel != nullptr)
+                    {
+                        channel->addSystemMessage(
+                            QStringLiteral("Ended Kick poll: '%1'").arg(title));
+                    }
+                    guard->updatePollPredictionButtons();
+                });
+        });
+}
+
+void SplitInput::openKickPredictionDialog()
+{
+    auto channel = this->split_->getChannel();
+    auto kickChannel = std::dynamic_pointer_cast<KickChannel>(
+        this->channelForSendPlatform(MessagePlatform::Kick));
+    if (kickChannel == nullptr)
+    {
+        return;
+    }
+
+    if (kickChannel->activePrediction())
+    {
+        KickPredictionDialog::showDialog(kickChannel, channel);
+        return;
+    }
+
+    if (kickChannel->hasModRights())
+    {
+        CreatePredictionDialog::showKickDialog(std::move(channel),
+                                               *kickChannel);
+    }
+}
+
 void SplitInput::openPredictionDialog()
 {
+    {
+        const auto selectedPlatforms = this->selectedSendPlatforms();
+        auto kickChannel = std::dynamic_pointer_cast<KickChannel>(
+            this->channelForSendPlatform(MessagePlatform::Kick));
+        auto *bar = this->split_->twitchPollsAndPredictionsBar_;
+        const bool kickAvailable =
+            containsPlatform(selectedPlatforms, MessagePlatform::Kick) &&
+            kickChannel != nullptr &&
+            (kickChannel->hasModRights() ||
+             (bar != nullptr && bar->hasOpenKickPrediction()));
+        auto choiceChannel = this->split_->getChannel();
+        auto twitchChoice = twitchChannelForPollPrediction(choiceChannel);
+        const bool twitchAvailable =
+            containsPlatform(selectedPlatforms,
+                             MessagePlatform::AnyOrTwitch) &&
+            twitchChoice != nullptr &&
+            (canManagePollPredictions(twitchChoice) ||
+             (bar != nullptr && bar->hasOpenTwitchPrediction()));
+
+        if (kickAvailable && twitchAvailable)
+        {
+            QMenu platformMenu(this);
+            auto *twitchAction = platformMenu.addAction(
+                QIcon(platformIconPath(MessagePlatform::AnyOrTwitch)),
+                QStringLiteral("Twitch"));
+            auto *kickAction = platformMenu.addAction(
+                QIcon(platformIconPath(MessagePlatform::Kick)),
+                QStringLiteral("Kick"));
+            auto *selected = platformMenu.exec(
+                this->ui_.predictionButton->mapToGlobal(
+                    QPoint(0, -platformMenu.sizeHint().height())));
+            if (selected == nullptr)
+            {
+                return;
+            }
+            if (selected == kickAction)
+            {
+                this->openKickPredictionDialog();
+                return;
+            }
+            if (selected != twitchAction)
+            {
+                return;
+            }
+        }
+        else if (kickAvailable)
+        {
+            this->openKickPredictionDialog();
+            return;
+        }
+    }
     if (!containsPlatform(this->selectedSendPlatforms(),
                           MessagePlatform::AnyOrTwitch))
     {
         return;
     }
 
+    this->openTwitchPredictionDialog();
+}
+
+void SplitInput::openTwitchPredictionDialog()
+{
     auto channel = this->split_->getChannel();
     auto twitchChannel = twitchChannelForPollPrediction(channel);
     if (twitchChannel == nullptr)
@@ -4691,7 +8284,8 @@ void SplitInput::openPredictionDialog()
     const bool canUseBroadcasterHelix =
         hasBroadcasterPollPredictionToken(twitchChannel);
     const bool hasOpenPrediction =
-        this->split_->twitchPollsAndPredictionsBar_->hasOpenPrediction();
+        this->split_->twitchPollsAndPredictionsBar_ != nullptr &&
+        this->split_->twitchPollsAndPredictionsBar_->hasOpenTwitchPrediction();
     if (!canManage)
     {
         if (hasOpenPrediction)
@@ -4728,7 +8322,7 @@ void SplitInput::openPredictionDialog()
                 [guard = QPointer<SplitInput>(this)] {
                     if (guard != nullptr)
                     {
-                        guard->openPredictionDialog();
+                        guard->openTwitchPredictionDialog();
                     }
                 });
             return;
@@ -4859,6 +8453,99 @@ void SplitInput::openPredictionDialog()
         });
 }
 
+std::vector<ChannelPtr> SplitInput::emoteBarSendChannels() const
+{
+    std::vector<ChannelPtr> channels;
+    const auto current = this->split_->getChannel();
+    if (!current)
+    {
+        return channels;
+    }
+
+    if (dynamic_cast<MergedChannel *>(current.get()) == nullptr)
+    {
+        channels.push_back(current);
+        return channels;
+    }
+
+    for (const auto platform : this->selectedSendPlatforms())
+    {
+        const auto channel = this->channelForSendPlatform(platform);
+        if (channel &&
+            std::find(channels.begin(), channels.end(), channel) ==
+                channels.end())
+        {
+            channels.push_back(channel);
+        }
+    }
+    return channels;
+}
+
+void SplitInput::activateEmoteBarToken(const QString &token,
+                                       Qt::KeyboardModifiers modifiers)
+{
+    if (token.isEmpty() || this->ui_.textEdit == nullptr)
+    {
+        return;
+    }
+
+    if (modifiers.testFlag(Qt::ControlModifier) ||
+        modifiers.testFlag(Qt::AltModifier))
+    {
+        QTextCursor cursor = this->ui_.textEdit->textCursor();
+        QString textToInsert = token + QChar(' ');
+        if (cursor.position() > 0 &&
+            !this->getInputText().at(cursor.position() - 1).isSpace())
+        {
+            textToInsert.prepend(QChar(' '));
+        }
+        this->insertText(textToInsert);
+        this->ui_.textEdit->setFocus(Qt::MouseFocusReason);
+        return;
+    }
+
+    const auto previousText = this->ui_.textEdit->toPlainText();
+    const auto previousCursor = this->ui_.textEdit->textCursor();
+    const int previousPosition = previousCursor.position();
+    const int previousAnchor = previousCursor.anchor();
+
+    this->ui_.textEdit->setPlainText(token);
+    this->ui_.textEdit->moveCursor(QTextCursor::End);
+    this->handleSendMessage({QStringLiteral("keepInput")});
+
+    this->ui_.textEdit->setPlainText(previousText);
+    const int maximumPosition =
+        std::max(0, this->ui_.textEdit->document()->characterCount() - 1);
+    QTextCursor restoredCursor(this->ui_.textEdit->document());
+    restoredCursor.setPosition(std::clamp(previousAnchor, 0, maximumPosition));
+    restoredCursor.setPosition(
+        std::clamp(previousPosition, 0, maximumPosition),
+        QTextCursor::KeepAnchor);
+    this->ui_.textEdit->setTextCursor(restoredCursor);
+    this->ui_.textEdit->setFocus(Qt::MouseFocusReason);
+}
+
+void SplitInput::openGiveawayPopup()
+{
+    const auto channel = this->split_->getChannel();
+    if (channel == nullptr || !channel->hasModRights())
+    {
+        return;
+    }
+
+    if (!this->giveawayPopup_)
+    {
+        this->giveawayPopup_ = new GiveawayPopup(this->window());
+        QObject::connect(this, &QObject::destroyed, this->giveawayPopup_,
+                         &QWidget::close);
+    }
+
+    this->giveawayPopup_->setContext(channel, this->giveawayPlatforms());
+    this->giveawayPopup_->show();
+    this->giveawayPopup_->raise();
+    this->giveawayPopup_->activateWindow();
+}
+
 void SplitInput::openEmotePopup()
 {
     if (!this->emotePopup_)
@@ -4911,70 +8598,253 @@ void SplitInput::updateEmotePopupChannel()
     this->emotePopup_->loadChannel(channel, this->selectedSendPlatforms());
 }
 
+void SplitInput::ensureChatIdentityPopupHost()
+{
+    if (this->chatIdentityPopupHost_)
+    {
+        return;
+    }
+    this->chatIdentityPopupHost_ = new ChatIdentityPopupHost(this->window());
+    QObject::connect(this, &QObject::destroyed,
+                     this->chatIdentityPopupHost_, &QWidget::close);
+}
+
+void SplitInput::ensureTwitchIdentityPopup()
+{
+    if (this->badgePickerPopup_)
+    {
+        return;
+    }
+    this->ensureChatIdentityPopupHost();
+    this->badgePickerPopup_ =
+        new StreamDatabaseBadgePickerPopup(this->chatIdentityPopupHost_);
+    this->chatIdentityPopupHost_->addPage(this->badgePickerPopup_);
+    this->badgePickerPopup_->setAppliedCallback(
+        [guard = QPointer<SplitInput>(this)] {
+            if (guard != nullptr)
+            {
+                guard->updateBadgeButton();
+            }
+        });
+    this->badgePickerPopup_->setPlatformSwitchCallback(
+        [guard = QPointer<SplitInput>(this)](MessagePlatform platform) {
+            if (guard != nullptr)
+            {
+                guard->switchChatIdentityPlatform(platform);
+            }
+        });
+}
+
+void SplitInput::ensureKickIdentityPopup()
+{
+    if (this->kickIdentityPopup_)
+    {
+        return;
+    }
+    this->ensureChatIdentityPopupHost();
+    this->kickIdentityPopup_ =
+        new KickChatIdentityPopup(this->chatIdentityPopupHost_);
+    this->chatIdentityPopupHost_->addPage(this->kickIdentityPopup_);
+    this->kickIdentityPopup_->setAppliedCallback(
+        [guard = QPointer<SplitInput>(this)](
+            const KickChatIdentity &identity) {
+            if (guard == nullptr)
+            {
+                return;
+            }
+            auto currentKick = std::dynamic_pointer_cast<KickChannel>(
+                guard->channelForSendPlatform(MessagePlatform::Kick));
+            auto currentKickAccount = getApp()->getAccounts()->kick.current();
+            if (currentKick != nullptr && currentKickAccount != nullptr)
+            {
+                guard->kickChatIdentityKey_ =
+                    QStringLiteral("%1:%2")
+                        .arg(currentKick->channelID())
+                        .arg(currentKickAccount->userID());
+            }
+            guard->kickIdentityFailedKey_.clear();
+            guard->kickChatIdentity_ = identity;
+            guard->updateBadgeButton();
+        });
+    this->kickIdentityPopup_->setPlatformSwitchCallback(
+        [guard = QPointer<SplitInput>(this)](MessagePlatform platform) {
+            if (guard != nullptr)
+            {
+                guard->switchChatIdentityPlatform(platform);
+            }
+        });
+}
+
 void SplitInput::openBadgePickerPopup()
 {
     const auto platforms = this->selectedSendPlatforms();
     const bool canUseTwitch =
         containsPlatform(platforms, MessagePlatform::AnyOrTwitch);
+    const bool canUseKick =
+        containsPlatform(platforms, MessagePlatform::Kick);
     auto currentAccount = getApp()->getAccounts()->twitch.getCurrent();
     auto channel = this->channelForSendPlatform(MessagePlatform::AnyOrTwitch);
     const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(channel);
-    if (!canUseTwitch || currentAccount == nullptr || currentAccount->isAnon() ||
-        !isRealTwitchChatIdentityChannel(twitch))
+    const bool useTwitch =
+        canUseTwitch && currentAccount != nullptr &&
+        !currentAccount->isAnon() &&
+        isRealTwitchChatIdentityChannel(twitch);
+    auto kick = std::dynamic_pointer_cast<KickChannel>(
+        this->channelForSendPlatform(MessagePlatform::Kick));
+    auto kickAccount = getApp()->getAccounts()->kick.current();
+    const bool useKick =
+        KICK_CHAT_IDENTITY_EDITING_ENABLED && canUseKick && kick != nullptr &&
+        kick->channelID() != 0 && kickAccount != nullptr &&
+        !kickAccount->isAnonymous();
+    if (!useTwitch && !useKick)
     {
         return;
     }
 
-    if (!this->badgePickerPopup_)
+    const bool combined = useTwitch && useKick;
+    if (!useTwitch || (!combined && useKick))
     {
-        this->badgePickerPopup_ =
-            new StreamDatabaseBadgePickerPopup(this->window());
-        this->badgePickerPopup_->setAppliedCallback(
-            [guard = QPointer<SplitInput>(this)] {
-                if (guard != nullptr)
-                {
-                    guard->updateBadgeButton();
-                }
-            });
-        QObject::connect(this, &QObject::destroyed, this->badgePickerPopup_,
-                         &QWidget::close);
+        this->chatIdentityPlatform_ = MessagePlatform::Kick;
+    }
+    else if (!useKick)
+    {
+        this->chatIdentityPlatform_ = MessagePlatform::AnyOrTwitch;
     }
 
-    if (this->badgePickerPopup_->isVisible() ||
-        this->badgePickerPopup_->wasRecentlyHidden())
+    if (useTwitch)
     {
-        this->badgePickerPopup_->hide();
+        this->ensureTwitchIdentityPopup();
+        this->badgePickerPopup_->setPlatformSwitcherVisible(combined);
+        this->badgePickerPopup_->setPlatformSwitcherActive(
+            this->chatIdentityPlatform_);
+    }
+    if (useKick)
+    {
+        this->ensureKickIdentityPopup();
+        this->kickIdentityPopup_->setPlatformSwitcherVisible(combined);
+        this->kickIdentityPopup_->setPlatformSwitcherActive(
+            this->chatIdentityPlatform_);
+    }
+
+    if (this->chatIdentityPopupHost_->isVisible())
+    {
+        this->chatIdentityPopupHost_->hide();
+        return;
+    }
+    if (this->chatIdentityPopupHost_->wasRecentlyHidden())
+    {
         return;
     }
 
     this->updateBadgePickerContext();
-    this->badgePickerPopup_->showForAnchor(this->ui_.badgeButton);
+    QWidget *target = this->chatIdentityPlatform_ == MessagePlatform::Kick
+                          ? static_cast<QWidget *>(this->kickIdentityPopup_)
+                          : static_cast<QWidget *>(this->badgePickerPopup_);
+    this->chatIdentityPopupHost_->setCurrentPage(target);
+    if (target == this->kickIdentityPopup_)
+    {
+        this->kickIdentityPopup_->prepareToShow();
+    }
+    else
+    {
+        this->badgePickerPopup_->prepareToShow();
+    }
+    this->chatIdentityPopupHost_->showForAnchor(this->ui_.badgeButton);
 }
 
-void SplitInput::updateBadgePickerContext()
+void SplitInput::switchChatIdentityPlatform(MessagePlatform platform)
 {
-    if (!this->badgePickerPopup_)
+    if (platform != MessagePlatform::AnyOrTwitch &&
+        platform != MessagePlatform::Kick)
+    {
+        return;
+    }
+    if (platform == MessagePlatform::Kick &&
+        !KICK_CHAT_IDENTITY_EDITING_ENABLED)
+    {
+        return;
+    }
+    const auto platforms = this->selectedSendPlatforms();
+    if (!containsPlatform(platforms, MessagePlatform::AnyOrTwitch) ||
+        !containsPlatform(platforms, MessagePlatform::Kick) ||
+        platform == this->chatIdentityPlatform_)
     {
         return;
     }
 
-    QString channelName;
-    QString channelID;
-    std::shared_ptr<TwitchChannel> twitch;
-    auto channel = this->channelForSendPlatform(MessagePlatform::AnyOrTwitch);
-    if ((twitch = std::dynamic_pointer_cast<TwitchChannel>(channel)) &&
-        isRealTwitchChatIdentityChannel(twitch))
+    this->ensureTwitchIdentityPopup();
+    this->ensureKickIdentityPopup();
+    this->badgePickerPopup_->setPlatformSwitcherVisible(true);
+    this->kickIdentityPopup_->setPlatformSwitcherVisible(true);
+    this->chatIdentityPlatform_ = platform;
+    this->badgePickerPopup_->setPlatformSwitcherActive(platform);
+    this->kickIdentityPopup_->setPlatformSwitcherActive(platform);
+    this->updateBadgePickerContext();
+
+    QWidget *target = platform == MessagePlatform::Kick
+                          ? static_cast<QWidget *>(this->kickIdentityPopup_)
+                          : static_cast<QWidget *>(this->badgePickerPopup_);
+    this->chatIdentityPopupHost_->setCurrentPage(target);
+    if (target == this->kickIdentityPopup_)
     {
-        channelName = twitch->getName();
-        channelID = twitch->roomId();
+        this->kickIdentityPopup_->prepareToShow();
     }
-    else if (auto splitChannel = this->split_->getChannel())
+    else
     {
-        channelName = splitChannel->getName();
+        this->badgePickerPopup_->prepareToShow();
+    }
+    this->updateBadgeButton();
+}
+
+void SplitInput::updateBadgePickerContext()
+{
+    if (this->badgePickerPopup_)
+    {
+        QString channelName;
+        QString channelID;
+        std::shared_ptr<TwitchChannel> twitch;
+        auto channel =
+            this->channelForSendPlatform(MessagePlatform::AnyOrTwitch);
+        if ((twitch = std::dynamic_pointer_cast<TwitchChannel>(channel)) &&
+            isRealTwitchChatIdentityChannel(twitch))
+        {
+            channelName = twitch->getName();
+            channelID = twitch->roomId();
+        }
+        else if (auto splitChannel = this->split_->getChannel())
+        {
+            channelName = splitChannel->getName();
+        }
+        QString accountName;
+        const auto account = getApp()->getAccounts()->twitch.getCurrent();
+        if (account != nullptr && !account->isAnon())
+        {
+            const auto helperAccount = TwitchModerationAuth::savedAccount();
+            const bool helperMatches =
+                (!helperAccount.userId.trimmed().isEmpty() &&
+                 helperAccount.userId == account->getUserId()) ||
+                (!helperAccount.login.trimmed().isEmpty() &&
+                 helperAccount.login.compare(account->getUserName(),
+                                             Qt::CaseInsensitive) == 0);
+            accountName = helperMatches
+                              ? helperAccount.displayName.trimmed()
+                              : QString{};
+            if (accountName.isEmpty())
+            {
+                accountName = account->getUserName();
+            }
+        }
+        this->badgePickerPopup_->setContext(channelName, channelID,
+                                            accountName, twitch);
     }
 
-    this->badgePickerPopup_->setContext(channelName, channelID,
-                                        this->selectedSendAccountName(), twitch);
+    if (this->kickIdentityPopup_)
+    {
+        auto kick = std::dynamic_pointer_cast<KickChannel>(
+            this->channelForSendPlatform(MessagePlatform::Kick));
+        this->kickIdentityPopup_->setContext(
+            kick, getApp()->getAccounts()->kick.current());
+    }
 }
 
 QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
@@ -4986,6 +8856,7 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
     }
 
     struct SendTarget {
+        // Exactly one of channel or youtubeLiveChat is used for a send.
         ChannelPtr channel;
         YouTubeLiveChat *youtubeLiveChat{};
         std::optional<MessagePlatform> platform;
@@ -5032,14 +8903,32 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
     }
     else
     {
-        sendTargets.push_back({c, nullptr, std::nullopt});
+        std::optional<MessagePlatform> platform;
+        if (c->isTwitchChannel())
+        {
+            platform = MessagePlatform::AnyOrTwitch;
+        }
+        else if (c->isKickChannel())
+        {
+            platform = MessagePlatform::Kick;
+        }
+        sendTargets.push_back({c, nullptr, platform});
     }
 
     QString message = this->ui_.textEdit->toPlainText();
     message = message.replace('\n', ' ');
     QString historyMessage = message;
+    QString emoteBarMessage;
 
-    for (const auto &target : sendTargets)
+    struct PreparedSend {
+        SendTarget *target{};
+        QString message;
+        bool isReply{};
+    };
+    std::vector<PreparedSend> preparedSends;
+    bool blockedBySendWait = false;
+
+    for (auto &target : sendTargets)
     {
         const bool replyMatchesSendPlatform =
             !target.platform || this->replyTarget_ == nullptr ||
@@ -5050,22 +8939,29 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
             continue;
         }
 
-        if (target.youtubeLiveChat != nullptr)
+        const bool isReply =
+            target.youtubeLiveChat == nullptr &&
+            target.channel->isTwitchOrKickChannel() &&
+            this->replyTarget_ != nullptr;
+        if (!isReply)
         {
-            QString sendMessage =
-                getApp()->getCommands()->execCommand(message, c, false);
-            target.youtubeLiveChat->sendMessage(sendMessage);
-            continue;
-        }
-
-        if (!target.channel->isTwitchOrKickChannel() ||
-            this->replyTarget_ == nullptr)
-        {
-            // standard message send behavior
+            const auto commandChannel =
+                target.youtubeLiveChat != nullptr ? c : target.channel;
             QString sendMessage = getApp()->getCommands()->execCommand(
-                message, target.channel, false);
-
-            target.channel->sendMessage(sendMessage);
+                message, commandChannel, false);
+            if (sendMessage.trimmed().isEmpty())
+            {
+                continue;
+            }
+            if (emoteBarMessage.isEmpty())
+            {
+                emoteBarMessage = sendMessage;
+            }
+            if (target.platform && this->hasSendWait(*target.platform))
+            {
+                blockedBySendWait = true;
+            }
+            preparedSends.push_back({&target, std::move(sendMessage), false});
             continue;
         }
 
@@ -5092,16 +8988,19 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
         }
 
         QString sendMessage = getApp()->getCommands()->execCommand(
-            replyMessage, target.channel, false);
+            replyMessage, target.channel, false, this->replyTarget_.get());
 
-        // Reply within TwitchChannel
-        if (tc)
+        if (!sendMessage.trimmed().isEmpty())
         {
-            tc->sendReply(sendMessage, this->replyTarget_->id);
-        }
-        else if (kc)
-        {
-            kc->sendReply(sendMessage, this->replyTarget_->id);
+            if (emoteBarMessage.isEmpty())
+            {
+                emoteBarMessage = sendMessage;
+            }
+            if (target.platform && this->hasSendWait(*target.platform))
+            {
+                blockedBySendWait = true;
+            }
+            preparedSends.push_back({&target, std::move(sendMessage), true});
         }
 
         if (sendTargets.size() == 1)
@@ -5110,6 +9009,42 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
         }
     }
 
+    if (blockedBySendWait)
+    {
+        this->refreshSendWaitStatus();
+        return "";
+    }
+
+    for (const auto &prepared : preparedSends)
+    {
+        auto &target = *prepared.target;
+        if (target.youtubeLiveChat != nullptr)
+        {
+            target.youtubeLiveChat->sendMessage(prepared.message);
+            continue;
+        }
+
+        if (!prepared.isReply)
+        {
+            target.channel->sendMessage(prepared.message);
+            continue;
+        }
+
+        if (auto *tc = dynamic_cast<TwitchChannel *>(target.channel.get()))
+        {
+            tc->sendReply(prepared.message, this->replyTarget_->id);
+        }
+        else if (auto *kc =
+                     dynamic_cast<KickChannel *>(target.channel.get()))
+        {
+            kc->sendReply(prepared.message, this->replyTarget_->id);
+        }
+    }
+
+    if (this->ui_.emoteBar != nullptr && !emoteBarMessage.isEmpty())
+    {
+        this->ui_.emoteBar->recordMessage(emoteBarMessage);
+    }
     this->postMessageSend(historyMessage, arguments);
     return "";
 }
@@ -5133,15 +9068,19 @@ void SplitInput::postMessageSend(const QString &message,
 
 int SplitInput::scaledMaxHeight() const
 {
+    const int resubHeight = this->ui_.resubCalloutWrapper != nullptr &&
+                                    this->ui_.resubCalloutWrapper->isVisible()
+                                ? int(32 * this->scale())
+                                : 0;
+    const int emoteBarHeight = this->ui_.emoteBar != nullptr
+                                   ? this->ui_.emoteBar->preferredHeight()
+                                   : 0;
     if (this->replyTarget_ != nullptr)
     {
         // give more space for showing the message being replied to
-        return int(250 * this->scale());
+        return int(250 * this->scale()) + resubHeight + emoteBarHeight;
     }
-    else
-    {
-        return int(150 * this->scale());
-    }
+    return int(150 * this->scale()) + resubHeight + emoteBarHeight;
 }
 
 void SplitInput::addShortcuts()
@@ -5661,6 +9600,16 @@ void SplitInput::showCompletionPopup(const QString &text, CompletionKind kind)
                     this2->hideCompletionPopup();
                 }
             });
+        this->inputCompletionPopup_->setPlatformInputAction(
+            [that = QPointer(this)](const QString &text,
+                                    MessagePlatform platform) mutable {
+                if (auto *this2 = that.data())
+                {
+                    this2->setSelectedSendPlatforms({platform});
+                    this2->insertCompletionText(text);
+                    this2->hideCompletionPopup();
+                }
+            });
     }
 
     auto *popup = this->inputCompletionPopup_.data();
@@ -5680,10 +9629,11 @@ void SplitInput::showCompletionPopup(const QString &text, CompletionKind kind)
         return;
     }
 
-    popup->updateCompletion(text, kind, std::move(channel),
-                            kind == CompletionKind::Emote
-                                ? platforms
-                                : std::vector<MessagePlatform>{});
+    popup->updateCompletion(
+        text, kind, std::move(channel),
+        kind == CompletionKind::Emote || kind == CompletionKind::Command
+            ? platforms
+            : std::vector<MessagePlatform>{});
 
     auto pos = this->mapToGlobal(QPoint{0, 0}) - QPoint(0, popup->height()) +
                QPoint((this->width() - popup->width()) / 2, 0);
@@ -5802,12 +9752,53 @@ void SplitInput::setInputText(const QString &newInputText)
     this->ui_.textEdit->setPlainText(newInputText);
 }
 
+void SplitInput::updateSeventvCosmeticsForInput()
+{
+    if (this->ui_.textEdit->toPlainText().trimmed().isEmpty())
+    {
+        return;
+    }
+    const auto platforms = this->selectedSendPlatforms();
+    const bool useTwitch =
+        containsPlatform(platforms, MessagePlatform::AnyOrTwitch);
+    const bool useKick = containsPlatform(platforms, MessagePlatform::Kick);
+    auto &manager = SeventvAccountManager::instance();
+
+    if (useTwitch)
+    {
+        const auto twitch = std::dynamic_pointer_cast<TwitchChannel>(
+            this->channelForSendPlatform(MessagePlatform::AnyOrTwitch));
+        if (twitch != nullptr && !twitch->roomId().isEmpty())
+        {
+            manager.ensureChannelCosmetics(
+                useKick ? SeventvAccountManager::bothPlatforms()
+                        : SeventvAccountManager::twitchPlatform(),
+                twitch->roomId(), twitch->getName(), twitch->getDisplayName());
+            return;
+        }
+    }
+    if (useKick)
+    {
+        const auto kick = std::dynamic_pointer_cast<KickChannel>(
+            this->channelForSendPlatform(MessagePlatform::Kick));
+        if (kick != nullptr && kick->channelID() != 0)
+        {
+            manager.ensureChannelCosmetics(
+                SeventvAccountManager::kickPlatform(),
+                QString::number(kick->channelID()), kick->getName(),
+                kick->getDisplayName());
+        }
+    }
+}
+
 void SplitInput::editTextChanged()
 {
     auto *app = getApp();
 
     // set textLengthLabel value
     QString text = this->ui_.textEdit->toPlainText();
+
+    this->updateSeventvCosmeticsForInput();
 
     if (this->shouldPreventInput(text))
     {
@@ -5914,6 +9905,7 @@ void SplitInput::editTextChanged()
 void SplitInput::paintEvent(QPaintEvent * /*event*/)
 {
     QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
 
     QColor borderColor =
         this->theme->isLightTheme() ? QColor("#ccc") : QColor("#333");
@@ -5924,17 +9916,47 @@ void SplitInput::paintEvent(QPaintEvent * /*event*/)
 
     const auto inputBackground = this->theme->splits.input.background;
 
-    painter.setBrush(inputBackground);
-    painter.fillRect(inputBoxRect, inputBackground);
+    auto composerRect = inputBoxRect;
+    if (this->ui_.emoteBar != nullptr && this->ui_.emoteBar->isVisible())
+    {
+        composerRect.setTop(this->ui_.emoteBar->geometry().top() +
+                            this->ui_.emoteBar->contentTop());
+    }
+    else if (this->ui_.replyWrapper != nullptr &&
+             this->ui_.replyWrapper->isVisible())
+    {
+        composerRect.setTop(this->ui_.replyWrapper->geometry().top());
+    }
+
+    const QRectF composerBounds(composerRect);
+    const qreal radius =
+        std::min(std::max<qreal>(5.0, 7.0 * this->scale()),
+                 composerBounds.width() / 2.0);
+    QPainterPath composerPath;
+    composerPath.moveTo(composerBounds.bottomLeft());
+    composerPath.lineTo(composerBounds.left(),
+                        composerBounds.top() + radius);
+    composerPath.quadTo(composerBounds.topLeft(),
+                        QPointF(composerBounds.left() + radius,
+                                composerBounds.top()));
+    composerPath.lineTo(composerBounds.right() - radius,
+                        composerBounds.top());
+    composerPath.quadTo(composerBounds.topRight(),
+                        QPointF(composerBounds.right(),
+                                composerBounds.top() + radius));
+    composerPath.lineTo(composerBounds.bottomRight());
+    composerPath.closeSubpath();
+    painter.fillPath(composerPath, inputBackground);
+    painter.setPen(QPen(borderColor, 1));
+    painter.drawPath(composerPath);
 
     if (this->enableInlineReplying_ && this->replyTarget_ != nullptr)
     {
         auto replyRect = this->ui_.replyWrapper->geometry();
         replyRect.setSize(replyRect.size() - QSize{1, 1});
 
-        painter.setBrush(this->theme->splits.input.background);
         painter.setPen(borderColor);
-        painter.drawRect(replyRect);
+        painter.drawLine(replyRect.topLeft(), replyRect.topRight());
 
         QPoint replyLabelBorderStart(
             replyRect.x(),
@@ -5959,6 +9981,7 @@ void SplitInput::resizeEvent(QResizeEvent *event)
     }
 
     this->ui_.replyMessage->setWidth(this->replyMessageWidth());
+    this->positionSendWaitLockIcon();
 }
 
 void SplitInput::giveFocus(Qt::FocusReason reason)
@@ -6044,7 +10067,8 @@ void SplitInput::setReply(MessagePtr target)
 
 void SplitInput::setPlaceholderText(const QString &text)
 {
-    this->ui_.textEdit->setPlaceholderText(text);
+    this->placeholderText_ = text;
+    this->refreshSendWaitStatus();
 }
 
 void SplitInput::clearInput()
@@ -6201,22 +10225,73 @@ void SplitInput::updateFonts()
     auto tsMedium =
         app->getFonts()->getFont(FontStyle::TimestampMedium, this->scale());
     this->ui_.textEditLength->setFont(tsMedium);
-    this->ui_.sendWaitStatus->setFont(tsMedium);
     this->ui_.replyLabel->setFont(
         app->getFonts()->getFont(FontStyle::ChatMediumBold, this->scale()));
+    if (this->ui_.resubCalloutLabel != nullptr)
+    {
+        const auto buttonFont =
+            app->getFonts()->getFont(FontStyle::ChatMediumBold, this->scale());
+        auto labelFont = buttonFont;
+        labelFont.setWeight(QFont::DemiBold);
+        this->ui_.resubCalloutLabel->setFont(labelFont);
+        this->ui_.resubCalloutButton->setFont(buttonFont);
+    }
 }
 
-void SplitInput::setSendWaitStatus(const QString &text) const
+bool SplitInput::hasSendWait(MessagePlatform platform) const
 {
-    this->ui_.sendWaitStatus->setText(text);
-    if (text.isEmpty())
+    const auto it = this->sendWaitStatuses_.constFind(platform);
+    return it != this->sendWaitStatuses_.cend() && *it > 0;
+}
+
+void SplitInput::clearSendWaitStatuses()
+{
+    this->sendWaitStatuses_.clear();
+    this->refreshSendWaitStatus();
+}
+
+void SplitInput::setSendWaitStatus(MessagePlatform platform,
+                                   int secondsRemaining)
+{
+    if (secondsRemaining <= 0)
     {
-        this->ui_.sendWaitStatus->setHidden(true);
+        this->sendWaitStatuses_.remove(platform);
     }
     else
     {
-        this->ui_.sendWaitStatus->setHidden(!getSettings()->showSendWaitTimer);
+        this->sendWaitStatuses_.insert(platform, secondsRemaining);
     }
+    this->refreshSendWaitStatus();
+}
+
+void SplitInput::refreshSendWaitStatus()
+{
+    const auto selectedPlatforms = this->selectedSendPlatforms();
+    int longestWait = 0;
+    for (const auto platform : selectedPlatforms)
+    {
+        const auto it = this->sendWaitStatuses_.constFind(platform);
+        if (it == this->sendWaitStatuses_.cend())
+        {
+            continue;
+        }
+        longestWait = std::max(longestWait, *it);
+    }
+
+    const bool blocked = longestWait > 0;
+    const bool showIndicator = blocked && getSettings()->showSendWaitTimer;
+    this->ui_.textEdit->setPlaceholderText(
+        showIndicator
+            ? QStringLiteral("You can send a message in %1")
+                  .arg(formatTime(longestWait, 2))
+            : this->placeholderText_);
+    this->ui_.sendButton->setEnabled(!blocked);
+    this->ui_.sendWaitLockIcon->setToolTip(
+        showIndicator
+            ? QStringLiteral("Slow mode cooldown: %1 remaining")
+                  .arg(formatTime(longestWait, 2))
+            : QString{});
+    this->setSendWaitLockShown(showIndicator, true);
 }
 
 }  // namespace chatterino

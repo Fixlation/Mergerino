@@ -30,15 +30,19 @@ class QWidget;
 
 namespace chatterino {
 
+class KickChannel;
 class TwitchChannel;
 
 class CreatePollDialog final : public BasePopup
 {
 public:
     static void showDialog(ChannelPtr channel, const TwitchChannel &twitchChannel);
+    static void showKickDialog(ChannelPtr channel,
+                               const KickChannel &kickChannel);
 
     CreatePollDialog(ChannelPtr channel, QString broadcasterID,
-                     QString channelLogin, QWidget *parent = nullptr);
+                     QString channelLogin, QWidget *parent = nullptr,
+                     bool kick = false);
 
 protected:
     bool eventFilter(QObject *object, QEvent *event) override;
@@ -85,6 +89,7 @@ private:
     ChannelPtr channel_;
     QString broadcasterID_;
     QString channelLogin_;
+    bool kick_ = false;
 
     QLineEdit *question_ = nullptr;
     QVBoxLayout *responsesLayout_ = nullptr;

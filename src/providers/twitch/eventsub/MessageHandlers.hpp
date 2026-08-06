@@ -26,6 +26,11 @@ void handleModerateMessage(
     const lib::payload::channel_moderate::v2::Event &event,
     const lib::payload::channel_moderate::v2::Clear &action);
 
+void handleModerateMessage(
+    TwitchChannel *chan, const QDateTime &time,
+    const lib::payload::channel_moderate::v2::Event &event,
+    const lib::payload::channel_moderate::v2::Delete &action);
+
 /// <MODERATOR> timed out <USER> for <DURATION>[ in <CHANNEL>]: <REASON>
 void handleModerateMessage(
     TwitchChannel *chan, const QDateTime &time,

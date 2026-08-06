@@ -9,6 +9,7 @@
 #include "controllers/commands/Command.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/completion/sources/Helpers.hpp"
+#include "messages/Message.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
 #include "widgets/splits/InputCompletionItem.hpp"
 
@@ -18,13 +19,16 @@ namespace chatterino::completion {
 
 namespace {
 
-void addCommand(const QString &command, std::vector<CommandItem> &out)
+void addCommand(
+    const QString &command, std::vector<CommandItem> &out,
+    std::vector<MessagePlatform> platforms = {})
 {
     if (command.startsWith('/') || command.startsWith('.'))
     {
         out.push_back({
             .name = command.mid(1),
             .prefix = command.at(0),
+            .platforms = std::move(platforms),
         });
     }
     else
@@ -32,7 +36,17 @@ void addCommand(const QString &command, std::vector<CommandItem> &out)
         out.push_back({
             .name = command,
             .prefix = "",
+            .platforms = std::move(platforms),
         });
+    }
+}
+
+void appendPlatform(std::vector<MessagePlatform> &platforms,
+                    MessagePlatform platform)
+{
+    if (std::ranges::find(platforms, platform) == platforms.end())
+    {
+        platforms.push_back(platform);
     }
 }
 
@@ -94,25 +108,14 @@ const QStringList &kickCompatibleChatterinoCommands()
 {
     static const QStringList commands{
         "/ban",
-        "/clearmessages",
-        "/copy",
-        "/debug-args",
-        "/debug-env",
-        "/debug-force-image-gc",
-        "/debug-force-image-unload",
-        "/debug-force-layout-channel-views",
-        "/debug-increment-image-generation",
-        "/debug-invalidate-buffers",
         "/debug-kick-raw-event",
         "/delete",
-        "/openurl",
+        "/pin",
         "/streamlink",
         "/timeout",
         "/unban",
         "/untimeout",
         "/user",
-        "/c2-set-logging-rules",
-        "/c2-theme-autoreload",
     };
 
     return commands;
@@ -127,23 +130,26 @@ const QStringList &kickOnlyChatterinoCommands()
     return commands;
 }
 
-bool shouldAddDefaultChatterinoCommand(const QString &command,
-                                       bool canUseTwitchCommands,
-                                       bool canUseKickCommands)
+const QStringList &clientOnlyChatterinoCommands()
 {
-    if (canUseKickCommands && !canUseTwitchCommands)
-    {
-        return kickCompatibleChatterinoCommands().contains(
-            command, Qt::CaseInsensitive);
-    }
+    static const QStringList commands{
+        "/c2-set-logging-rules",
+        "/c2-theme-autoreload",
+        "/clearmessages",
+        "/copy",
+        "/debug-args",
+        "/debug-env",
+        "/debug-force-image-gc",
+        "/debug-force-image-unload",
+        "/debug-force-layout-channel-views",
+        "/debug-increment-image-generation",
+        "/debug-invalidate-buffers",
+        "/debug-relaunch-with-console",
+        "/giveaway",
+        "/openurl",
+    };
 
-    if (canUseTwitchCommands && !canUseKickCommands)
-    {
-        return !kickOnlyChatterinoCommands().contains(command,
-                                                      Qt::CaseInsensitive);
-    }
-
-    return true;
+    return commands;
 }
 
 const QStringList &moderatorCommands()
@@ -165,6 +171,8 @@ const QStringList &moderatorCommands()
         "/followersoff",
         "/lowtrust",
         "/monitor",
+        "/mod",
+        "/pin",
         "/poll",
         "/prediction",
         "/requests",
@@ -183,8 +191,11 @@ const QStringList &moderatorCommands()
         "/uniquechat",
         "/uniquechatoff",
         "/unmonitor",
+        "/unmod",
         "/unrestrict",
         "/untimeout",
+        "/unvip",
+        "/vip",
         "/warn",
     };
 
@@ -202,16 +213,12 @@ const QStringList &broadcasterCommands()
         "/host",
         "/lockprediction",
         "/marker",
-        "/mod",
         "/mods",
         "/raid",
         "/setgame",
         "/settitle",
-        "/unmod",
         "/unhost",
         "/unraid",
-        "/unvip",
-        "/vip",
         "/vips",
     };
 
@@ -237,13 +244,17 @@ bool canUseCommand(const CommandItem &command, const Channel *channel)
 
 }  // namespace
 
-CommandSource::CommandSource(std::unique_ptr<CommandStrategy> strategy,
-                             ActionCallback callback, const Channel *channel,
-                             bool slashCommandsOnly)
+CommandSource::CommandSource(
+    std::unique_ptr<CommandStrategy> strategy, ActionCallback callback,
+    const Channel *channel, bool slashCommandsOnly,
+    std::vector<MessagePlatform> platformFilter,
+    PlatformActionCallback platformCallback)
     : strategy_(std::move(strategy))
     , callback_(std::move(callback))
+    , platformCallback_(std::move(platformCallback))
     , channel_(channel)
     , slashCommandsOnly_(slashCommandsOnly)
+    , platformFilter_(std::move(platformFilter))
 {
     this->initializeItems();
 }
@@ -262,8 +273,13 @@ void CommandSource::addToListModel(GenericListModel &model,
 {
     addVecToListModel(this->output_, model, maxCount,
                       [this](const CommandItem &command) {
+                          auto platforms =
+                              this->platformFilter_.size() > 1
+                                  ? command.platforms
+                                  : std::vector<MessagePlatform>{};
                           return std::make_unique<InputCompletionItem>(
-                              nullptr, displayText(command), this->callback_);
+                              nullptr, displayText(command), this->callback_,
+                              std::move(platforms), this->platformCallback_);
                       });
 }
 
@@ -282,46 +298,106 @@ void CommandSource::initializeItems()
     const bool canUseTwitchCommands = isTwitchCommandTarget(this->channel_);
     const bool canUseKickCommands = isKickCommandTarget(this->channel_);
 
+    const auto filteredPlatforms =
+        [this](std::vector<MessagePlatform> platforms) {
+            if (this->platformFilter_.empty())
+            {
+                return platforms;
+            }
+
+            std::vector<MessagePlatform> filtered;
+            for (const auto selected : this->platformFilter_)
+            {
+                if (std::ranges::find(platforms, selected) != platforms.end())
+                {
+                    filtered.push_back(selected);
+                }
+            }
+            return filtered;
+        };
+
+    std::vector<MessagePlatform> customPlatforms = this->platformFilter_;
+    if (customPlatforms.empty())
+    {
+        if (canUseTwitchCommands)
+        {
+            customPlatforms.push_back(MessagePlatform::AnyOrTwitch);
+        }
+        if (canUseKickCommands)
+        {
+            customPlatforms.push_back(MessagePlatform::Kick);
+        }
+    }
+
 #ifdef CHATTERINO_HAVE_PLUGINS
     for (const auto &command : getApp()->getCommands()->pluginCommands())
     {
-        addCommand(command, commands);
+        addCommand(command, commands, customPlatforms);
     }
 #endif
 
-    // Custom Chatterino commands
+    // Custom Chatterino commands can be expanded for any selected platform.
     for (const auto &command : getApp()->getCommands()->items)
     {
-        addCommand(command.name, commands);
+        addCommand(command.name, commands, customPlatforms);
     }
 
-    // Default Chatterino commands
-    auto x = getApp()->getCommands()->getDefaultChatterinoCommandList();
-    for (const auto &command : x)
+    // Default Chatterino commands carry only the platforms where they work.
+    auto defaultCommands =
+        getApp()->getCommands()->getDefaultChatterinoCommandList();
+    for (const auto &command : defaultCommands)
     {
-        if (!shouldAddDefaultChatterinoCommand(command, canUseTwitchCommands,
-                                               canUseKickCommands))
+        // These execute entirely inside Mergerino. The selected send target
+        // neither changes their behavior nor limits where they can be used.
+        if (clientOnlyChatterinoCommands().contains(command,
+                                                    Qt::CaseInsensitive))
         {
+            addCommand(command, commands);
             continue;
         }
-        addCommand(command, commands);
+
+        std::vector<MessagePlatform> platforms;
+        if (canUseTwitchCommands &&
+            !kickOnlyChatterinoCommands().contains(command,
+                                                   Qt::CaseInsensitive))
+        {
+            appendPlatform(platforms, MessagePlatform::AnyOrTwitch);
+        }
+        if (canUseKickCommands &&
+            kickCompatibleChatterinoCommands().contains(
+                command, Qt::CaseInsensitive))
+        {
+            appendPlatform(platforms, MessagePlatform::Kick);
+        }
+        platforms = filteredPlatforms(std::move(platforms));
+        if (!platforms.empty())
+        {
+            addCommand(command, commands, std::move(platforms));
+        }
     }
 
-    // Default Twitch commands
     if (canUseTwitchCommands)
     {
         for (const auto &command : TWITCH_DEFAULT_COMMANDS)
         {
-            addCommand(command, commands);
+            auto platforms =
+                filteredPlatforms({MessagePlatform::AnyOrTwitch});
+            if (!platforms.empty())
+            {
+                addCommand(command, commands, std::move(platforms));
+            }
         }
     }
 
-    // Default Kick commands
     if (canUseKickCommands)
     {
         for (const auto &command : kickDefaultCommands())
         {
-            addCommand(command, commands);
+            auto platforms = filteredPlatforms({MessagePlatform::Kick});
+            if (!platforms.empty())
+            {
+                addCommand(command, commands, std::move(platforms));
+            }
         }
     }
 
@@ -339,10 +415,54 @@ void CommandSource::initializeItems()
                    commands.end());
 
     std::sort(commands.begin(), commands.end(), commandLessThan);
-    commands.erase(std::unique(commands.begin(), commands.end(), commandEquals),
-                   commands.end());
+    std::vector<CommandItem> merged;
+    merged.reserve(commands.size());
+    for (auto &command : commands)
+    {
+        if (!merged.empty() && commandEquals(merged.back(), command))
+        {
+            for (const auto platform : command.platforms)
+            {
+                appendPlatform(merged.back().platforms, platform);
+            }
+            continue;
+        }
+        merged.push_back(std::move(command));
+    }
 
-    this->items_ = std::move(commands);
+    if (!this->platformFilter_.empty())
+    {
+        for (auto &command : merged)
+        {
+            command.platforms =
+                filteredPlatforms(std::move(command.platforms));
+        }
+    }
+
+    if (this->platformFilter_.size() > 1 && this->platformCallback_)
+    {
+        std::vector<CommandItem> expanded;
+        expanded.reserve(merged.size() * 3);
+        for (const auto &command : merged)
+        {
+            // Expose one row per platform first, then keep the combined target
+            // last so the most specific actions are encountered first.
+            if (command.platforms.size() > 1)
+            {
+                for (const auto platform : command.platforms)
+                {
+                    auto singlePlatform = command;
+                    singlePlatform.platforms = {platform};
+                    expanded.push_back(std::move(singlePlatform));
+                }
+            }
+            expanded.push_back(command);
+        }
+        this->items_ = std::move(expanded);
+        return;
+    }
+
+    this->items_ = std::move(merged);
 }
 
 const std::vector<CommandItem> &CommandSource::output() const

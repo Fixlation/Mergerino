@@ -436,7 +436,7 @@ void SettingsDialog::addTabs()
                  {"interface", "chat", "messages", "emotes", "streamer mode", "link previews", "browser integration", "appdata", "cache", "sound", "advanced", "search"});
     this->ui_.tabContainer->addSpacing(16);
     this->addTab([]{return new AccountsPage;},         "Accounts",       ":/settings/accounts.svg", SettingsTabId::Accounts,
-                 {"twitch", "kick", "login", "account", "oauth"});
+                 {"twitch", "kick", "login", "account", "oauth", "7tv", "cosmetics", "paint", "badge", "emotes"});
     this->addTab([]{return new NicknamesPage;},        "Nicknames",      ":/settings/accounts.svg",
                  SettingsTabId::None, {"username", "nickname", "regex"});
     this->ui_.tabContainer->addSpacing(16);
@@ -456,7 +456,7 @@ void SettingsDialog::addTabs()
     this->addTab([]{return new NotificationPage;},     "Live Notifications",  ":/settings/notification2.svg",
                  SettingsTabId::None, {"notification", "live"});
     this->addTab([]{return new ExternalToolsPage;},    "External tools", ":/settings/externaltools.svg",
-                 SettingsTabId::None, {"external", "tools", "streamlink", "browser", "url", "links"});
+                 SettingsTabId::None, {"external", "tools", "streamlink", "browser", "url", "links", "obs", "overlay", "browser source", "stream", "font", "emotes", "badges", "transparent"});
 #ifdef CHATTERINO_HAVE_PLUGINS
     this->addTab([]{return new PluginsPage;},          "Plugins",        ":/settings/plugins.svg",
                  SettingsTabId::None, {"plugin"});

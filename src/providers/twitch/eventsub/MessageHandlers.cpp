@@ -36,6 +36,30 @@ void handleModerateMessage(
 }
 
 void handleModerateMessage(
+    TwitchChannel *chan, const QDateTime & /*time*/,
+    const lib::payload::channel_moderate::v2::Event & /*event*/,
+    const lib::payload::channel_moderate::v2::Delete &action)
+{
+    const auto messageID = action.messageID.qt();
+    runInGuiThread([chan, messageID] {
+        if (chan->disableMessage(messageID, MessageFlag::InvalidReplyTarget) ==
+            nullptr)
+        {
+            return;
+        }
+
+        if (getSettings()->hideModerated)
+        {
+            getApp()->getWindows()->forceLayoutChannelViews();
+        }
+        else
+        {
+            getApp()->getWindows()->repaintVisibleChatWidgets();
+        }
+    });
+}
+
+void handleModerateMessage(
     TwitchChannel *chan, const QDateTime &time,
     const lib::payload::channel_moderate::v2::Event &event,
     const lib::payload::channel_moderate::v2::Timeout &action)

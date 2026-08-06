@@ -100,6 +100,7 @@ public:
     void addHighlightsAtStart(
         const std::vector<ScrollbarHighlight> &highlights_);
     void replaceHighlight(size_t index, ScrollbarHighlight replacement);
+    void removeHighlight(size_t index);
 
     void clearHighlights();
 

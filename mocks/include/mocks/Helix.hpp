@@ -188,6 +188,33 @@ public:
                       failureCallback)),
                 (override));
 
+    MOCK_METHOD(
+        void, getPinnedChatMessage,
+        (QString broadcasterID, QString moderatorID,
+         ResultCallback<std::optional<HelixPinnedChatMessage>> successCallback,
+         FailureCallback<QString> failureCallback),
+        (override));
+
+    MOCK_METHOD(void, pinChatMessage,
+                (QString broadcasterID, QString moderatorID, QString messageID,
+                 std::optional<int> durationSeconds,
+                 ResultCallback<> successCallback,
+                 FailureCallback<QString> failureCallback),
+                (override));
+
+    MOCK_METHOD(void, updatePinnedChatMessage,
+                (QString broadcasterID, QString moderatorID, QString messageID,
+                 std::optional<int> durationSeconds,
+                 ResultCallback<> successCallback,
+                 FailureCallback<QString> failureCallback),
+                (override));
+
+    MOCK_METHOD(void, unpinChatMessage,
+                (QString broadcasterID, QString moderatorID, QString messageID,
+                 ResultCallback<> successCallback,
+                 FailureCallback<QString> failureCallback),
+                (override));
+
     // The extra parenthesis around the failure callback is because its type
     // contains a comma
     MOCK_METHOD(void, addChannelModerator,

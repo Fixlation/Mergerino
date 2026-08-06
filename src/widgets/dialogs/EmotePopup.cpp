@@ -291,6 +291,7 @@ namespace chatterino {
 
 EmotePopup::EmotePopup(QWidget *parent)
     : BasePopup({BaseWindow::EnableCustomFrame, BaseWindow::TopMost,
+                 BaseWindow::CloseButtonOnly,
                  BaseWindow::DisableLayoutSave},
                 parent)
     , search_(new QLineEdit())
@@ -301,6 +302,10 @@ EmotePopup::EmotePopup(QWidget *parent)
     if (bounds.size().isEmpty())
     {
         bounds.setSize(QSize{300, 500} * this->scale());
+    }
+    if (parent != nullptr)
+    {
+        bounds.moveCenter(parent->window()->frameGeometry().center());
     }
     this->setInitialBounds(bounds, widgets::BoundsChecking::DesiredPosition);
 

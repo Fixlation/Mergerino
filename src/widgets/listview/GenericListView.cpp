@@ -7,6 +7,7 @@
 #include "singletons/Theme.hpp"
 #include "widgets/listview/GenericListModel.hpp"
 
+#include <QCursor>
 #include <QKeyEvent>
 
 namespace chatterino {
@@ -21,7 +22,11 @@ GenericListView::GenericListView()
     QObject::connect(
         this, &QListView::clicked, this, [this](const QModelIndex &index) {
             auto *item = GenericListItem::fromVariant(index.data());
-            item->action();
+            const auto rowRect = this->visualRect(index);
+            const auto cursorPosition =
+                this->viewport()->mapFromGlobal(QCursor::pos());
+            item->actionAt(cursorPosition - rowRect.topLeft(),
+                           QRect(QPoint{}, rowRect.size()));
 
             this->requestClose();
         });

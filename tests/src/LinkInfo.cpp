@@ -5,6 +5,9 @@
 #include "providers/links/LinkInfo.hpp"
 
 #include "common/Literals.hpp"
+#include "messages/Message.hpp"
+#include "providers/links/LinkResolver.hpp"
+#include "providers/twitch/TwitchBadge.hpp"
 #include "SignalSpy.hpp"
 #include "Test.hpp"
 
@@ -102,4 +105,49 @@ TEST(LinkInfo, setters)
     ASSERT_EQ(info.thumbnail(), image);
 
     ASSERT_TRUE(spy.empty());
+}
+
+TEST(LinkResolver, SuppressesRecognizedTwitchAndKickBots)
+{
+    Message twitchBadgedBot;
+    twitchBadgedBot.platform = MessagePlatform::AnyOrTwitch;
+    twitchBadgedBot.twitchBadges.emplace_back("chatbot", "1");
+    EXPECT_TRUE(shouldSuppressLinkPreview(twitchBadgedBot));
+
+    Message kickBadgedBot;
+    kickBadgedBot.platform = MessagePlatform::Kick;
+    kickBadgedBot.externalBadges.append("kick:bot");
+    EXPECT_TRUE(shouldSuppressLinkPreview(kickBadgedBot));
+
+    Message knownKickBot;
+    knownKickBot.platform = MessagePlatform::Kick;
+    knownKickBot.loginName = "StreamElements";
+    EXPECT_TRUE(shouldSuppressLinkPreview(knownKickBot));
+}
+
+TEST(LinkResolver, KeepsOrdinaryAndOtherPlatformMessages)
+{
+    Message ordinaryTwitchMessage;
+    ordinaryTwitchMessage.platform = MessagePlatform::AnyOrTwitch;
+    ordinaryTwitchMessage.loginName = "some_viewer";
+    EXPECT_FALSE(shouldSuppressLinkPreview(ordinaryTwitchMessage));
+
+    Message otherPlatformMessage;
+    otherPlatformMessage.platform = MessagePlatform::YouTube;
+    otherPlatformMessage.loginName = "nightbot";
+    EXPECT_FALSE(shouldSuppressLinkPreview(otherPlatformMessage));
+}
+
+TEST(LinkResolver, RecognizesKickClipUrls)
+{
+    EXPECT_TRUE(isKickClipUrl(
+        u"https://kick.com/example/clips/clip_01JABC123XYZ"_s));
+    EXPECT_TRUE(isKickClipUrl(
+        u"https://www.kick.com/example/Clips/clip_01JABC123XYZ?foo=bar"_s));
+
+    EXPECT_FALSE(isKickClipUrl(u"https://kick.com/example/clips"_s));
+    EXPECT_FALSE(isKickClipUrl(
+        u"https://kick.com/example/clips/not-a-clip"_s));
+    EXPECT_FALSE(isKickClipUrl(
+        u"https://notkick.com/example/clips/clip_01JABC123XYZ"_s));
 }

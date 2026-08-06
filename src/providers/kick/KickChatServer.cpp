@@ -20,6 +20,7 @@
 
 #include <QPointer>
 
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -212,11 +213,15 @@ bool KickChatServer::onAppEvent(uint64_t roomID, uint64_t channelID,
         "KicksGifted", &KickChatServer::onKicksGiftedEvent,               //
         "StreamHostEvent", &KickChatServer::onStreamHostEvent,            //
         "ChatroomUpdatedEvent", &KickChatServer::onChatroomUpdatedEvent,  //
+        "ChatSettingsChanged", &KickChatServer::onChatroomUpdatedEvent,   //
+        "PredictionCreated", &KickChatServer::onPredictionEvent,          //
+        "PredictionUpdated", &KickChatServer::onPredictionEvent,          //
+        "PollUpdateEvent", &KickChatServer::onPollUpdateEvent,            //
+        "PollDeleteEvent", &KickChatServer::onPollDeleteEvent,            //
 
         // ignored
         "KicksLeaderboardUpdated", &KickChatServer::onKnownIgnoredMessage,  //
         "GiftsLeaderboardUpdated", &KickChatServer::onKnownIgnoredMessage,  //
-        "PredictionUpdated", &KickChatServer::onKnownIgnoredMessage,        //
         // old sub events
         "ChannelSubscriptionEvent", &KickChatServer::onKnownIgnoredMessage,  //
         "LuckyUsersWhoGotGiftSubscriptionsEvent",
@@ -419,14 +424,40 @@ void KickChatServer::onChatroomClear(KickChannel *channel,
 void KickChatServer::onPinnedMessageCreatedEvent(KickChannel *channel,
                                                  BoostJsonObject data)
 {
-    channel->addMessage(KickMessageBuilder::makePinnedMessage(channel, data),
-                        MessageContext::Original);
+    const auto message = data["message"].toObject();
+    const auto sender = message["sender"].toObject();
+    const auto now = QDateTime::currentDateTimeUtc();
+
+    PinnedChatMessage pinned;
+    pinned.platform = PinnedChatMessage::Platform::Kick;
+    pinned.messageID = message["id"].toQString();
+    pinned.messageText = message["content"].toQString(
+        message["text"].toQString()).simplified();
+    pinned.senderUserID = QString::number(sender["id"].toUint64());
+    pinned.senderLogin = sender["slug"].toQString(
+        sender["username"].toQString().toLower());
+    pinned.senderDisplayName = sender["username"].toQString();
+    pinned.pinnedByDisplayName =
+        data["pinnedBy"]["username"].toQString();
+    pinned.startsAt = now;
+
+    bool durationOk = false;
+    auto duration = data["duration"].toQString().toInt(&durationOk);
+    if (!durationOk)
+    {
+        duration = static_cast<int>(data["duration"].toInt64());
+    }
+    if (duration > 0)
+    {
+        pinned.endsAt = now.addSecs(duration);
+    }
+    channel->setPinnedMessage(std::move(pinned));
 }
 
 void KickChatServer::onPinnedMessageDeletedEvent(KickChannel *channel,
                                                  BoostJsonObject /*data*/)
 {
-    channel->addSystemMessage(u"The pinned message was unpinned."_s);
+    channel->setPinnedMessage(std::nullopt);
 }
 
 void KickChatServer::onStreamHostEvent(KickChannel *channel,
@@ -482,21 +513,57 @@ void KickChatServer::onKicksGiftedEvent(KickChannel *channel,
 void KickChatServer::onChatroomUpdatedEvent(KickChannel *channel,
                                             BoostJsonObject data)
 {
+    auto settings = data;
+    if (data["settings"].isObject())
+    {
+        settings = data["settings"].toObject();
+    }
+
+    auto subscribersMode = settings["subscribers_only_mode"].toObject();
+    if (subscribersMode.empty())
+    {
+        subscribersMode = settings["subscribers_mode"].toObject();
+    }
+    auto emotesMode = settings["emotes_only_mode"].toObject();
+    if (emotesMode.empty())
+    {
+        emotesMode = settings["emotes_mode"].toObject();
+    }
+
     KickChannel::RoomModes newMode{
-        .subscribersMode = data["subscribers_mode"]["enabled"].toBool(),
-        .emotesMode = data["emotes_mode"]["enabled"].toBool(),
+        .subscribersMode = subscribersMode["enabled"].toBool(),
+        .emotesMode = emotesMode["enabled"].toBool(),
     };
-    auto slowMode = data["slow_mode"].toObject();
+    auto slowMode = settings["slow_mode"].toObject();
     if (slowMode["enabled"].toBool())
     {
-        newMode.slowModeDuration =
-            std::chrono::seconds{slowMode["message_interval"].toInt64()};
+        auto duration = slowMode["duration_seconds"].toInt64();
+        if (duration == 0)
+        {
+            duration = slowMode["message_interval"].toInt64();
+        }
+        newMode.slowModeDuration = std::chrono::seconds{duration};
     }
-    auto followersMode = data["followers_mode"].toObject();
+    auto followersMode = settings["followers_only_mode"].toObject();
+    const bool currentSettings = !followersMode.empty();
+    if (!currentSettings)
+    {
+        followersMode = settings["followers_mode"].toObject();
+    }
     if (followersMode["enabled"].toBool())
     {
-        newMode.followersModeDuration =
-            std::chrono::minutes{followersMode["min_duration"].toInt64()};
+        if (currentSettings)
+        {
+            newMode.followersModeDuration =
+                std::chrono::duration_cast<std::chrono::minutes>(
+                    std::chrono::seconds{
+                        followersMode["duration_seconds"].toInt64()});
+        }
+        else
+        {
+            newMode.followersModeDuration = std::chrono::minutes{
+                followersMode["min_duration"].toInt64()};
+        }
     }
 
     const auto &oldMode = channel->roomModes();
@@ -533,6 +600,185 @@ void KickChatServer::onChatroomUpdatedEvent(KickChannel *channel,
     }
 
     channel->updateRoomModes(newMode);
+}
+
+void KickChatServer::onPredictionEvent(KickChannel *channel,
+                                             BoostJsonObject data)
+{
+    auto rawPrediction = data["prediction"].toObject();
+    if (rawPrediction.empty())
+    {
+        rawPrediction = data;
+    }
+
+    const auto readID = [](BoostJsonValue value) {
+        auto id = value.toQString().trimmed();
+        if (!id.isEmpty())
+        {
+            return id;
+        }
+
+        const auto numericID = value.toUint64();
+        return numericID == 0 ? QString{} : QString::number(numericID);
+    };
+    const auto readDateTime = [](BoostJsonValue value) {
+        const auto parsed =
+            QDateTime::fromString(value.toQString().trimmed(), Qt::ISODate);
+        return parsed.isValid() ? parsed.toUTC() : QDateTime{};
+    };
+
+    KickPrediction prediction;
+    prediction.id = readID(rawPrediction["id"]);
+    prediction.title = rawPrediction["title"].toQString().trimmed();
+    prediction.state = rawPrediction["state"].toQString().trimmed().toUpper();
+    prediction.durationSeconds =
+        static_cast<int>(rawPrediction["duration"].toInt64());
+    if (prediction.durationSeconds <= 0)
+    {
+        prediction.durationSeconds =
+            static_cast<int>(rawPrediction["duration_seconds"].toInt64());
+    }
+    prediction.createdAt = readDateTime(rawPrediction["created_at"]);
+    prediction.updatedAt = readDateTime(rawPrediction["updated_at"]);
+    prediction.lockedAt = readDateTime(rawPrediction["locked_at"]);
+    prediction.winningOutcomeID =
+        readID(rawPrediction["winning_outcome_id"]);
+
+    for (const auto rawOutcome : rawPrediction["outcomes"].toArray())
+    {
+        const auto outcome = rawOutcome.toObject();
+        const auto title = outcome["title"].toQString().trimmed();
+        if (title.isEmpty())
+        {
+            continue;
+        }
+
+        prediction.outcomes.push_back({
+            .id = readID(outcome["id"]),
+            .title = title,
+            .totalVoteAmount =
+                static_cast<int>(outcome["total_vote_amount"].toInt64()),
+            .voteCount = static_cast<int>(outcome["vote_count"].toInt64()),
+        });
+    }
+
+    if (prediction.state.isEmpty())
+    {
+        return;
+    }
+    if (prediction.isOpen() &&
+        (prediction.title.isEmpty() || prediction.outcomes.empty()))
+    {
+        qCWarning(chatterinoKick)
+            << "Ignored incomplete Kick prediction event for"
+            << channel->getName();
+        return;
+    }
+
+    channel->updatePrediction(std::move(prediction));
+}
+
+void KickChatServer::onPollUpdateEvent(KickChannel *channel,
+                                           BoostJsonObject data)
+{
+    auto rawPoll = data["poll"].toObject();
+    if (rawPoll.empty())
+    {
+        rawPoll = data;
+    }
+
+    const auto readID = [](BoostJsonValue value) {
+        auto id = value.toQString().trimmed();
+        if (!id.isEmpty())
+        {
+            return id;
+        }
+
+        const auto numericID = value.toUint64();
+        return numericID == 0 ? QString{} : QString::number(numericID);
+    };
+
+    KickPoll poll;
+    poll.id = readID(rawPoll["id"]);
+    poll.title = rawPoll["title"].toQString().trimmed();
+    if (poll.title.isEmpty())
+    {
+        poll.title = rawPoll["subject"].toQString().trimmed();
+    }
+    if (poll.title.isEmpty())
+    {
+        poll.title = rawPoll["question"].toQString().trimmed();
+    }
+
+    for (const auto rawOption : rawPoll["options"].toArray())
+    {
+        const auto option = rawOption.toObject();
+        auto title = option["title"].toQString().trimmed();
+        if (title.isEmpty())
+        {
+            title = option["name"].toQString().trimmed();
+        }
+        if (title.isEmpty())
+        {
+            title = rawOption.toQString().trimmed();
+        }
+        if (title.isEmpty())
+        {
+            continue;
+        }
+
+        auto votes = static_cast<int>(option["votes"].toInt64());
+        if (votes == 0)
+        {
+            votes = static_cast<int>(option["votes_count"].toInt64());
+        }
+        if (votes == 0)
+        {
+            votes = static_cast<int>(option["vote_count"].toInt64());
+        }
+        poll.options.push_back({
+            .id = readID(option["id"]),
+            .title = title,
+            .votes = std::max(votes, 0),
+        });
+    }
+
+    if (poll.title.isEmpty() || poll.options.size() < 2)
+    {
+        qCWarning(chatterinoKick)
+            << "Ignored incomplete Kick poll event for" << channel->getName();
+        return;
+    }
+
+    auto remaining = rawPoll.contains("remaining")
+                         ? static_cast<int>(rawPoll["remaining"].toInt64())
+                         : static_cast<int>(rawPoll["duration"].toInt64());
+    auto resultDisplayDuration =
+        static_cast<int>(rawPoll["result_display_duration"].toInt64());
+    if (resultDisplayDuration <= 0)
+    {
+        resultDisplayDuration = 15;
+    }
+
+    const auto now = QDateTime::currentDateTimeUtc();
+    poll.state = remaining > 0 ? QStringLiteral("ACTIVE")
+                               : QStringLiteral("RESULTS");
+    poll.createdAt =
+        QDateTime::fromString(rawPoll["created_at"].toQString(), Qt::ISODate)
+            .toUTC();
+    if (!poll.createdAt.isValid())
+    {
+        poll.createdAt = now;
+    }
+    poll.endsAt = now.addSecs(std::max(remaining, 0));
+    poll.hideAt = poll.endsAt.addSecs(resultDisplayDuration);
+    channel->updatePoll(std::move(poll));
+}
+
+void KickChatServer::onPollDeleteEvent(KickChannel *channel,
+                                           BoostJsonObject /*data*/)
+{
+    channel->updatePoll(std::nullopt);
 }
 
 void KickChatServer::onKnownIgnoredMessage(KickChannel * /*channel*/,

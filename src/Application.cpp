@@ -65,6 +65,9 @@
 #include "singletons/WindowManager.hpp"
 #include "util/Helpers.hpp"
 #include "util/ChatterinoImport.hpp"
+#ifdef MERGERINO_ENABLE_EXTENSION_BRIDGE
+#include "util/MergerinoExtensionBridge.hpp"
+#endif
 #include "util/ObsBrowserDockServer.hpp"
 #include "util/PostToThread.hpp"
 #include "util/WidgetHelpers.hpp"
@@ -82,10 +85,12 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWindow>
@@ -136,6 +141,8 @@ void activateWindowAfterImport(Window &window)
     }
 }
 
+void appStartupTrace(const QString &message);
+
 bool stageChatterinoImportAndRestart(QWidget *parent, bool autorun)
 {
     const auto reply = QMessageBox::question(
@@ -161,6 +168,10 @@ bool stageChatterinoImportAndRestart(QWidget *parent, bool autorun)
         settings->platformEventHighlightStyle.getValue();
     options.platformEventHighlightCustomColor =
         settings->platformEventHighlightCustomColor.getValue();
+    options.platformAlertHighlightStyle =
+        platformAlertHighlightStyleSetting().getValue();
+    options.platformAlertHighlightCustomColor =
+        platformAlertHighlightCustomColorSetting().getValue();
 
     auto stage =
         chatterino_import::stageImportFromDefaultSource(getApp()->getPaths(),
@@ -193,19 +204,23 @@ bool stageChatterinoImportAndRestart(QWidget *parent, bool autorun)
 
 bool maybePromptForStartup(QWidget *parent)
 {
+    appStartupTrace(QStringLiteral("maybePromptForStartup start"));
     auto *settings = getSettings();
     if (settings->startupPromptAcknowledged)
     {
+        appStartupTrace(QStringLiteral("maybePromptForStartup acknowledged"));
         return false;
     }
 
     if (settings->autorun)
     {
+        appStartupTrace(QStringLiteral("maybePromptForStartup autorun"));
         settings->startupPromptAcknowledged = true;
         settings->requestSave();
         return false;
     }
 
+    appStartupTrace(QStringLiteral("maybePromptForStartup before dialog"));
     QDialog dialog(parent);
     dialog.setWindowTitle("Mergerino quick setup");
     dialog.setModal(true);
@@ -234,6 +249,7 @@ bool maybePromptForStartup(QWidget *parent)
     bool restartStarted = false;
     if (chatterino_import::defaultSourceSettingsDirectoryExists())
     {
+        appStartupTrace(QStringLiteral("maybePromptForStartup found Chatterino source"));
         auto *importBox = new QHBoxLayout;
         auto *importText = new QLabel(
             "Found Chatterino settings. Import settings, ping alerts, "
@@ -273,11 +289,14 @@ bool maybePromptForStartup(QWidget *parent)
         dialog.reject();
     });
 
+    appStartupTrace(QStringLiteral("maybePromptForStartup before exec"));
     if (dialog.exec() == QDialog::Rejected && !restartStarted)
     {
+        appStartupTrace(QStringLiteral("maybePromptForStartup rejected"));
         settings->startupPromptAcknowledged = true;
         settings->requestSave();
     }
+    appStartupTrace(QStringLiteral("maybePromptForStartup after exec"));
 
     return restartStarted;
 }
@@ -347,6 +366,18 @@ eventsub::IController *makeEventSubController(Settings &settings)
 
 const QString TWITCH_PUBSUB_URL = "wss://pubsub-edge.twitch.tv";
 
+void appStartupTrace(const QString &message)
+{
+    QFile file(QStringLiteral("mergerino-layout-trace.txt"));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    {
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream << message << '\n';
+}
+
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 IApplication *INSTANCE = nullptr;
 
@@ -411,6 +442,9 @@ Application::Application(Settings &_settings, const Paths &paths,
     , twitchUsers(new TwitchUsers)
     , spellChecker(new SpellChecker)
     , kickChatServer(new KickChatServer)
+#ifdef MERGERINO_ENABLE_EXTENSION_BRIDGE
+    , mergerinoExtensionBridge(new MergerinoExtensionBridge)
+#endif
     , obsBrowserDockServer(new ObsBrowserDockServer)
 #ifdef CHATTERINO_HAVE_PLUGINS
     , plugins(new PluginController(paths))
@@ -429,6 +463,7 @@ Application::~Application()
 void Application::initialize(Settings &settings, const Paths &paths)
 {
     assert(!this->initialized);
+    appStartupTrace(QStringLiteral("Application::initialize start"));
 
     if (!this->args_.isFramelessEmbed)
     {
@@ -462,31 +497,49 @@ void Application::initialize(Settings &settings, const Paths &paths)
         }
         settings.currentVersion.setValue(CHATTERINO_VERSION);
     }
+    appStartupTrace(QStringLiteral("Application before emotes initialize"));
     this->emotes->initialize();
+    appStartupTrace(QStringLiteral("Application after emotes initialize"));
 
+    appStartupTrace(QStringLiteral("Application before accounts load"));
     this->accounts->load();
+    appStartupTrace(QStringLiteral("Application after accounts load"));
 
+    appStartupTrace(QStringLiteral("Application before windows initialize"));
     this->windows->initialize();
+    appStartupTrace(QStringLiteral("Application after windows initialize"));
 
+    appStartupTrace(QStringLiteral("Application before ffzBadges load"));
     this->ffzBadges->load();
+    appStartupTrace(QStringLiteral("Application after ffzBadges load"));
 
     // Load global emotes
+    appStartupTrace(QStringLiteral("Application before global emotes"));
     this->bttvEmotes->loadEmotes();
     this->ffzEmotes->loadEmotes();
     this->seventvEmotes->loadGlobalEmotes();
+    appStartupTrace(QStringLiteral("Application after global emotes"));
 
+    appStartupTrace(QStringLiteral("Application before chat servers initialize"));
     this->twitch->initialize();
     this->kickChatServer->initialize();
+    appStartupTrace(QStringLiteral("Application after chat servers initialize"));
 
     // Load live status
+    appStartupTrace(QStringLiteral("Application before notifications initialize"));
     this->notifications->initialize();
+    appStartupTrace(QStringLiteral("Application after notifications initialize"));
 
     // XXX: Loading Twitch badges after Helix has been initialized, which only happens after
     // the AccountController initialize has been called
+    appStartupTrace(QStringLiteral("Application before twitchBadges load"));
     this->twitchBadges->loadTwitchBadges();
+    appStartupTrace(QStringLiteral("Application after twitchBadges load"));
 
 #ifdef CHATTERINO_HAVE_PLUGINS
+    appStartupTrace(QStringLiteral("Application before plugins initialize"));
     this->plugins->initialize(settings);
+    appStartupTrace(QStringLiteral("Application after plugins initialize"));
 #endif
 
     // Show crash message.
@@ -516,25 +569,37 @@ void Application::initialize(Settings &settings, const Paths &paths)
 
     if (!this->args_.isFramelessEmbed)
     {
+        appStartupTrace(QStringLiteral("Application before initNm"));
         this->initNm(paths);
+        appStartupTrace(QStringLiteral("Application after initNm"));
     }
 
+    appStartupTrace(QStringLiteral("Application before initEventAPIs"));
     this->twitch->initEventAPIs(this->bttvLiveUpdates.get(),
                                 this->seventvEventAPI.get());
+    appStartupTrace(QStringLiteral("Application after initEventAPIs"));
 
+    appStartupTrace(QStringLiteral("Application before streamerMode start"));
     this->streamerMode->start();
+    appStartupTrace(QStringLiteral("Application after streamerMode start"));
 
     this->initialized = true;
+    appStartupTrace(QStringLiteral("Application::initialize end"));
 }
 
 int Application::run()
 {
     assert(this->initialized);
+    appStartupTrace(QStringLiteral("Application::run start"));
 
     if (!this->args_.isFramelessEmbed)
     {
+        appStartupTrace(QStringLiteral("Application::run before mainWindow"));
         auto &mainWindow = this->windows->getMainWindow();
+        appStartupTrace(QStringLiteral("Application::run after mainWindow"));
+        appStartupTrace(QStringLiteral("Application::run before mainWindow.show"));
         mainWindow.show();
+        appStartupTrace(QStringLiteral("Application::run after mainWindow.show"));
 
 #ifdef USEWINSDK
         if (this->args_.activateAfterImport)
@@ -559,13 +624,6 @@ int Application::run()
             settings->requestSave();
         };
 
-        const auto markStreamDatabaseIntroShown = [] {
-            auto *settings = getSettings();
-            settings->streamDatabaseIntroShown = true;
-            settings->streamDatabaseIntroShownVersion = CHATTERINO_VERSION;
-            settings->requestSave();
-        };
-
         const auto showPostUpdateDialog = [&mainWindow, markPostUpdateShown] {
             markPostUpdateShown();
 
@@ -581,81 +639,76 @@ int Application::run()
             dialog->activateWindow();
         };
 
-        const auto showStreamDatabaseUpdateDialog =
-            [&mainWindow, markStreamDatabaseIntroShown, showPostUpdateDialog](
-                bool continueToPatchNotes) {
-                auto *dialog = new StreamDatabaseUpdateDialog(
-                    &mainWindow,
-                    continueToPatchNotes ? showPostUpdateDialog
-                                         : std::function<void()>{});
-                QObject::connect(dialog, &QObject::destroyed, &mainWindow,
-                                 [markStreamDatabaseIntroShown] {
-                                     markStreamDatabaseIntroShown();
-                                 });
-
-                const auto position = mainWindow.mapToGlobal(QPoint{
-                    (mainWindow.width() - dialog->width()) / 2,
-                    48,
-                });
-                widgets::showAndMoveWindowTo(
-                    dialog, position, widgets::BoundsChecking::DesiredPosition);
-                dialog->raise();
-                dialog->activateWindow();
-            };
-
         const auto showStartupDialogs = [this, &mainWindow,
-                                         showStreamDatabaseUpdateDialog,
                                          showPostUpdateDialog] {
+            appStartupTrace(QStringLiteral("showStartupDialogs start"));
 #ifdef USEWINSDK
+            appStartupTrace(QStringLiteral("showStartupDialogs before maybePromptForStartup"));
             if (maybePromptForStartup(&mainWindow))
             {
+                appStartupTrace(QStringLiteral("showStartupDialogs startup prompt restarted"));
                 return;
             }
+            appStartupTrace(QStringLiteral("showStartupDialogs after maybePromptForStartup"));
 #endif
 
-            const bool showStreamDatabaseIntro =
-                CHATTERINO_VERSION == QStringLiteral("1.3.2") &&
-                getSettings()->streamDatabaseIntroShownVersion.getValue() !=
-                    CHATTERINO_VERSION;
             const bool showPostUpdate =
                 !this->previousVersionForPatchNotes_.isEmpty();
+            appStartupTrace(
+                QStringLiteral("showStartupDialogs postUpdate=%1")
+                    .arg(showPostUpdate ? 1 : 0));
 
-            if (showStreamDatabaseIntro)
+            if (showPostUpdate)
             {
-                showStreamDatabaseUpdateDialog(true);
-            }
-            else if (showPostUpdate)
-            {
+                appStartupTrace(QStringLiteral("showStartupDialogs before post update dialog"));
                 showPostUpdateDialog();
+                appStartupTrace(QStringLiteral("showStartupDialogs after post update dialog"));
             }
+            appStartupTrace(QStringLiteral("showStartupDialogs end"));
         };
 
         QTimer::singleShot(0, &mainWindow, showStartupDialogs);
+        appStartupTrace(QStringLiteral("Application::run after startup dialog timer"));
         QTimer::singleShot(3000, &mainWindow, [] {
             getApp()->getUpdates().checkForUpdates();
         });
+        appStartupTrace(QStringLiteral("Application::run after updates timer"));
     }
 
+    appStartupTrace(QStringLiteral("Application::run before BTTV connect"));
     getSettings()->enableBTTVChannelEmotes.connect(
         [this] {
             this->twitch->reloadAllBTTVChannelEmotes();
         },
+        this->settingConnections_,
         false);
+    appStartupTrace(QStringLiteral("Application::run after BTTV connect"));
+    appStartupTrace(QStringLiteral("Application::run before FFZ connect"));
     getSettings()->enableFFZChannelEmotes.connect(
         [this] {
             this->twitch->reloadAllFFZChannelEmotes();
         },
+        this->settingConnections_,
         false);
+    appStartupTrace(QStringLiteral("Application::run after FFZ connect"));
+    appStartupTrace(QStringLiteral("Application::run before SevenTV connect"));
     getSettings()->enableSevenTVChannelEmotes.connect(
         [this] {
             this->twitch->reloadAllSevenTVChannelEmotes();
         },
+        this->settingConnections_,
         false);
+    appStartupTrace(QStringLiteral("Application::run after SevenTV connect"));
 
+    appStartupTrace(QStringLiteral("Application::run before twitch connect timer"));
     QTimer::singleShot(0, [this] {
+        appStartupTrace(QStringLiteral("Application::run twitch connect timer start"));
         this->twitch->connect();
+        appStartupTrace(QStringLiteral("Application::run twitch connect timer end"));
     });
+    appStartupTrace(QStringLiteral("Application::run after twitch connect timer"));
 
+    appStartupTrace(QStringLiteral("Application::run before QApplication::exec"));
     return QApplication::exec();
 }
 
@@ -1002,6 +1055,9 @@ void Application::stop()
     this->seventvAPI.reset();
     this->imageUploader.reset();
     this->toasts.reset();
+#ifdef MERGERINO_ENABLE_EXTENSION_BRIDGE
+    this->mergerinoExtensionBridge.reset();
+#endif
     this->windows.reset();
     this->hotkeys.reset();
     this->eventSub.reset();

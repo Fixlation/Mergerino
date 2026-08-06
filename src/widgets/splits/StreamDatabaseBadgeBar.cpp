@@ -3657,7 +3657,7 @@ void StreamDatabaseBadgeBar::drawRequirementText(
     {
         QTextCharFormat format;
         format.setForeground(linkColor);
-        format.setFontUnderline(true);
+        format.setFontUnderline(false);
 
         QTextLayout::FormatRange formatRange;
         formatRange.start = range.start;

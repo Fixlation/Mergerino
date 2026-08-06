@@ -225,6 +225,88 @@ private:
     QSvgRenderer icon_;
 };
 
+class UpdateTitlebarButton final : public Button
+{
+public:
+    UpdateTitlebarButton()
+    {
+        this->setScaleIndependentHeight(30);
+        this->loadIcon();
+    }
+
+    void setText(const QString &text)
+    {
+        if (this->text_ == text)
+        {
+            return;
+        }
+
+        this->text_ = text;
+        this->refreshWidth();
+        this->invalidateContent();
+    }
+
+protected:
+    void paintContent(QPainter &painter) override
+    {
+        const auto scale = this->scale();
+        const int iconSize = int(16 * scale);
+        const int leftPadding = int(4 * scale);
+        const int gap = int(4 * scale);
+        const int rightPadding = int(7 * scale);
+        const int textX = leftPadding + iconSize + gap;
+
+        const QRectF iconRect{
+            QPointF(leftPadding, (this->height() - iconSize) / 2.0),
+            QSizeF(iconSize, iconSize),
+        };
+        this->icon_.render(&painter, iconRect);
+
+        painter.setPen(this->theme->window.text);
+        painter.drawText(
+            QRect{textX, 0, this->width() - textX - rightPadding,
+                  this->height()},
+            Qt::AlignVCenter | Qt::AlignLeft, this->text_);
+    }
+
+    void scaleChangedEvent(float scale) override
+    {
+        Button::scaleChangedEvent(scale);
+        this->refreshWidth();
+        this->invalidateContent();
+    }
+
+    void themeChangedEvent() override
+    {
+        Button::themeChangedEvent();
+        this->loadIcon();
+        this->invalidateContent();
+    }
+
+private:
+    void loadIcon()
+    {
+        this->icon_.load(
+            this->theme->isLightTheme()
+                ? QStringLiteral(
+                      ":/buttons/updateAvailableNeutral-lightMode.svg")
+                : QStringLiteral(
+                      ":/buttons/updateAvailableNeutral-darkMode.svg"));
+    }
+
+    void refreshWidth()
+    {
+        const QFontMetrics metrics(this->font());
+        const int fixedContentWidth = int(31 * this->scale());
+        this->setScaleIndependentWidth(0);
+        this->setFixedWidth(fixedContentWidth +
+                            metrics.horizontalAdvance(this->text_));
+    }
+
+    QString text_;
+    QSvgRenderer icon_;
+};
+
 Window::Window(WindowType type, QWidget *parent)
     : BaseWindow(
           {BaseWindow::EnableCustomFrame, BaseWindow::ClearBuffersOnDpiChange},
@@ -471,16 +553,11 @@ void Window::addCustomTitlebarButtons()
     // Update initial state
     this->updateStreamerModeIcon();
 
-    this->updateTitlebarButton_ = this->addTitleBarTitleButton<SvgButton>(
-        [this] {
+    this->updateTitlebarButton_ =
+        this->addTitleBarTitleButton<UpdateTitlebarButton>([this] {
             this->showUpdateDialog();
-        },
-        SvgButton::Src{
-            .dark = ":/buttons/updateAvailableNeutral-darkMode.svg",
-            .light = ":/buttons/updateAvailableNeutral-lightMode.svg",
         });
-    this->updateTitlebarButton_->setPadding(QSize{0, 3});
-    this->updateTitlebarButton_->setScaleIndependentSize(24, 30);
+    this->updateTitlebarButton_->setText(QStringLiteral("Update available"));
     this->signalHolder_.managedConnect(getApp()->getUpdates().statusUpdated,
                                        [this](auto) {
                                            this->updateTitlebarUpdateButton();

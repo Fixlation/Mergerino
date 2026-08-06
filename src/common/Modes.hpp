@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <QString>
+
 namespace chatterino {
 
 class Modes
@@ -20,6 +22,10 @@ public:
     /// The externally packaged mode comes with the following changes:
     ///  - No shortcuts are created by default
     bool isExternallyPackaged{};
+
+    /// Optional application data root, resolved relative to the executable
+    /// directory when the value is not absolute.
+    QString dataRoot;
 };
 
 }  // namespace chatterino

@@ -17,6 +17,26 @@ public:
     QMarginsF padding(float scale) const;
     void apply(QPixmapDropShadowFilter &effect) const;
 
+    float xOffset() const
+    {
+        return this->xOffset_;
+    }
+
+    float yOffset() const
+    {
+        return this->yOffset_;
+    }
+
+    float radius() const
+    {
+        return this->radius_;
+    }
+
+    const QColor &color() const
+    {
+        return this->color_;
+    }
+
 private:
     const float xOffset_;
     const float yOffset_;

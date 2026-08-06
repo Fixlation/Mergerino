@@ -6,6 +6,8 @@
 
 #include "messages/Image.hpp"
 
+#include <QColor>
+
 namespace chatterino {
 
 /// @brief Rich info about a URL with tooltip and thumbnail
@@ -79,6 +81,14 @@ public:
     /// Returns true if this link has a thumbnail
     [[nodiscard]] bool hasThumbnail() const;
 
+    /// Returns true if this link has enough metadata for an inline chat card
+    [[nodiscard]] bool hasPreview() const;
+
+    [[nodiscard]] QString previewTitle() const;
+    [[nodiscard]] QString previewSubtitle() const;
+    [[nodiscard]] QString previewSiteName() const;
+    [[nodiscard]] QColor previewAccentColor() const;
+
     /// @brief Returns the tooltip of this link
     ///
     /// The tooltip contains the URL of the link and any info added by the
@@ -119,6 +129,12 @@ public:
     /// @pre The caller must be in the GUI thread.
     /// @see #hasThumbnail(), #thumbnail()
     void setThumbnail(ImagePtr thumbnail);
+
+    /// @brief Updates the metadata used by the inline chat card
+    ///
+    /// @pre The caller must be in the GUI thread.
+    void setPreview(QString title, QString subtitle, QString siteName,
+                    QColor accentColor);
 
 Q_SIGNALS:
     /// @brief Emitted when this link's state changes

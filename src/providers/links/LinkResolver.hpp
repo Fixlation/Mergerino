@@ -4,9 +4,16 @@
 
 #pragma once
 
+#include <QString>
+
 namespace chatterino {
 
 class LinkInfo;
+struct Message;
+
+[[nodiscard]] bool shouldShowLinkPreview(const QString &url);
+[[nodiscard]] bool shouldSuppressLinkPreview(const Message &message);
+[[nodiscard]] bool isKickClipUrl(const QString &url);
 
 class ILinkResolver
 {

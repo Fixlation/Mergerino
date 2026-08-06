@@ -16,6 +16,7 @@ class PixmapButton;
 class LabelButton;
 class SvgButton;
 class AccountTitlebarButton;
+class UpdateTitlebarButton;
 class Theme;
 class UpdateDialog;
 class SplitNotebook;
@@ -60,7 +61,7 @@ private:
     SvgButton *topMostTitlebarButton_ = nullptr;
     AccountTitlebarButton *accountTitlebarButton_ = nullptr;
     std::shared_ptr<UpdateDialog> updateDialogHandle_;
-    SvgButton *updateTitlebarButton_ = nullptr;
+    UpdateTitlebarButton *updateTitlebarButton_ = nullptr;
 
     pajlada::Signals::SignalHolder signalHolder_;
     std::vector<boost::signals2::scoped_connection> bSignals_;

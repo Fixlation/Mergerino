@@ -111,6 +111,12 @@ std::shared_ptr<QColor> platformAlertHighlightColor(
     const Message &message, PlatformIndicatorMode platformIndicatorMode,
     bool useActivityPlatformHighlightColors)
 {
+    const auto style = platformAlertHighlightStyleSetting().getEnum();
+    if (style == PlatformEventHighlightStyle::None)
+    {
+        return {};
+    }
+
     if (useActivityPlatformHighlightColors)
     {
         if (!mergedPlatformIndicatorShowsLineColor(platformIndicatorMode))
@@ -121,15 +127,9 @@ std::shared_ptr<QColor> platformAlertHighlightColor(
         return std::make_shared<QColor>(activityPlatformHighlightColor(message));
     }
 
-    const auto style = getSettings()->platformEventHighlightStyle.getEnum();
-    if (style == PlatformEventHighlightStyle::None)
-    {
-        return {};
-    }
-
     if (style == PlatformEventHighlightStyle::CustomColor)
     {
-        QColor custom(getSettings()->platformEventHighlightCustomColor);
+        QColor custom(platformAlertHighlightCustomColorSetting());
         if (custom.isValid())
         {
             return std::make_shared<QColor>(custom);
@@ -329,6 +329,7 @@ std::shared_ptr<Message> Message::clone() const
     cloned->count = this->count;
     cloned->reward = this->reward;
     cloned->platform = this->platform;
+    cloned->kickMessageJson = this->kickMessageJson;
     cloned->bits = this->bits;
     cloned->giftedSubscriptionRecipientCount =
         this->giftedSubscriptionRecipientCount;
