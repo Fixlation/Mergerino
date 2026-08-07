@@ -75,6 +75,8 @@ jobs:
             const body = [
               `Mergerino ${releaseVersion}`,
               '',
+              `Build commit: \`${headSha}\``,
+              '',
               'Rolling release for the latest successful `main` build.',
               '',
               'This release is replaced automatically on every successful push to `main`.',

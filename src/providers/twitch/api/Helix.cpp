@@ -4157,6 +4157,8 @@ constexpr auto CREATE_POLL_HASH =
     "4b1461a13fe166a59044961db192747d606f71a89abc3bfdecf79fe862d205cf";
 constexpr auto CREATE_PREDICTION_HASH =
     "92268878ac4abe722bcdcba85a4e43acdd7a99d86b05851759e1d8f385cc32ea";
+constexpr auto MAKE_PREDICTION_HASH =
+    "b44682ecc88358817009f20e69d75081b1e58825bb40aa53d5dbadcc17c881d8";
 constexpr int TWITCH_WEB_GQL_TIMEOUT_MS = 15 * 1000;
 constexpr int TWITCH_TV_AUTH_TIMEOUT_MS = 20 * 1000;
 constexpr int TWITCH_AUTH_TOKEN_MAX_LENGTH = 4096;
@@ -6492,22 +6494,56 @@ void TwitchWebApi::endPoll(
         return;
     }
 
-    QJsonObject payload;
-    payload.insert(QStringLiteral("broadcaster_id"), channelId);
-    payload.insert(QStringLiteral("id"), pollId);
-    payload.insert(QStringLiteral("status"), QStringLiteral("TERMINATED"));
+    if (channelId.trimmed().isEmpty() || pollId.trimmed().isEmpty())
+    {
+        failureCallback(QStringLiteral("Missing Twitch channel or poll ID."));
+        return;
+    }
 
-    makeTwitchWebHelixRequest(QStringLiteral("polls"), {},
-                              NetworkRequestType::Patch, oauthClient,
-                              oauthToken)
-        .json(payload)
-        .onSuccess([successCallback](const NetworkResult &result) {
-            if (result.status() != 200)
+    QJsonObject variables;
+    variables.insert(
+        QStringLiteral("input"),
+        QJsonObject{{QStringLiteral("pollID"), pollId.trimmed()}});
+
+    const auto query = QStringLiteral(
+        "mutation TerminatePoll($input: TerminatePollInput!) {"
+        " terminatePoll(input: $input) { poll { id } }"
+        "}");
+
+    makeTwitchWebGqlDocumentRequest(
+        QStringLiteral("TerminatePoll"), query, variables, oauthClient,
+        oauthToken)
+        .onSuccess([pollId, successCallback,
+                    failureCallback](const NetworkResult &result) {
+            const auto root = result.parseJsonValue();
+            if (root.isUndefined() || root.isNull())
             {
-                qCWarning(chatterinoTwitch)
-                    << "Success result for ending a poll with web auth was"
-                    << result.formatError() << "but we expected it to be 200";
+                failureCallback(QStringLiteral("Failed to parse GQL response"));
+                return;
             }
+
+            const auto gqlError = firstWebGqlError(root);
+            if (!gqlError.isEmpty())
+            {
+                failureCallback(QStringLiteral("Twitch API Error: ") + gqlError);
+                return;
+            }
+
+            const auto endedPollId =
+                webGqlData(root)
+                    .value(QStringLiteral("terminatePoll"))
+                    .toObject()
+                    .value(QStringLiteral("poll"))
+                    .toObject()
+                    .value(QStringLiteral("id"))
+                    .toString();
+            if (endedPollId != pollId)
+            {
+                failureCallback(QStringLiteral(
+                    "Twitch did not confirm that the poll ended."));
+                return;
+            }
+
             successCallback();
         })
         .onError([failureCallback](const NetworkResult &result) {
@@ -6595,6 +6631,88 @@ void TwitchWebApi::startPrediction(
         .execute();
 }
 
+void TwitchWebApi::makePrediction(
+    const QString &predictionId, const QString &outcomeId, int points,
+    const QString &oauthClient, const QString &oauthToken,
+    std::function<void()> successCallback,
+    std::function<void(const QString &)> failureCallback)
+{
+    if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
+    {
+        failureCallback(QStringLiteral("No Twitch auth token saved."));
+        return;
+    }
+    if (predictionId.trimmed().isEmpty() || outcomeId.trimmed().isEmpty())
+    {
+        failureCallback(
+            QStringLiteral("Missing Twitch prediction or outcome ID."));
+        return;
+    }
+    if (points < 10 || points > 250000)
+    {
+        failureCallback(QStringLiteral(
+            "Twitch predictions must use between 10 and 250,000 Channel "
+            "Points."));
+        return;
+    }
+
+    QJsonObject input;
+    input.insert(QStringLiteral("eventID"), predictionId.trimmed());
+    input.insert(QStringLiteral("outcomeID"), outcomeId.trimmed());
+    input.insert(QStringLiteral("points"), points);
+    input.insert(QStringLiteral("transactionID"), compactUuid().left(16));
+
+    QJsonObject variables;
+    variables.insert(QStringLiteral("input"), input);
+
+    makeTwitchWebGqlRequest(QStringLiteral("MakePrediction"),
+                            MAKE_PREDICTION_HASH, variables, oauthClient,
+                            oauthToken)
+        .onSuccess([successCallback = std::move(successCallback),
+                    failureCallback](const NetworkResult &result) {
+            const auto root = result.parseJsonValue();
+            if (root.isUndefined() || root.isNull())
+            {
+                failureCallback(QStringLiteral("Failed to parse GQL response"));
+                return;
+            }
+
+            const auto gqlError = firstWebGqlError(root);
+            if (!gqlError.isEmpty())
+            {
+                failureCallback(QStringLiteral("Twitch API Error: ") +
+                                gqlError);
+                return;
+            }
+
+            const auto data = webGqlData(root);
+            const auto makePrediction =
+                data.value(QStringLiteral("makePrediction"));
+            if (makePrediction.isUndefined() || makePrediction.isNull())
+            {
+                failureCallback(QStringLiteral(
+                    "Twitch API Error: Twitch did not confirm the prediction"));
+                return;
+            }
+
+            const auto payloadError = webGqlMutationErrorText(
+                makePrediction.toObject(),
+                QStringLiteral("Failed to make prediction"));
+            if (!payloadError.isEmpty())
+            {
+                failureCallback(QStringLiteral("Twitch API Error: ") +
+                                payloadError);
+                return;
+            }
+
+            successCallback();
+        })
+        .onError([failureCallback](const NetworkResult &result) {
+            failureCallback(webGqlNetworkError(result));
+        })
+        .execute();
+}
+
 void TwitchWebApi::getPredictions(
     const QString &channelId, QStringList ids, int first, const QString &after,
     const QString &oauthClient, const QString &oauthToken,
@@ -6603,7 +6721,7 @@ void TwitchWebApi::getPredictions(
 {
     if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
     {
-        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        failureCallback(QStringLiteral("No Twitch auth token saved."));
         return;
     }
 
@@ -6650,7 +6768,7 @@ void TwitchWebApi::getActivePollAndPredictions(
 {
     if (stripTwitchOAuthPrefix(oauthToken).isEmpty())
     {
-        failureCallback(QStringLiteral("No Twitch mod auth token saved."));
+        failureCallback(QStringLiteral("No Twitch auth token saved."));
         return;
     }
 

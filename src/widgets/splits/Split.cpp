@@ -1982,6 +1982,7 @@ void Split::setChannel(IndirectChannel newChannel)
         this->channelSignalHolder_.managedConnect(kc->userStateChanged, [this] {
             this->header_->updateIcons();
             this->header_->updateRoomModes();
+            this->input_->updatePollPredictionButtons();
         });
 
         this->channelSignalHolder_.managedConnect(kc->roomModesChanged, [this] {

@@ -10,6 +10,7 @@
 
 class QLabel;
 class QPushButton;
+class QSpinBox;
 class QTimer;
 class QVBoxLayout;
 
@@ -40,13 +41,17 @@ private:
     void updateActionButton();
     void updateDialogSize();
     void setChoosingOutcome(bool choosing);
+    void setVoting(bool voting);
     void selectOutcome(const QString &outcomeID);
+    void submitVote();
     void endSubmissions();
     void resolveSelectedOutcome();
     void refundPrediction();
     void updatePrediction(const QString &state,
                           const QString &winningOutcomeID = {});
     bool submissionsOpen() const;
+    bool canManage() const;
+    bool canVote() const;
     double timerProgress() const;
 
     std::weak_ptr<KickChannel> channel_;
@@ -58,14 +63,19 @@ private:
     QLabel *titleLabel_ = nullptr;
     KickPredictionTimerBar *timerBar_ = nullptr;
     QVBoxLayout *outcomesLayout_ = nullptr;
+    QWidget *voteControls_ = nullptr;
+    QSpinBox *voteAmount_ = nullptr;
     QLabel *errorLabel_ = nullptr;
     QPushButton *deleteButton_ = nullptr;
     QPushButton *backButton_ = nullptr;
+    QPushButton *predictButton_ = nullptr;
     QPushButton *actionButton_ = nullptr;
     QTimer *timer_ = nullptr;
     std::vector<KickPredictionOutcomeWidget *> outcomeChoices_;
     bool managementPending_ = false;
+    bool votePending_ = false;
     bool choosingOutcome_ = false;
+    bool voting_ = false;
     pajlada::Signals::SignalHolder signalHolder_;
 };
 

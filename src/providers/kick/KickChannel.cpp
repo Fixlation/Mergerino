@@ -1371,7 +1371,7 @@ void KickChannel::cacheOwnIdentityFromUserInfo(
     getApp()->getKickChatServer()->requestSeventvCosmetics(
         ownUserID, identity.displayName);
 
-    bool hasMod = false;
+    bool hasMod = info.isModerator;
     bool hasVip = false;
     bool hasSubscriberBadge = false;
     std::vector<std::unique_ptr<MessageElement>> levelBadges;
@@ -1383,7 +1383,8 @@ void KickChannel::cacheOwnIdentityFromUserInfo(
         }
 
         const auto type = badge.type.toLower();
-        if (type == u"moderator"_s)
+        if (type == u"moderator"_s || type == u"lead_moderator"_s ||
+            type == u"lead-moderator"_s)
         {
             hasMod = true;
         }

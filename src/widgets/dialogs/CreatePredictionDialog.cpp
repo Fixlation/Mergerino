@@ -91,14 +91,7 @@ public:
 protected:
     void showPopup() override
     {
-        this->resetPopupView();
         QComboBox::showPopup();
-        this->resetPopupView();
-    }
-
-    void hidePopup() override
-    {
-        QComboBox::hidePopup();
         this->resetPopupView();
     }
 
@@ -1133,8 +1126,8 @@ void CreatePredictionDialog::submit()
 
             if (channel != nullptr)
             {
-                channel->addSystemMessage(
-                    QStringLiteral("Created prediction: '%1'").arg(title));
+                channel->addSystemMessage(QStringLiteral(
+                    "Created Twitch prediction: '%1'").arg(title));
                 notifyPollsAndPredictionsChanged(channel);
             }
             self->close();

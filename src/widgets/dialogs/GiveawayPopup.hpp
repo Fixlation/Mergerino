@@ -11,6 +11,7 @@
 #include <pajlada/signals/signalholder.hpp>
 
 #include <QHash>
+#include <QSet>
 #include <QVector>
 
 #include <cstdint>
@@ -18,6 +19,7 @@
 #include <vector>
 
 class QCloseEvent;
+class QCheckBox;
 class QGraphicsOpacityEffect;
 class QHBoxLayout;
 class QLabel;
@@ -81,6 +83,7 @@ private:
     void updatePlatformControls();
     void updateRoundControls();
     void resetParticipants();
+    void removeParticipant(const QString &participantKey);
     void updateEntrantList();
     void startOrStopRound();
     void startRound();
@@ -119,6 +122,8 @@ private:
     int activeSubscriberMultiplier_ = 1;
     QHash<QString, Participant> participants_;
     QVector<QString> participantOrder_;
+    QSet<QString> previousWinnerKeys_;
+    QSet<QString> removedParticipantKeys_;
     QString winnerKey_;
 
     QWidget *root_ = nullptr;
@@ -129,6 +134,7 @@ private:
     QLineEdit *keywordInput_ = nullptr;
     QSlider *subscriberLuck_ = nullptr;
     QLabel *subscriberLuckValue_ = nullptr;
+    QCheckBox *excludePreviousWinners_ = nullptr;
     QSpinBox *rangeMinimum_ = nullptr;
     QSpinBox *rangeMaximum_ = nullptr;
     QLineEdit *targetInput_ = nullptr;

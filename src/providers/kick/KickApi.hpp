@@ -111,6 +111,8 @@ struct KickPrivateUserInChannelInfo {
 
     uint64_t userID = 0;
     QString username;
+    bool isModerator = false;
+    bool isChannelOwner = false;
     std::optional<QDateTime> followingSince;
     std::optional<uint16_t> subscriptionMonths;
     std::optional<QString> profilePictureURL;
@@ -229,6 +231,10 @@ public:
                           const QString &chatIdentityToken,
                           const QString &predictionID, const QString &state,
                           const QString &winningOutcomeID, Callback<void> cb);
+    void votePrediction(const QString &channelSlug,
+                        const QString &chatIdentityToken,
+                        const QString &outcomeID, int amount,
+                        Callback<void> cb);
     void validateChatIdentityToken(const QString &chatIdentityToken,
                                    uint64_t expectedUserID,
                                    Callback<void> cb);

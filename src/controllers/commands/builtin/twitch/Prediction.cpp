@@ -297,8 +297,8 @@ QString createPrediction(const CommandContext &ctx)
         getHelix()->createPrediction(
             data.broadcasterID, data.title, data.choices, data.duration,
             [channel = ctx.channel, data] {
-                channel->addSystemMessage(
-                    QString("Created prediction: '%1'").arg(data.title));
+                channel->addSystemMessage(QString(
+                    "Created Twitch prediction: '%1'").arg(data.title));
                 notifyPollsAndPredictionsChanged(channel);
             },
             [channel = ctx.channel](const auto &error) {
@@ -336,8 +336,8 @@ QString createPrediction(const CommandContext &ctx)
                 data.broadcasterID, data.title, data.choices,
                 static_cast<int>(data.duration.count()), predictionID,
                 predictionObject);
-            channel->addSystemMessage(
-                QString("Created prediction: '%1'").arg(data.title));
+            channel->addSystemMessage(QString(
+                "Created Twitch prediction: '%1'").arg(data.title));
             notifyPollsAndPredictionsChanged(channel);
         },
         [channel = ctx.channel](const auto &error) {

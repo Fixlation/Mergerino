@@ -591,6 +591,7 @@ void TwitchPollsAndPredictionsBar::setChannel(const ChannelPtr &channel)
     this->pendingRequests_ = 0;
     this->pendingPoll_.reset();
     this->pendingPrediction_.reset();
+    this->suppressedTwitchPollID_.clear();
     this->refreshTimer_.stop();
     this->channelSignalHolder_.clear();
     this->twitchChannel_ = resolveTwitchChannel(channel);
@@ -642,6 +643,27 @@ void TwitchPollsAndPredictionsBar::refreshNow()
             }
         });
     }
+}
+
+void TwitchPollsAndPredictionsBar::markTwitchPollEnded(
+    const QString &broadcasterID, const QString &pollID)
+{
+    localPolls.remove(broadcasterID.trimmed());
+    this->suppressedTwitchPollID_ = pollID.trimmed();
+
+    // Ignore any older in-flight response which still describes the poll as
+    // active, then remove it immediately instead of waiting for the next API
+    // refresh to catch up with the successful end mutation.
+    this->requestGeneration_++;
+    this->pendingRequests_ = 0;
+    this->pendingPoll_.reset();
+    std::erase_if(this->items_, [](const Item &item) {
+        return item.kind == ItemKind::Poll &&
+               item.platform == ItemPlatform::Twitch;
+    });
+    this->updateFixedHeight();
+    this->update();
+    this->refreshNow();
 }
 
 bool TwitchPollsAndPredictionsBar::hasActiveTwitchPoll() const
@@ -705,7 +727,7 @@ QString TwitchPollsAndPredictionsBar::predictionButtonTooltip(
 {
     if (!canManage)
     {
-        return QStringLiteral("Predictions");
+        return QStringLiteral("Make Twitch prediction");
     }
 
     for (const auto &item : this->items_)
@@ -718,24 +740,24 @@ QString TwitchPollsAndPredictionsBar::predictionButtonTooltip(
 
         if (item.status == QStringLiteral("Locked"))
         {
-            return QStringLiteral("Manage locked prediction");
+            return QStringLiteral("Manage locked Twitch prediction");
         }
         if (item.status == QStringLiteral("Active"))
         {
-            return QStringLiteral("Manage active prediction");
+            return QStringLiteral("Manage active Twitch prediction");
         }
 
-        return QStringLiteral("Manage prediction");
+        return QStringLiteral("Manage Twitch prediction");
     }
 
-    return QStringLiteral("Start prediction");
+    return QStringLiteral("Start Twitch prediction");
 }
 
 QString TwitchPollsAndPredictionsBar::pollButtonTooltip(bool canManage) const
 {
     if (!canManage)
     {
-        return QStringLiteral("Poll");
+        return QStringLiteral("Open Twitch poll");
     }
 
     for (const auto &item : this->items_)
@@ -743,11 +765,11 @@ QString TwitchPollsAndPredictionsBar::pollButtonTooltip(bool canManage) const
         if (item.kind == ItemKind::Poll &&
             item.platform == ItemPlatform::Twitch)
         {
-            return QStringLiteral("Poll already active");
+            return QStringLiteral("Twitch poll already active");
         }
     }
 
-    return QStringLiteral("Start poll");
+    return QStringLiteral("Start Twitch poll");
 }
 
 QSize TwitchPollsAndPredictionsBar::sizeHint() const
@@ -887,10 +909,33 @@ void TwitchPollsAndPredictionsBar::refresh()
         }
     }
 
+    auto oauthClient = currentUser->getOAuthClient();
+    auto oauthToken = currentUser->getOAuthToken();
+    if (moderationAccount)
+    {
+        oauthClient = moderationAccount->clientId;
+        oauthToken = moderationAccount->oauthToken;
+    }
+
     const int generation = ++this->requestGeneration_;
-    this->pendingRequests_ = moderationAccount ? 1 : 2;
+    this->pendingRequests_ = 1;
     this->pendingPoll_.reset();
     this->pendingPrediction_.reset();
+    for (const auto &item : this->items_)
+    {
+        if (item.platform != ItemPlatform::Twitch)
+        {
+            continue;
+        }
+        if (item.kind == ItemKind::Poll)
+        {
+            this->pendingPoll_ = item;
+        }
+        else
+        {
+            this->pendingPrediction_ = item;
+        }
+    }
     if (auto item = TwitchPollsAndPredictionsBar::makeLocalPollItem(roomId))
     {
         this->pendingPoll_ = std::move(item);
@@ -902,76 +947,32 @@ void TwitchPollsAndPredictionsBar::refresh()
     }
     if (this->pendingPoll_ || this->pendingPrediction_)
     {
-        this->items_.clear();
+        // Preview cached Twitch state without consuming it, while retaining
+        // the Kick banners until the network refresh completes.
+        std::vector<Item> refreshedItems;
         if (this->pendingPoll_)
         {
-            this->items_.push_back(*this->pendingPoll_);
+            refreshedItems.push_back(*this->pendingPoll_);
         }
         if (this->pendingPrediction_)
         {
-            this->items_.push_back(*this->pendingPrediction_);
+            refreshedItems.push_back(*this->pendingPrediction_);
         }
+        for (const auto &item : this->items_)
+        {
+            if (item.platform == ItemPlatform::Kick)
+            {
+                refreshedItems.push_back(item);
+            }
+        }
+        this->items_ = std::move(refreshedItems);
         this->updateFixedHeight();
         this->update();
     }
 
     QPointer<TwitchPollsAndPredictionsBar> guard(this);
-    auto pollSuccess = [guard, generation](const HelixPolls &result) {
-        if (!guard || guard->requestGeneration_ != generation)
-        {
-            return;
-        }
-
-        for (const auto &poll : result.polls)
-        {
-            if (auto item = TwitchPollsAndPredictionsBar::makePollItem(poll))
-            {
-                guard->pendingPoll_ = std::move(item);
-                break;
-            }
-        }
-        guard->finishRequest(generation);
-    };
-    auto pollFailure = [guard, generation](const QString &) {
-        if (!guard || guard->requestGeneration_ != generation)
-        {
-            return;
-        }
-
-        guard->finishRequest(generation);
-    };
-    auto predictionSuccess =
-        [guard, generation](const HelixPredictions &result) {
-            if (!guard || guard->requestGeneration_ != generation)
-            {
-                return;
-            }
-
-            for (const auto &prediction : result.predictions)
-            {
-                if (auto item =
-                        TwitchPollsAndPredictionsBar::makePredictionItem(
-                            prediction))
-                {
-                    guard->pendingPrediction_ = std::move(item);
-                    break;
-                }
-            }
-            guard->finishRequest(generation);
-        };
-    auto predictionFailure = [guard, generation](const QString &) {
-        if (!guard || guard->requestGeneration_ != generation)
-        {
-            return;
-        }
-
-        guard->finishRequest(generation);
-    };
-
-    if (moderationAccount)
-    {
-        TwitchWebApi::getActivePollAndPredictions(
-            roomId, moderationAccount->clientId, moderationAccount->oauthToken,
+    TwitchWebApi::getActivePollAndPredictions(
+            roomId, oauthClient, oauthToken,
             [guard, generation](const HelixPolls &polls,
                                 const HelixPredictions &predictions) {
                 if (!guard || guard->requestGeneration_ != generation)
@@ -979,11 +980,19 @@ void TwitchPollsAndPredictionsBar::refresh()
                     return;
                 }
 
+                guard->pendingPoll_.reset();
+                guard->pendingPrediction_.reset();
                 for (const auto &poll : polls.polls)
                 {
+                    if (!guard->suppressedTwitchPollID_.isEmpty() &&
+                        poll.id == guard->suppressedTwitchPollID_)
+                    {
+                        continue;
+                    }
                     if (auto item =
                             TwitchPollsAndPredictionsBar::makePollItem(poll))
                     {
+                        guard->suppressedTwitchPollID_.clear();
                         guard->pendingPoll_ = std::move(item);
                         break;
                     }
@@ -1008,15 +1017,6 @@ void TwitchPollsAndPredictionsBar::refresh()
 
                 guard->finishRequest(generation);
             });
-        return;
-    }
-
-    getHelix()->getPolls(roomId, {}, 1, {}, std::move(pollSuccess),
-                         std::move(pollFailure));
-
-    getHelix()->getPredictions(roomId, {}, 1, {},
-                               std::move(predictionSuccess),
-                               std::move(predictionFailure));
 }
 
 void TwitchPollsAndPredictionsBar::finishRequest(int generation)

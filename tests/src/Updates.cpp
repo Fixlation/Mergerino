@@ -48,3 +48,20 @@ TEST(Updates, ValidateCurrentVersion)
         << "Current version must be valid semver";
     EXPECT_EQ(Version::instance().version(), CHATTERINO_VERSION);
 }
+
+TEST(Updates, DetectUpdateByVersionOrCommit)
+{
+    const QString commitA(40, u'a');
+    const QString commitB(40, u'b');
+
+    EXPECT_TRUE(
+        Updates::isUpdateAvailable("1.3.4", "1.3.3", commitA, commitA));
+    EXPECT_TRUE(
+        Updates::isUpdateAvailable("1.3.3", "1.3.3", commitB, commitA));
+
+    EXPECT_FALSE(
+        Updates::isUpdateAvailable("1.3.3", "1.3.3", commitA, commitA));
+    EXPECT_FALSE(Updates::isUpdateAvailable("1.3.3", "1.3.3", {}, commitA));
+    EXPECT_FALSE(
+        Updates::isUpdateAvailable("1.3.2", "1.3.3", commitB, commitA));
+}

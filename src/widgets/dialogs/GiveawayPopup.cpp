@@ -10,6 +10,7 @@
 #include "singletons/Theme.hpp"
 
 #include <QAbstractAnimation>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QEasingCurve>
 #include <QFont>
@@ -38,6 +39,7 @@
 #include <QStylePainter>
 #include <QStringList>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QToolButton>
 #include <QVariantAnimation>
 #include <QVBoxLayout>
@@ -57,7 +59,7 @@ constexpr int MAX_VISIBLE_ENTRANTS = 6;
 constexpr int ENTRANT_ROW_HEIGHT = 24;
 constexpr int ENTRANT_VIEWPORT_HEIGHT =
     MAX_VISIBLE_ENTRANTS * ENTRANT_ROW_HEIGHT + 4;
-constexpr int KEYWORD_WINDOW_HEIGHT = 600;
+constexpr int KEYWORD_WINDOW_HEIGHT = 625;
 constexpr int NUMBER_WINDOW_HEIGHT = 455;
 
 class JumpToClickSlider final : public QSlider
@@ -208,6 +210,31 @@ private:
     qreal desaturation_ = 0.0;
 };
 
+class CenteredRemoveButton final : public QToolButton
+{
+public:
+    using QToolButton::QToolButton;
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QToolButton::paintEvent(event);
+
+        QStyleOptionToolButton option;
+        this->initStyleOption(&option);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(option.palette.color(QPalette::ButtonText), 1.5,
+                            Qt::SolidLine, Qt::RoundCap));
+        const auto center = QRectF(this->rect()).center();
+        constexpr qreal HALF_STROKE = 3.0;
+        painter.drawLine(center + QPointF(-HALF_STROKE, -HALF_STROKE),
+                         center + QPointF(HALF_STROKE, HALF_STROKE));
+        painter.drawLine(center + QPointF(HALF_STROKE, -HALF_STROKE),
+                         center + QPointF(-HALF_STROKE, HALF_STROKE));
+    }
+};
+
 QLabel *sectionLabel(const QString &text, QWidget *parent)
 {
     auto *label = new QLabel(text, parent);
@@ -248,6 +275,13 @@ GiveawayPopup::GiveawayPopup(QWidget *parent)
 void GiveawayPopup::setContext(
     ChannelPtr channel, std::vector<MessagePlatform> availablePlatforms)
 {
+    const auto channelName =
+        channel != nullptr ? channel->getName().trimmed() : QString{};
+    this->setWindowTitle(
+        channelName.isEmpty()
+            ? QStringLiteral("Giveaway")
+            : QStringLiteral("Giveaway - %1").arg(channelName));
+
     std::ranges::sort(availablePlatforms,
                       [](MessagePlatform left, MessagePlatform right) {
                           return static_cast<int>(left) <
@@ -439,6 +473,17 @@ void GiveawayPopup::buildUi()
                          this->subscriberLuckValue_->setText(
                              QStringLiteral("%1x").arg(value));
                      });
+    this->excludePreviousWinners_ = new QCheckBox(
+        QStringLiteral("Exclude previous winners from future rolls"),
+        keywordPage);
+    this->excludePreviousWinners_->setObjectName(
+        QStringLiteral("GiveawayExcludePreviousWinners"));
+    this->excludePreviousWinners_->setChecked(true);
+    this->excludePreviousWinners_->setToolTip(QStringLiteral(
+        "Previous winners remain listed but cannot win again while enabled."));
+    keywordLayout->addWidget(this->excludePreviousWinners_);
+    QObject::connect(this->excludePreviousWinners_, &QCheckBox::toggled, this,
+                     [this] { this->updateRoundControls(); });
     this->modeStack_->addWidget(keywordPage);
 
     auto *numberPage = new QWidget(this->modeStack_);
@@ -659,7 +704,29 @@ void GiveawayPopup::resetParticipants()
 {
     this->participants_.clear();
     this->participantOrder_.clear();
+    this->previousWinnerKeys_.clear();
+    this->removedParticipantKeys_.clear();
     this->updateEntrantList();
+}
+
+void GiveawayPopup::removeParticipant(const QString &participantKey)
+{
+    const auto participant = this->participants_.find(participantKey);
+    if (participant == this->participants_.end())
+    {
+        return;
+    }
+
+    this->participants_.erase(participant);
+    this->participantOrder_.removeAll(participantKey);
+    this->previousWinnerKeys_.remove(participantKey);
+    this->removedParticipantKeys_.insert(participantKey);
+    if (this->winnerKey_ == participantKey)
+    {
+        this->clearWinner();
+    }
+    this->updateEntrantList();
+    this->updateRoundControls();
 }
 
 void GiveawayPopup::updateEntrantList()
@@ -731,18 +798,41 @@ void GiveawayPopup::updateEntrantList()
 
             auto *name = new QLabel(participant->author, row);
             name->setObjectName(QStringLiteral("GiveawayEntrantName"));
-            auto *count = new QLabel(
+            auto entryText =
                 QStringLiteral("%1 entr%2")
                     .arg(participant->entryCount)
                     .arg(participant->entryCount == 1
                              ? QStringLiteral("y")
-                             : QStringLiteral("ies")),
-                row);
+                             : QStringLiteral("ies"));
+            if (this->previousWinnerKeys_.contains(key))
+            {
+                entryText.prepend(QStringLiteral("Won • "));
+            }
+            auto *count = new QLabel(entryText, row);
             count->setObjectName(QStringLiteral("GiveawayEntrantEntries"));
             count->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            auto *removeButton = new CenteredRemoveButton(row);
+            removeButton->setObjectName(
+                QStringLiteral("GiveawayRemoveEntrant"));
+            removeButton->setAutoRaise(true);
+            removeButton->setCursor(Qt::PointingHandCursor);
+            removeButton->setFixedSize(20, 20);
+            removeButton->setAccessibleName(
+                QStringLiteral("Remove %1 from giveaway")
+                    .arg(participant->author));
+            removeButton->setToolTip(
+                QStringLiteral("Remove %1 from this giveaway")
+                    .arg(participant->author));
+            QObject::connect(removeButton, &QToolButton::clicked, this,
+                             [this, key] {
+                                 QTimer::singleShot(
+                                     0, this,
+                                     [this, key] { this->removeParticipant(key); });
+                             });
             layout->addWidget(platformIcon);
             layout->addWidget(name, 1);
             layout->addWidget(count);
+            layout->addWidget(removeButton);
             this->entrantListLayout_->addWidget(row);
             ++rowCount;
         }
@@ -846,7 +936,13 @@ void GiveawayPopup::updateRoundControls()
             : (this->mode_ == Mode::Keyword
                    ? QStringLiteral("Start giveaway")
                    : QStringLiteral("Start number hunt")));
-    this->rollButton_->setEnabled(!this->participants_.isEmpty());
+    const bool hasEligibleParticipant = std::ranges::any_of(
+        this->participantOrder_, [this](const QString &key) {
+            return this->participants_.contains(key) &&
+                   (!this->excludePreviousWinners_->isChecked() ||
+                    !this->previousWinnerKeys_.contains(key));
+        });
+    this->rollButton_->setEnabled(hasEligibleParticipant);
     this->entrantCountLabel_->setText(
         QStringLiteral("%1 entrant%2")
             .arg(this->participants_.size())
@@ -974,6 +1070,11 @@ void GiveawayPopup::rollKeywordWinner()
     quint64 totalEntries = 0;
     for (const auto &key : this->participantOrder_)
     {
+        if (this->excludePreviousWinners_->isChecked() &&
+            this->previousWinnerKeys_.contains(key))
+        {
+            continue;
+        }
         const auto participant = this->participants_.constFind(key);
         if (participant != this->participants_.cend())
         {
@@ -983,6 +1084,8 @@ void GiveawayPopup::rollKeywordWinner()
     }
     if (totalEntries == 0)
     {
+        this->setStatus(QStringLiteral("All entrants have already won."));
+        this->updateRoundControls();
         return;
     }
 
@@ -998,8 +1101,18 @@ void GiveawayPopup::rollKeywordWinner()
 
     for (const auto &key : this->participantOrder_)
     {
+        if (this->excludePreviousWinners_->isChecked() &&
+            this->previousWinnerKeys_.contains(key))
+        {
+            continue;
+        }
+        const auto participant = this->participants_.constFind(key);
+        if (participant == this->participants_.cend())
+        {
+            continue;
+        }
         const auto entries = static_cast<quint64>(
-            std::max(1, this->participants_.value(key).entryCount));
+            std::max(1, participant->entryCount));
         if (ticket < entries)
         {
             this->chooseWinner(key);
@@ -1065,6 +1178,10 @@ void GiveawayPopup::handleMessage(const MessagePtr &message)
     }
 
     const auto key = this->participantKey(*message);
+    if (this->removedParticipantKeys_.contains(key))
+    {
+        return;
+    }
     auto existing = this->participants_.find(key);
     if (existing != this->participants_.end())
     {
@@ -1218,6 +1335,7 @@ void GiveawayPopup::chooseWinner(const QString &participantKey,
         return;
     }
     this->winnerKey_ = participantKey;
+    this->previousWinnerKeys_.insert(participantKey);
     this->winnerLabel_->setText(
         QStringLiteral("%1 • %2")
             .arg(participant->author, platformName(participant->platform)));
@@ -1234,6 +1352,8 @@ void GiveawayPopup::chooseWinner(const QString &participantKey,
                             .arg(participant->author,
                                  platformName(participant->platform), reason));
     }
+    this->updateEntrantList();
+    this->updateRoundControls();
 }
 
 void GiveawayPopup::clearWinner()
@@ -1371,6 +1491,7 @@ QLabel#GiveawayEntrantEntries, QLabel#GiveawayWinnerLabel,
 QLabel#GiveawayEntrantCount { color: %5; }
 QLabel#GiveawayWinnerLabel { font-weight: 600; }
 QLabel#GiveawaySubscriberLuckValue { font-weight: 600; }
+QCheckBox#GiveawayExcludePreviousWinners { color: %5; spacing: 6px; }
 QLabel#GiveawayStatus[error="true"] { color: #ff6b6b; }
 QWidget#GiveawayRoundCard {
     background: %2;
@@ -1439,6 +1560,18 @@ QPushButton, QToolButton {
     padding: 6px 10px;
 }
 QToolButton#GiveawayPlatformButton { padding: 5px; }
+QToolButton#GiveawayRemoveEntrant {
+    background: transparent;
+    color: %5;
+    border: none;
+    border-radius: 3px;
+    padding: 0;
+}
+
+QToolButton#GiveawayRemoveEntrant:hover {
+    background: %7;
+    color: #ff6b6b;
+}
 QPushButton#GiveawayVisibilityButton { padding: 0; }
 QPushButton:hover, QToolButton:hover { background: %7; }
 QPushButton:checked, QToolButton:checked {

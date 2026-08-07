@@ -9,6 +9,7 @@
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
 #include "common/Version.hpp"
+#include "controllers/analytics/UsageAnalytics.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Settings.hpp"
 #include "util/CombinePath.hpp"
@@ -122,6 +123,49 @@ QString releaseVersionFromVersionHeader(const QString &contents)
     return {};
 }
 
+QString normalizedCommit(const QString &value)
+{
+    static const QRegularExpression fullCommitPattern{
+        QStringLiteral(R"(^[0-9a-f]{40}$)"),
+        QRegularExpression::CaseInsensitiveOption};
+
+    const auto candidate = value.trimmed();
+    if (!fullCommitPattern.match(candidate).hasMatch())
+    {
+        return {};
+    }
+
+    return candidate.toLower();
+}
+
+QString displayVersionWithCommit(const QString &version,
+                                 const QString &commit)
+{
+    const auto normalized = normalizedCommit(commit);
+    if (normalized.isEmpty())
+    {
+        return version;
+    }
+
+    return QString("%1 [%2]").arg(version, normalized.left(7));
+}
+
+QString releaseCommitFrom(const QString &releaseBody,
+                          const QString &targetCommitish)
+{
+    static const QRegularExpression bodyCommitPattern{
+        QStringLiteral(R"(Build commit:\s*`?([0-9a-f]{40})`?)"),
+        QRegularExpression::CaseInsensitiveOption};
+
+    const auto bodyMatch = bodyCommitPattern.match(releaseBody);
+    if (bodyMatch.hasMatch())
+    {
+        return bodyMatch.captured(1).toLower();
+    }
+
+    return normalizedCommit(targetCommitish);
+}
+
 bool isNewerVersion(const QString &online, const QString &current)
 {
     semver::version onlineVersion;
@@ -185,6 +229,28 @@ bool Updates::isDowngradeOf(const QString &online, const QString &current)
     return onlineVersion < currentVersion;
 }
 
+bool Updates::isUpdateAvailable(const QString &onlineVersion,
+                                const QString &currentVersion,
+                                const QString &onlineCommit,
+                                const QString &currentCommit)
+{
+    if (isNewerVersion(onlineVersion, currentVersion))
+    {
+        return true;
+    }
+
+    if (onlineVersion != currentVersion)
+    {
+        return false;
+    }
+
+    const auto normalizedOnlineCommit = normalizedCommit(onlineCommit);
+    const auto normalizedCurrentCommit = normalizedCommit(currentCommit);
+    return !normalizedOnlineCommit.isEmpty() &&
+           !normalizedCurrentCommit.isEmpty() &&
+           normalizedOnlineCommit != normalizedCurrentCommit;
+}
+
 void Updates::deleteOldFiles()
 {
     std::ignore = QtConcurrent::run([dir{this->paths.miscDirectory}] {
@@ -240,6 +306,7 @@ void Updates::checkForUpdates()
     }
 
     this->onlineVersion_.clear();
+    this->onlineCommit_.clear();
     this->updateDownloadUrl_.clear();
     this->isDowngrade_ = false;
     this->setStatus_(Searching);
@@ -252,6 +319,8 @@ void Updates::checkForUpdates()
             const auto releaseName = root["name"].toString();
             const auto tagName = root["tag_name"].toString();
             const auto targetCommitish = root["target_commitish"].toString();
+            const auto releaseCommit = releaseCommitFrom(
+                root["body"].toString(), targetCommitish);
 
             QString downloadUrl;
             const auto assets = root["assets"].toArray();
@@ -267,7 +336,8 @@ void Updates::checkForUpdates()
             }
 
             const auto handleReleaseVersion =
-                [this, downloadUrl](const QString &releaseVersion) {
+                [this, downloadUrl,
+                 releaseCommit](const QString &releaseVersion) {
                     if (releaseVersion.isEmpty() || downloadUrl.isEmpty())
                     {
                         qCWarning(chatterinoUpdate)
@@ -277,11 +347,15 @@ void Updates::checkForUpdates()
                     }
 
                     this->onlineVersion_ = releaseVersion;
+                    this->onlineCommit_ = releaseCommit;
                     this->updateDownloadUrl_ = downloadUrl;
 
                     this->isDowngrade_ = Updates::isDowngradeOf(
                         releaseVersion, this->currentVersion_);
-                    if (isNewerVersion(releaseVersion, this->currentVersion_))
+                    if (Updates::isUpdateAvailable(
+                            releaseVersion, this->currentVersion_,
+                            releaseCommit,
+                            Version::instance().commitFullHash()))
                     {
                         this->setStatus_(UpdateAvailable);
                         return;
@@ -370,9 +444,14 @@ bool Updates::isDowngrade() const
 
 QString Updates::buildUpdateAvailableText() const
 {
-    return QString("A new Mergerino version is available.\n\nCurrent: %1\nLatest: "
+    const auto currentVersion = displayVersionWithCommit(
+        this->currentVersion_, Version::instance().commitFullHash());
+    const auto onlineVersion =
+        displayVersionWithCommit(this->onlineVersion_, this->onlineCommit_);
+
+    return QString("A new Mergerino update is available.\n\nCurrent: %1\nLatest: "
                    "%2\n\nInstall it and restart Mergerino?")
-        .arg(this->currentVersion_, this->onlineVersion_);
+        .arg(currentVersion, onlineVersion);
 }
 
 void Updates::setStatus_(Status status)
@@ -380,6 +459,44 @@ void Updates::setStatus_(Status status)
     if (this->status_ != status)
     {
         this->status_ = status;
+        switch (status)
+        {
+            case Searching:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("check"),
+                                                 QStringLiteral("started"));
+                break;
+            case UpdateAvailable:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("check"),
+                                                 QStringLiteral("available"));
+                break;
+            case NoUpdateAvailable:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("check"),
+                                                 QStringLiteral("up_to_date"));
+                break;
+            case SearchFailed:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("check"),
+                                                 QStringLiteral("failure"));
+                break;
+            case Downloading:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("download"),
+                                                 QStringLiteral("started"));
+                break;
+            case DownloadFailed:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("download"),
+                                                 QStringLiteral("failure"));
+                break;
+            case WriteFileFailed:
+            case MissingPortableUpdater:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("prepare"),
+                                                 QStringLiteral("failure"));
+                break;
+            case RunUpdaterFailed:
+                UsageAnalytics::recordUpdateFlow(QStringLiteral("handoff"),
+                                                 QStringLiteral("failure"));
+                break;
+            case None:
+                break;
+        }
         postToThread([this, status] {
             this->statusUpdated.invoke(status);
         });
@@ -502,6 +619,9 @@ Start-Process -FilePath (Join-Path $AppDir $ExeName) -WorkingDirectory $AppDir
                 this->setStatus_(RunUpdaterFailed);
                 return;
             }
+
+            UsageAnalytics::recordUpdateFlow(QStringLiteral("handoff"),
+                                             QStringLiteral("success"));
 
             this->settings_.pendingPostUpdateVersion = this->onlineVersion_;
             std::ignore = this->settings_.requestSave();

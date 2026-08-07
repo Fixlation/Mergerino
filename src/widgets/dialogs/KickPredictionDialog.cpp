@@ -21,6 +21,7 @@
 #include <QPalette>
 #include <QPointer>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QStyle>
 #include <QSvgRenderer>
 #include <QTimer>
@@ -36,6 +37,8 @@ constexpr int DIALOG_WIDTH = 650;
 constexpr int ACTIVE_HEIGHT = 350;
 constexpr int CLOSED_HEIGHT = 345;
 constexpr int CHOOSING_HEIGHT = 350;
+constexpr int VOTING_HEIGHT = 410;
+constexpr int ERROR_TOP_MARGIN = 22;
 constexpr int TIMER_BAR_HEIGHT = 6;
 const QColor KICK_MINT("#18FBB0");
 const QColor KICK_SALMON("#FEA0A0");
@@ -256,6 +259,7 @@ KickPredictionDialog::KickPredictionDialog(std::shared_ptr<KickChannel> channel,
                                            QWidget *parent)
     : BasePopup({BaseWindow::EnableCustomFrame,
                  BaseWindow::CloseButtonOnly,
+                 BaseWindow::FixedSizeCustomFrame,
                  BaseWindow::DisableLayoutSave,
                  BaseWindow::BoundsCheckOnShow}, parent)
     , channel_(channel)
@@ -294,8 +298,26 @@ KickPredictionDialog::KickPredictionDialog(std::shared_ptr<KickChannel> channel,
     this->outcomesLayout_->setContentsMargins(0, 5, 0, 0);
     this->outcomesLayout_->setSpacing(5);
     root->addLayout(this->outcomesLayout_);
+    this->voteControls_ = new QWidget(this);
+    auto *voteControlsLayout = new QHBoxLayout(this->voteControls_);
+    voteControlsLayout->setContentsMargins(0, 3, 0, 0);
+    voteControlsLayout->setSpacing(8);
+    auto *amountLabel = new QLabel(QStringLiteral("Channel Points"),
+                                   this->voteControls_);
+    this->voteAmount_ = new QSpinBox(this->voteControls_);
+    this->voteAmount_->setRange(10, 250000);
+    this->voteAmount_->setValue(10);
+    this->voteAmount_->setGroupSeparatorShown(true);
+    this->voteAmount_->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    this->voteAmount_->setFixedWidth(90);
+    voteControlsLayout->addWidget(amountLabel);
+    voteControlsLayout->addWidget(this->voteAmount_);
+    voteControlsLayout->addStretch(1);
+    this->voteControls_->hide();
+    root->addWidget(this->voteControls_);
     this->errorLabel_ = new QLabel(this);
     this->errorLabel_->setObjectName(QStringLiteral("KickPredictionError"));
+    this->errorLabel_->setContentsMargins(0, ERROR_TOP_MARGIN, 0, 0);
     this->errorLabel_->setWordWrap(true);
     this->errorLabel_->hide();
     root->addWidget(this->errorLabel_);
@@ -305,9 +327,10 @@ KickPredictionDialog::KickPredictionDialog(std::shared_ptr<KickChannel> channel,
     buttons->setSpacing(8);
     this->deleteButton_ = new QPushButton(QStringLiteral("Delete"), this);
     this->backButton_ = new QPushButton(QStringLiteral("Back"), this);
+    this->predictButton_ = new QPushButton(QStringLiteral("Predict"), this);
     this->actionButton_ = new QPushButton(this);
     for (auto *button : {this->deleteButton_, this->backButton_,
-                         this->actionButton_})
+                         this->predictButton_, this->actionButton_})
     {
         button->setObjectName(QStringLiteral("KickPredictionButton"));
         button->setCursor(Qt::PointingHandCursor);
@@ -316,16 +339,32 @@ KickPredictionDialog::KickPredictionDialog(std::shared_ptr<KickChannel> channel,
     buttons->addStretch(1);
     buttons->addWidget(this->deleteButton_);
     buttons->addWidget(this->backButton_);
+    buttons->addWidget(this->predictButton_);
     buttons->addWidget(this->actionButton_);
     root->addLayout(buttons);
 
     QObject::connect(this->deleteButton_, &QPushButton::clicked, this,
                      [this] { this->refundPrediction(); });
     QObject::connect(this->backButton_, &QPushButton::clicked, this,
-                     [this] { this->setChoosingOutcome(false); });
+                     [this] {
+                         if (this->voting_)
+                         {
+                             this->setVoting(false);
+                         }
+                         else
+                         {
+                             this->setChoosingOutcome(false);
+                         }
+                     });
+    QObject::connect(this->predictButton_, &QPushButton::clicked, this,
+                     [this] { this->setVoting(true); });
     QObject::connect(this->actionButton_, &QPushButton::clicked, this, [this] {
-        if (this->submissionsOpen())
+        if (this->voting_)
+            this->submitVote();
+        else if (this->submissionsOpen() && this->canManage())
             this->endSubmissions();
+        else if (this->submissionsOpen() && this->canVote())
+            this->setVoting(true);
         else if (!this->choosingOutcome_)
             this->setChoosingOutcome(true);
         else
@@ -368,16 +407,26 @@ void KickPredictionDialog::refresh()
         this->choosingOutcome_ = false;
         this->selectedOutcomeID_.clear();
     }
+    if (this->voting_ && !this->canVote())
+    {
+        this->voting_ = false;
+        this->selectedOutcomeID_.clear();
+    }
     const bool selectedExists = std::ranges::any_of(
         prediction.outcomes, [this](const KickPredictionOutcome &outcome) {
             return outcome.id == this->selectedOutcomeID_;
         });
     if (this->choosingOutcome_ && !selectedExists && !prediction.outcomes.empty())
         this->selectedOutcomeID_ = prediction.outcomes.front().id;
+    else if ((this->choosingOutcome_ || this->voting_) && !selectedExists)
+        this->selectedOutcomeID_.clear();
 
-    if (this->managementPending_)
+    if (this->managementPending_ || this->votePending_)
     {
-        this->errorLabel_->setText(QStringLiteral("Updating the Kick prediction&"));
+        this->errorLabel_->setText(
+            this->votePending_
+                ? QStringLiteral("Submitting your Kick prediction…")
+                : QStringLiteral("Updating the Kick prediction…"));
         this->errorLabel_->setProperty("pending", true);
         this->errorLabel_->show();
     }
@@ -428,6 +477,11 @@ QLabel#KickPredictionDescription { color:%3; font-size:13px; }
 QLabel#KickPredictionTitle { font-size:20px; font-weight:700; }
 QLabel#KickPredictionError { color:#ff6b6b; font-size:12px; }
 QLabel#KickPredictionError[pending="true"] { color:%3; }
+QSpinBox {
+ background:%4; color:%2; border:1px solid %5; border-radius:4px;
+ padding:4px 7px; selection-background-color:palette(highlight);
+ selection-color:palette(highlighted-text);
+}
 QPushButton#KickPredictionButton {
  background:%4; color:%2; border:1px solid %5; border-radius:4px;
  padding:7px 14px; font-weight:600;
@@ -464,7 +518,7 @@ void KickPredictionDialog::rebuildOutcomes()
                             ? QColor("#d6d6dc") : QColor("#3b3b43");
     const auto total = totalPoints(prediction);
 
-    if (this->choosingOutcome_)
+    if (this->choosingOutcome_ || this->voting_)
     {
         this->outcomesLayout_->setSpacing(10);
         for (size_t i = 0; i < prediction.outcomes.size(); ++i)
@@ -543,19 +597,34 @@ void KickPredictionDialog::updateTimerUi()
 {
     const bool open = this->submissionsOpen();
     const bool choosing = this->choosingOutcome_ && !open;
-    this->setWindowTitle(choosing ? QStringLiteral("Choose Outcome")
-                                  : QStringLiteral("Manage Prediction"));
-    this->statusLabel_->setText(choosing ? QStringLiteral("Choose Outcome")
-        : open ? QStringLiteral("Submissions Open")
-               : QStringLiteral("Submissions Closed"));
-    this->statusLabel_->setProperty("chooseMode", choosing);
+    const bool voting = this->voting_ && open;
+    this->setWindowTitle(voting ? QStringLiteral("Make a Prediction")
+        : choosing             ? QStringLiteral("Choose Outcome")
+                               : QStringLiteral("Prediction"));
+    this->statusLabel_->setText(voting ? QStringLiteral("Make a Prediction")
+        : choosing                  ? QStringLiteral("Choose Outcome")
+        : open                      ? QStringLiteral("Submissions Open")
+                                    : QStringLiteral("Submissions Closed"));
+    this->statusLabel_->setProperty("chooseMode", choosing || voting);
     repolish(this->statusLabel_);
-    this->descriptionLabel_->setVisible(choosing);
+    this->descriptionLabel_->setText(
+        voting
+            ? QStringLiteral(
+                  "Choose an outcome and wager Channel Points. This cannot be "
+                  "changed after submitting. Moderators who participate may "
+                  "not be able to resolve the prediction on Kick.")
+            : QStringLiteral(
+                  "Select the result and reward the viewers who voted for it "
+                  "with Channel Points."));
+    this->descriptionLabel_->setVisible(choosing || voting);
     this->timerBar_->setVisible(open && !choosing);
     this->timerBar_->setProgress(this->timerProgress());
-    this->actionButton_->setText(open ? QStringLiteral("End Submissions")
-        : choosing ? QStringLiteral("Complete Prediction")
-                   : QStringLiteral("Choose Outcome"));
+    this->voteControls_->setVisible(voting);
+    this->actionButton_->setText(voting ? QStringLiteral("Predict")
+        : open && this->canManage() ? QStringLiteral("End Submissions")
+        : open && this->canVote()   ? QStringLiteral("Predict")
+        : choosing                  ? QStringLiteral("Complete Prediction")
+                                    : QStringLiteral("Choose Outcome"));
     this->updateActionButton();
 }
 
@@ -564,23 +633,40 @@ void KickPredictionDialog::updateActionButton()
     const auto channel = this->channel_.lock();
     const bool hasID = channel != nullptr && channel->activePrediction() &&
         !channel->activePrediction()->id.trimmed().isEmpty();
+    const bool open = this->submissionsOpen();
     const bool choosing = this->choosingOutcome_ && !this->submissionsOpen();
-    const bool enabled = hasID && !this->managementPending_;
-    this->deleteButton_->setVisible(!choosing);
-    this->backButton_->setVisible(choosing);
-    this->deleteButton_->setEnabled(enabled);
-    this->backButton_->setEnabled(enabled);
+    const bool voting = this->voting_ && open;
+    const bool pending = this->managementPending_ || this->votePending_;
+    const bool canManage = this->canManage();
+    const bool canVote = this->canVote();
+    const bool enabled = hasID && !pending;
+    this->deleteButton_->setVisible(canManage && !choosing && !voting);
+    this->backButton_->setVisible(choosing || voting);
+    this->predictButton_->setVisible(open && canManage && canVote && !voting);
+    this->actionButton_->setVisible(
+        voting || (open && (canManage || canVote)) || (!open && canManage));
+    this->deleteButton_->setEnabled(enabled && canManage);
+    this->backButton_->setEnabled(!pending);
+    this->predictButton_->setEnabled(enabled && canVote);
     this->actionButton_->setEnabled(
-        enabled && (!choosing || !this->selectedOutcomeID_.isEmpty()));
+        enabled && (!choosing || !this->selectedOutcomeID_.isEmpty()) &&
+        (!voting || (!this->selectedOutcomeID_.isEmpty() &&
+                     this->voteAmount_->value() >= 10)));
     this->actionButton_->setProperty("primary", true);
     repolish(this->actionButton_);
 }
 
 void KickPredictionDialog::updateDialogSize()
 {
+    const auto errorExtraHeight =
+        this->errorLabel_->isVisible() ? ERROR_TOP_MARGIN : 0;
     this->setScaleIndependentSize(
-        DIALOG_WIDTH, this->choosingOutcome_ ? CHOOSING_HEIGHT
-          : this->submissionsOpen() ? ACTIVE_HEIGHT : CLOSED_HEIGHT);
+        DIALOG_WIDTH,
+        (this->voting_ ? VOTING_HEIGHT
+           : this->choosingOutcome_ ? CHOOSING_HEIGHT
+           : this->submissionsOpen() ? ACTIVE_HEIGHT
+                                     : CLOSED_HEIGHT) +
+            errorExtraHeight);
     this->timerBar_->setFixedWidth(610);
 }
 
@@ -589,8 +675,10 @@ void KickPredictionDialog::setChoosingOutcome(bool choosing)
     const auto channel = this->channel_.lock();
     if (channel == nullptr || !channel->activePrediction() ||
         (choosing && this->submissionsOpen()) ||
+        (choosing && !this->canManage()) ||
         this->choosingOutcome_ == choosing)
         return;
+    this->voting_ = false;
     this->choosingOutcome_ = choosing;
     this->errorLabel_->clear();
     if (choosing)
@@ -615,15 +703,108 @@ void KickPredictionDialog::setChoosingOutcome(bool choosing)
     this->updateDialogSize();
 }
 
+void KickPredictionDialog::setVoting(bool voting)
+{
+    if ((voting && !this->canVote()) || this->voting_ == voting)
+    {
+        return;
+    }
+    this->choosingOutcome_ = false;
+    this->voting_ = voting;
+    this->selectedOutcomeID_.clear();
+    this->errorLabel_->clear();
+    this->rebuildOutcomes();
+    this->updateTimerUi();
+    this->updateDialogSize();
+}
+
 void KickPredictionDialog::selectOutcome(const QString &outcomeID)
 {
-    if (!this->choosingOutcome_)
+    if (!this->choosingOutcome_ && !this->voting_)
         return;
     this->selectedOutcomeID_ = outcomeID;
     for (auto *choice : this->outcomeChoices_)
         choice->setSelected(choice->outcomeID() == outcomeID);
     this->updateActionButton();
 }
+
+void KickPredictionDialog::submitVote()
+{
+    const auto channel = this->channel_.lock();
+    if (channel == nullptr || !channel->activePrediction() ||
+        !this->canVote() || this->votePending_ ||
+        this->selectedOutcomeID_.isEmpty())
+    {
+        return;
+    }
+
+    auto account = getApp()->getAccounts()->kick.current();
+    if (account == nullptr || account->isAnonymous() ||
+        account->chatIdentityToken().trimmed().isEmpty())
+    {
+        this->errorLabel_->setText(QStringLiteral(
+            "Connect Kick's website session under Settings > Accounts "
+            "before making a prediction."));
+        this->refresh();
+        return;
+    }
+
+    auto slug = this->channelSlug_.trimmed();
+    if (slug.isEmpty())
+    {
+        slug = channel->getName().trimmed();
+    }
+    const auto outcomeID = this->selectedOutcomeID_;
+    const auto amount = this->voteAmount_->value();
+    QString outcomeTitle;
+    for (const auto &outcome : channel->activePrediction()->outcomes)
+    {
+        if (outcome.id == outcomeID)
+        {
+            outcomeTitle = outcome.title;
+            break;
+        }
+    }
+
+    this->votePending_ = true;
+    this->errorLabel_->clear();
+    this->refresh();
+    QPointer<KickPredictionDialog> self(this);
+    const auto messageChannelWeak = this->messageChannel_;
+    getKickApi()->votePrediction(
+        slug, account->chatIdentityToken().trimmed(), outcomeID, amount,
+        [self, messageChannelWeak, outcomeTitle,
+         amount](ExpectedStr<void> result) mutable {
+            auto handleResult = [self, messageChannelWeak, outcomeTitle, amount,
+                                 result = std::move(result)] {
+                if (self == nullptr)
+                {
+                    return;
+                }
+                self->votePending_ = false;
+                if (!result)
+                {
+                    self->errorLabel_->setText(
+                        QStringLiteral("Kick couldn't submit the prediction: %1")
+                            .arg(result.error()));
+                    self->refresh();
+                    return;
+                }
+                if (auto messageChannel = messageChannelWeak.lock())
+                {
+                    messageChannel->addSystemMessage(
+                        QStringLiteral("Predicted %1 Channel Points on '%2'.")
+                            .arg(QLocale().toString(amount), outcomeTitle));
+                }
+                self->close();
+            };
+            if (auto *application = QCoreApplication::instance())
+            {
+                QTimer::singleShot(0, application, std::move(handleResult));
+            }
+        });
+}
+
 void KickPredictionDialog::endSubmissions()
 {
     if (!this->managementPending_)
@@ -647,6 +828,20 @@ bool KickPredictionDialog::submissionsOpen() const
     return channel != nullptr && channel->activePrediction() &&
         channel->activePrediction()->state == QStringLiteral("ACTIVE");
 }
+
+bool KickPredictionDialog::canManage() const
+{
+    const auto channel = this->channel_.lock();
+    return channel != nullptr && channel->hasModRights();
+}
+
+bool KickPredictionDialog::canVote() const
+{
+    const auto channel = this->channel_.lock();
+    return this->submissionsOpen() && channel != nullptr &&
+        !channel->isBroadcaster();
+}
+
 double KickPredictionDialog::timerProgress() const
 {
     const auto channel = this->channel_.lock();

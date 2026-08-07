@@ -54,6 +54,8 @@ public:
 
     void setChannel(const ChannelPtr &channel);
     void refreshNow();
+    void markTwitchPollEnded(const QString &broadcasterID,
+                             const QString &pollID);
     [[nodiscard]] bool hasActiveTwitchPoll() const;
     [[nodiscard]] bool hasActiveKickPoll() const;
     [[nodiscard]] bool hasOpenTwitchPrediction() const;
@@ -135,6 +137,7 @@ private:
     std::vector<Item> items_;
     std::optional<Item> pendingPoll_;
     std::optional<Item> pendingPrediction_;
+    QString suppressedTwitchPollID_;
     int pendingRequests_ = 0;
     int requestGeneration_ = 0;
     std::vector<boost::signals2::scoped_connection> bSignals_;

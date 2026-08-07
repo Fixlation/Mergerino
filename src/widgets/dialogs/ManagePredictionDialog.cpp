@@ -32,6 +32,7 @@
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QSvgRenderer>
 #include <QStyle>
 #include <QTimer>
@@ -58,6 +59,7 @@ constexpr int OUTCOME_SELECTION_MIN_HEIGHT = 340;
 constexpr int OUTCOME_SELECTION_MAX_HEIGHT = 760;
 constexpr int OUTCOME_SELECTION_ROW_HEIGHT = 56;
 constexpr int OUTCOME_SELECTION_ROW_WIDGET_HEIGHT = 47;
+constexpr int VOTING_CONTROLS_HEIGHT = 52;
 constexpr int BADGE_SIZE = 18;
 constexpr int METRIC_ICON_SIZE = 15;
 constexpr int TIMER_BAR_HEIGHT = 7;
@@ -494,7 +496,21 @@ void ManagePredictionDialog::showDialog(ChannelPtr channel,
 {
     auto *dialog = new ManagePredictionDialog(
         std::move(channel), std::move(broadcasterID), std::move(channelLogin),
-        prediction, useModerationAuth,
+        prediction, useModerationAuth, true,
+        static_cast<QWidget *>(&(getApp()->getWindows()->getMainWindow())));
+    dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+    dialog->show();
+    dialog->activateWindow();
+    dialog->raise();
+}
+
+void ManagePredictionDialog::showViewerDialog(
+    ChannelPtr channel, QString broadcasterID, QString channelLogin,
+    const HelixPrediction &prediction)
+{
+    auto *dialog = new ManagePredictionDialog(
+        std::move(channel), std::move(broadcasterID), std::move(channelLogin),
+        prediction, false, false,
         static_cast<QWidget *>(&(getApp()->getWindows()->getMainWindow())));
     dialog->setAttribute(Qt::WA_DeleteOnClose, true);
     dialog->show();
@@ -504,11 +520,13 @@ void ManagePredictionDialog::showDialog(ChannelPtr channel,
 
 ManagePredictionDialog::ManagePredictionDialog(
     ChannelPtr channel, QString broadcasterID, QString channelLogin,
-    const HelixPrediction &prediction, bool useModerationAuth, QWidget *parent)
+    const HelixPrediction &prediction, bool useModerationAuth, bool canManage,
+    QWidget *parent)
     : BasePopup(
           {
               BaseWindow::EnableCustomFrame,
               BaseWindow::CloseButtonOnly,
+              BaseWindow::FixedSizeCustomFrame,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
           },
@@ -518,6 +536,7 @@ ManagePredictionDialog::ManagePredictionDialog(
     , channelLogin_(std::move(channelLogin))
     , prediction_(prediction)
     , useModerationAuth_(useModerationAuth)
+    , canManage_(canManage)
 {
     this->setWindowTitle(QStringLiteral("Manage Prediction"));
     this->setScaleIndependentSize(DIALOG_WIDTH, TWO_OUTCOME_ACTIVE_HEIGHT);
@@ -557,6 +576,24 @@ ManagePredictionDialog::ManagePredictionDialog(
     this->outcomesLayout_->setSpacing(5);
     root->addLayout(this->outcomesLayout_);
 
+    this->voteControls_ = new QWidget(this);
+    auto *voteControlsLayout = new QHBoxLayout(this->voteControls_);
+    voteControlsLayout->setContentsMargins(0, 3, 0, 0);
+    voteControlsLayout->setSpacing(8);
+    auto *amountLabel =
+        new QLabel(QStringLiteral("Channel Points"), this->voteControls_);
+    this->voteAmount_ = new QSpinBox(this->voteControls_);
+    this->voteAmount_->setRange(10, 250000);
+    this->voteAmount_->setValue(10);
+    this->voteAmount_->setGroupSeparatorShown(true);
+    this->voteAmount_->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    this->voteAmount_->setFixedWidth(90);
+    voteControlsLayout->addWidget(amountLabel);
+    voteControlsLayout->addWidget(this->voteAmount_);
+    voteControlsLayout->addStretch(1);
+    this->voteControls_->hide();
+    root->addWidget(this->voteControls_);
+
     this->errorLabel_ =
         textLabel(QString{}, QStringLiteral("PredictionManageError"), this);
     this->errorLabel_->setWordWrap(true);
@@ -579,6 +616,13 @@ ManagePredictionDialog::ManagePredictionDialog(
         QStringLiteral("PredictionManageButton"));
     this->summaryButton_->setCursor(Qt::PointingHandCursor);
 
+    this->predictButton_ =
+        new QPushButton(QStringLiteral("Predict"), this);
+    this->predictButton_->setObjectName(
+        QStringLiteral("PredictionManageButton"));
+    this->predictButton_->setCursor(Qt::PointingHandCursor);
+    this->predictButton_->hide();
+
     this->backButton_ = new QPushButton(QStringLiteral("Back"), this);
     this->backButton_->setObjectName(
         QStringLiteral("PredictionManageButton"));
@@ -591,6 +635,7 @@ ManagePredictionDialog::ManagePredictionDialog(
     this->actionButton_->setCursor(Qt::PointingHandCursor);
 
     buttonRow->addStretch(1);
+    buttonRow->addWidget(this->predictButton_);
     buttonRow->addWidget(this->summaryButton_);
     buttonRow->addWidget(this->deleteButton_);
     buttonRow->addWidget(this->backButton_);
@@ -605,13 +650,30 @@ ManagePredictionDialog::ManagePredictionDialog(
             "https://www.twitch.tv/popout/%1/predictions/summary")
                                            .arg(this->channelLogin_)));
     });
+    QObject::connect(this->predictButton_, &QPushButton::clicked, this,
+                     [this] { this->setVoting(true); });
     QObject::connect(this->backButton_, &QPushButton::clicked, this, [this] {
-        this->setChoosingOutcome(false);
+        if (this->voting_)
+        {
+            this->setVoting(false);
+        }
+        else
+        {
+            this->setChoosingOutcome(false);
+        }
     });
     QObject::connect(this->actionButton_, &QPushButton::clicked, this, [this] {
-        if (this->submissionsOpen())
+        if (this->voting_)
+        {
+            this->submitPrediction();
+        }
+        else if (this->submissionsOpen() && this->canManage_)
         {
             this->lockPrediction();
+        }
+        else if (this->submissionsOpen() && this->canVote())
+        {
+            this->setVoting(true);
         }
         else if (!this->choosingOutcome_)
         {
@@ -729,6 +791,15 @@ QLabel#PredictionMetricValue {
 QLabel#PredictionManageError {
     color: #ff6b6b;
 }
+QSpinBox {
+    background: %5;
+    color: %2;
+    border: 1px solid %6;
+    border-radius: 4px;
+    padding: 4px 7px;
+    selection-background-color: palette(highlight);
+    selection-color: palette(highlighted-text);
+}
 QPushButton#PredictionManageButton {
     background: %5;
     color: %2;
@@ -775,11 +846,11 @@ void ManagePredictionDialog::rebuildOutcomes()
     const auto background =
         theme != nullptr && theme->isLightTheme() ? QColor(63, 134, 255, 32)
                                                   : QColor(63, 134, 255, 38);
-    this->outcomesLayout_->setContentsMargins(
-        0, this->choosingOutcome_ ? 7 : 5, 0, 0);
-    this->outcomesLayout_->setSpacing(this->choosingOutcome_ ? 10 : 5);
+    const bool selecting = this->choosingOutcome_ || this->voting_;
+    this->outcomesLayout_->setContentsMargins(0, selecting ? 7 : 5, 0, 0);
+    this->outcomesLayout_->setSpacing(selecting ? 10 : 5);
 
-    if (this->choosingOutcome_)
+    if (selecting)
     {
         if (this->selectedOutcomeID_.isEmpty())
         {
@@ -1048,23 +1119,44 @@ void ManagePredictionDialog::rebuildOutcomes()
 void ManagePredictionDialog::updateTimerUi()
 {
     const auto open = this->submissionsOpen();
-    const auto choosing = this->choosingOutcome_ && !open;
+    if (this->voting_ && !open)
+    {
+        this->voting_ = false;
+        this->selectedOutcomeID_.clear();
+        this->rebuildOutcomes();
+    }
 
-    this->setWindowTitle(choosing ? QStringLiteral("Choose Outcome")
-                                  : QStringLiteral("Manage Prediction"));
-    this->statusLabel_->setText(choosing ? QStringLiteral("Choose Outcome")
-                                         : open ? QStringLiteral("Submissions Open")
-                                                : QStringLiteral(
-                                                      "Submissions Closed"));
-    this->statusLabel_->setProperty("chooseMode", choosing);
+    const auto choosing = this->choosingOutcome_ && !open && this->canManage_;
+    const auto voting = this->voting_ && open;
+
+    this->setWindowTitle(voting ? QStringLiteral("Make a Prediction")
+        : choosing             ? QStringLiteral("Choose Outcome")
+        : this->canManage_     ? QStringLiteral("Manage Prediction")
+                               : QStringLiteral("Prediction"));
+    this->statusLabel_->setText(voting ? QStringLiteral("Make a Prediction")
+        : choosing                  ? QStringLiteral("Choose Outcome")
+        : open                      ? QStringLiteral("Submissions Open")
+                                    : QStringLiteral("Submissions Closed"));
+    this->statusLabel_->setProperty("chooseMode", choosing || voting);
     repolish(this->statusLabel_);
-    this->descriptionLabel_->setVisible(choosing);
+    this->descriptionLabel_->setText(
+        voting
+            ? QStringLiteral(
+                  "Choose an outcome and wager Channel Points. This cannot be "
+                  "changed after submitting.")
+            : QStringLiteral(
+                  "Select the result and reward the viewers who voted for it "
+                  "with Channel Points."));
+    this->descriptionLabel_->setVisible(choosing || voting);
     this->timerBar_->setProgress(this->timerProgress());
     this->timerBar_->setVisible(open && !choosing);
+    this->voteControls_->setVisible(voting);
     this->actionButton_->setText(
-        open ? QStringLiteral("End Submissions")
-             : choosing ? QStringLiteral("Complete Prediction")
-                        : QStringLiteral("Choose Outcome"));
+        voting ? QStringLiteral("Predict")
+        : open && this->canManage_ ? QStringLiteral("End Submissions")
+        : open && this->canVote()  ? QStringLiteral("Predict")
+        : choosing                 ? QStringLiteral("Complete Prediction")
+                                   : QStringLiteral("Choose Outcome"));
     this->updateActionButton();
 
     if (this->lastSubmissionsOpen_ != open)
@@ -1076,44 +1168,68 @@ void ManagePredictionDialog::updateTimerUi()
 
 void ManagePredictionDialog::updateActionButton()
 {
-    const auto choosing = this->choosingOutcome_ && !this->submissionsOpen();
+    const auto open = this->submissionsOpen();
+    const auto choosing = this->choosingOutcome_ && !open && this->canManage_;
+    const auto voting = this->voting_ && open;
+    const auto selecting = choosing || voting;
+    const auto canVote = this->canVote();
 
-    this->summaryButton_->setVisible(!choosing);
-    this->deleteButton_->setVisible(!choosing);
-    this->backButton_->setVisible(choosing);
+    this->predictButton_->setVisible(open && this->canManage_ && canVote &&
+                                     !voting);
+    this->summaryButton_->setVisible(!selecting);
+    this->deleteButton_->setVisible(this->canManage_ && !selecting);
+    this->backButton_->setVisible(selecting);
+    this->actionButton_->setVisible(
+        voting || (open && (this->canManage_ || canVote)) ||
+        (!open && this->canManage_));
     this->actionButton_->setProperty("primary", false);
     repolish(this->actionButton_);
 
     if (this->submitting_)
     {
+        this->predictButton_->setEnabled(false);
+        this->summaryButton_->setEnabled(false);
         this->deleteButton_->setEnabled(false);
         this->backButton_->setEnabled(false);
         this->actionButton_->setEnabled(false);
         return;
     }
 
-    this->deleteButton_->setEnabled(this->prediction_.status == "ACTIVE" ||
-                                    this->prediction_.status == "LOCKED");
+    this->predictButton_->setEnabled(canVote);
+    this->deleteButton_->setEnabled(
+        this->canManage_ && (this->prediction_.status == "ACTIVE" ||
+                             this->prediction_.status == "LOCKED"));
     this->summaryButton_->setEnabled(true);
-    this->backButton_->setEnabled(choosing);
-    this->actionButton_->setEnabled(this->submissionsOpen() ||
-                                    (choosing
-                                         ? !this->selectedOutcomeID_.isEmpty()
-                                         : !this->prediction_.outcomes.empty()));
+    this->backButton_->setEnabled(selecting);
+    this->actionButton_->setEnabled(
+        (voting && canVote && !this->selectedOutcomeID_.isEmpty() &&
+         this->voteAmount_->value() >= 10) ||
+        (open && this->canManage_ && !voting) ||
+        (open && canVote && !this->canManage_ && !voting) ||
+        (choosing && !this->selectedOutcomeID_.isEmpty()) ||
+        (!open && this->canManage_ && !choosing &&
+         !this->prediction_.outcomes.empty()));
 }
 
 void ManagePredictionDialog::updateDialogSize()
 {
     const auto outcomeCount =
         static_cast<int>(this->prediction_.outcomes.size());
-    if (this->choosingOutcome_ && !this->submissionsOpen())
+    const auto voting = this->voting_ && this->submissionsOpen();
+    if ((this->choosingOutcome_ && !this->submissionsOpen()) || voting)
     {
         const auto targetHeight = OUTCOME_SELECTION_BASE_HEIGHT +
-                                  outcomeCount * OUTCOME_SELECTION_ROW_HEIGHT;
+                                  outcomeCount * OUTCOME_SELECTION_ROW_HEIGHT +
+                                  (voting ? VOTING_CONTROLS_HEIGHT : 0);
         this->setScaleIndependentSize(
             DIALOG_WIDTH,
-            std::clamp(targetHeight, OUTCOME_SELECTION_MIN_HEIGHT,
-                       OUTCOME_SELECTION_MAX_HEIGHT));
+            std::clamp(targetHeight,
+                       voting ? OUTCOME_SELECTION_MIN_HEIGHT +
+                                    VOTING_CONTROLS_HEIGHT
+                              : OUTCOME_SELECTION_MIN_HEIGHT,
+                       voting ? OUTCOME_SELECTION_MAX_HEIGHT +
+                                    VOTING_CONTROLS_HEIGHT
+                              : OUTCOME_SELECTION_MAX_HEIGHT));
         this->timerBar_->setFixedWidth(TIMER_BAR_WIDTH);
         return;
     }
@@ -1138,7 +1254,7 @@ void ManagePredictionDialog::updateDialogSize()
 
 void ManagePredictionDialog::setChoosingOutcome(bool choosing)
 {
-    if (choosing && (this->submissionsOpen() ||
+    if (choosing && (!this->canManage_ || this->submissionsOpen() ||
                      this->prediction_.outcomes.empty()))
     {
         return;
@@ -1150,6 +1266,7 @@ void ManagePredictionDialog::setChoosingOutcome(bool choosing)
     }
 
     this->clearError();
+    this->voting_ = false;
     this->choosingOutcome_ = choosing;
     if (choosing)
     {
@@ -1173,9 +1290,26 @@ void ManagePredictionDialog::setChoosingOutcome(bool choosing)
     this->updateDialogSize();
 }
 
+void ManagePredictionDialog::setVoting(bool voting)
+{
+    if ((voting && (!this->canVote() || this->prediction_.outcomes.empty())) ||
+        this->voting_ == voting)
+    {
+        return;
+    }
+
+    this->clearError();
+    this->choosingOutcome_ = false;
+    this->voting_ = voting;
+    this->selectedOutcomeID_.clear();
+    this->rebuildOutcomes();
+    this->updateTimerUi();
+    this->updateDialogSize();
+}
+
 void ManagePredictionDialog::selectOutcome(const QString &outcomeID)
 {
-    if (!this->choosingOutcome_)
+    if (!this->choosingOutcome_ && !this->voting_)
     {
         return;
     }
@@ -1188,11 +1322,98 @@ void ManagePredictionDialog::selectOutcome(const QString &outcomeID)
     this->updateActionButton();
 }
 
+void ManagePredictionDialog::submitPrediction()
+{
+    if (this->submitting_ || !this->voting_ || !this->canVote() ||
+        this->selectedOutcomeID_.isEmpty())
+    {
+        return;
+    }
+
+    auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
+    if (currentUser == nullptr || currentUser->isAnon())
+    {
+        this->showError(
+            QStringLiteral("Log in to Twitch before making a prediction."));
+        return;
+    }
+
+    QString oauthClient = currentUser->getOAuthClient();
+    QString oauthToken = currentUser->getOAuthToken();
+    if (this->useModerationAuth_)
+    {
+        QString authError;
+        const auto moderationAccount =
+            TwitchModerationAuth::resolveForCurrentUser(
+                currentUser->getUserId(), &authError);
+        if (!moderationAccount.isValid())
+        {
+            this->showError(authError.isEmpty()
+                                ? QStringLiteral(
+                                      "Reconnect Twitch mod actions before "
+                                      "making a prediction.")
+                                : authError);
+            return;
+        }
+        oauthClient = moderationAccount.clientId;
+        oauthToken = moderationAccount.oauthToken;
+    }
+
+    QString outcomeTitle;
+    for (const auto &outcome : this->prediction_.outcomes)
+    {
+        if (outcome.id == this->selectedOutcomeID_)
+        {
+            outcomeTitle = outcome.title;
+            break;
+        }
+    }
+
+    const auto points = this->voteAmount_->value();
+    this->clearError();
+    this->submitting_ = true;
+    this->updateActionButton();
+
+    QPointer<ManagePredictionDialog> self(this);
+    TwitchWebApi::makePrediction(
+        this->prediction_.id, this->selectedOutcomeID_, points, oauthClient,
+        oauthToken,
+        [self, channel = this->channel_, outcomeTitle, points] {
+            notifyPollsAndPredictionsChanged(channel);
+            if (channel != nullptr)
+            {
+                channel->addSystemMessage(
+                    QStringLiteral("Predicted %1 Channel Points on '%2'.")
+                        .arg(localizeNumbers(points), outcomeTitle));
+            }
+            if (self != nullptr)
+            {
+                self->close();
+            }
+        },
+        [self](const QString &error) {
+            if (self != nullptr)
+            {
+                self->submitting_ = false;
+                self->showError(QStringLiteral("Failed to make prediction - ") +
+                                error);
+                self->updateActionButton();
+            }
+        });
+}
+
 void ManagePredictionDialog::endPrediction(
     bool refundPoints, QString winningOutcomeID,
     std::function<void(const HelixPrediction &)> successCallback,
     std::function<void(const QString &)> failureCallback)
 {
+    if (!this->canManage_)
+    {
+        failureCallback(QStringLiteral(
+            "This Twitch account cannot manage this prediction."));
+        return;
+    }
+
     if (this->prediction_.id.trimmed().isEmpty())
     {
         failureCallback(QStringLiteral(
@@ -1259,7 +1480,7 @@ void ManagePredictionDialog::endPrediction(
 
 void ManagePredictionDialog::cancelPrediction()
 {
-    if (this->submitting_)
+    if (this->submitting_ || !this->canManage_)
     {
         return;
     }
@@ -1278,7 +1499,7 @@ void ManagePredictionDialog::cancelPrediction()
             if (channel != nullptr)
             {
                 channel->addSystemMessage(QStringLiteral(
-                    "Deleted prediction: '%1'").arg(data.title));
+                    "Deleted Twitch prediction: '%1'").arg(data.title));
             }
             if (self != nullptr)
             {
@@ -1297,7 +1518,7 @@ void ManagePredictionDialog::cancelPrediction()
 
 void ManagePredictionDialog::lockPrediction()
 {
-    if (this->submitting_)
+    if (this->submitting_ || !this->canManage_)
     {
         return;
     }
@@ -1342,7 +1563,7 @@ void ManagePredictionDialog::lockPrediction()
 
 void ManagePredictionDialog::resolvePrediction()
 {
-    if (this->submitting_ || !this->choosingOutcome_ ||
+    if (this->submitting_ || !this->canManage_ || !this->choosingOutcome_ ||
         this->selectedOutcomeID_.isEmpty())
     {
         return;
@@ -1406,6 +1627,19 @@ bool ManagePredictionDialog::submissionsOpen() const
     }
 
     return this->timerProgress() > 0.0;
+}
+
+bool ManagePredictionDialog::canVote() const
+{
+    if (!this->submissionsOpen())
+    {
+        return false;
+    }
+
+    const auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
+    return currentUser != nullptr && !currentUser->isAnon() &&
+           !currentUser->getOAuthToken().trimmed().isEmpty() &&
+           currentUser->getUserId() != this->broadcasterID_;
 }
 
 double ManagePredictionDialog::timerProgress() const

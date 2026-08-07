@@ -21,6 +21,7 @@
 #include "widgets/dialogs/LastRunCrashDialog.hpp"
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QPalette>
 #include <QStyleFactory>
@@ -248,6 +249,9 @@ void clearCrashes(QDir dir)
 void runGui(QApplication &a, const Paths &paths, Settings &settings,
             const Args &args, Updates &updates)
 {
+    QElapsedTimer guiStartupTimer;
+    guiStartupTimer.start();
+
     initQt(args);
     a.setQuitOnLastWindowClosed(false);
     initResources();
@@ -296,7 +300,7 @@ void runGui(QApplication &a, const Paths &paths, Settings &settings,
     app.initialize(settings, paths);
 
     UsageAnalytics usageAnalytics(settings);
-    usageAnalytics.start();
+    usageAnalytics.start(args.crashRecovery, guiStartupTimer.elapsed());
 
     app.run();
 

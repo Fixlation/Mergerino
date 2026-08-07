@@ -1029,13 +1029,6 @@ QUrl twitchPollPopoutUrl(const TwitchChannel &channel)
                     .arg(channel.getName()));
 }
 
-QUrl twitchPredictionSummaryUrl(const TwitchChannel &channel)
-{
-    return QUrl(QStringLiteral(
-                    "https://www.twitch.tv/popout/%1/predictions/summary")
-                    .arg(channel.getName()));
-}
-
 std::vector<MessagePlatform> platformSelectionIntersection(
     const std::vector<MessagePlatform> &availablePlatforms,
     const std::vector<MessagePlatform> &selectedPlatforms)
@@ -6896,23 +6889,26 @@ void SplitInput::updatePollPredictionButtons()
         predictionTooltip =
             QStringLiteral("Start or open a prediction — choose platform");
     }
-    else if (hasOpenKickPrediction)
+    else if (kickPredictionAvailable)
     {
-        predictionTooltip = QStringLiteral("Open Kick prediction");
-    }
-    else if (canManageKick)
-    {
-        predictionTooltip =
-            kickWebsiteConnected
-                ? QStringLiteral("Start Kick prediction")
-                : QStringLiteral(
-                      "Connect Kick’s website session to start predictions");
+        if (hasOpenKickPrediction)
+        {
+            predictionTooltip = QStringLiteral("Open Kick prediction");
+        }
+        else if (canManageKick)
+        {
+            predictionTooltip =
+                kickWebsiteConnected
+                    ? QStringLiteral("Start Kick prediction")
+                    : QStringLiteral(
+                          "Connect Kick’s website session to start predictions");
+        }
     }
     else if (twitchPredictionAvailable)
     {
         if (!canManageTwitch && hasOpenTwitchPrediction)
         {
-            predictionTooltip = QStringLiteral("Open prediction on Twitch");
+            predictionTooltip = QStringLiteral("Make Twitch prediction");
         }
         else if (needsModerationAuthLogin(twitchChannel))
         {
@@ -6934,17 +6930,20 @@ void SplitInput::updatePollPredictionButtons()
     {
         pollTooltip = QStringLiteral("Start or open a poll — choose platform");
     }
-    else if (hasActiveKickPoll)
+    else if (kickPollAvailable)
     {
-        pollTooltip = QStringLiteral("Open Kick poll");
-    }
-    else if (canManageKick)
-    {
-        pollTooltip =
-            kickWebsiteConnected
-                ? QStringLiteral("Start Kick poll")
-                : QStringLiteral(
-                      "Connect Kick’s website session to start polls");
+        if (hasActiveKickPoll)
+        {
+            pollTooltip = QStringLiteral("Open Kick poll");
+        }
+        else if (canManageKick)
+        {
+            pollTooltip =
+                kickWebsiteConnected
+                    ? QStringLiteral("Start Kick poll")
+                    : QStringLiteral(
+                          "Connect Kick’s website session to start polls");
+        }
     }
     else if (twitchPollAvailable)
     {
@@ -7966,8 +7965,8 @@ void SplitInput::openTwitchPollDialog()
 
         const auto roomID = twitchChannel->roomId();
         const auto finishSuccess =
-            [guard = QPointer<SplitInput>(this), channel](
-                const QString &title) {
+            [guard = QPointer<SplitInput>(this), channel, roomID](
+                const QString &title, const QString &pollID) {
                 if (channel != nullptr)
                 {
                     channel->addSystemMessage(
@@ -7976,7 +7975,8 @@ void SplitInput::openTwitchPollDialog()
                 if (guard != nullptr &&
                     guard->split_->twitchPollsAndPredictionsBar_ != nullptr)
                 {
-                    guard->split_->twitchPollsAndPredictionsBar_->refreshNow();
+                    guard->split_->twitchPollsAndPredictionsBar_
+                        ->markTwitchPollEnded(roomID, pollID);
                 }
             };
         const auto finishFailure = [channel](const QString &error) {
@@ -8006,8 +8006,9 @@ void SplitInput::openTwitchPollDialog()
                     const auto title = active->title;
                     getHelix()->endPoll(
                         roomID, active->id, false,
-                        [finishSuccess, title](const HelixPoll &) {
-                            finishSuccess(title);
+                        [finishSuccess, title, pollID = active->id](
+                            const HelixPoll &) {
+                            finishSuccess(title, pollID);
                         },
                         finishFailure);
                 },
@@ -8036,11 +8037,10 @@ void SplitInput::openTwitchPollDialog()
             return;
         }
 
-        TwitchWebApi::getPolls(
-            roomID, {}, 1, {}, moderationAccount.clientId,
-            moderationAccount.oauthToken,
-            [roomID, moderationAccount, finishSuccess,
-             finishFailure](const HelixPolls &result) {
+        TwitchWebApi::getActivePollAndPredictions(
+            roomID, moderationAccount.clientId, moderationAccount.oauthToken,
+            [roomID, moderationAccount, finishSuccess, finishFailure](
+                const HelixPolls &result, const HelixPredictions &) {
                 const auto active = std::ranges::find_if(
                     result.polls, [](const HelixPoll &poll) {
                         return poll.status == QStringLiteral("ACTIVE");
@@ -8055,8 +8055,8 @@ void SplitInput::openTwitchPollDialog()
                 TwitchWebApi::endPoll(
                     roomID, active->id, moderationAccount.clientId,
                     moderationAccount.oauthToken,
-                    [finishSuccess, title] {
-                        finishSuccess(title);
+                    [finishSuccess, title, pollID = active->id] {
+                        finishSuccess(title, pollID);
                     },
                     finishFailure);
             },
@@ -8288,11 +8288,78 @@ void SplitInput::openTwitchPredictionDialog()
         this->split_->twitchPollsAndPredictionsBar_->hasOpenTwitchPrediction();
     if (!canManage)
     {
-        if (hasOpenPrediction)
+        if (!hasOpenPrediction)
         {
-            QDesktopServices::openUrl(
-                twitchPredictionSummaryUrl(*twitchChannel));
+            return;
         }
+
+        auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
+        if (currentUser == nullptr || currentUser->isAnon())
+        {
+            if (channel != nullptr)
+            {
+                channel->addSystemMessage(QStringLiteral(
+                    "Log in to Twitch before making a prediction."));
+            }
+            return;
+        }
+
+        const auto roomId = twitchChannel->roomId();
+        const auto channelLogin = twitchChannel->getName();
+        const auto openLocalPrediction =
+            [channel, roomId, channelLogin] {
+                const auto predictionJson =
+                    TwitchPollsAndPredictionsBar::localPredictionJson(roomId);
+                if (!predictionJson ||
+                    predictionJson->value(QStringLiteral("id"))
+                        .toString()
+                        .trimmed()
+                        .isEmpty())
+                {
+                    return false;
+                }
+
+                ManagePredictionDialog::showViewerDialog(
+                    channel, roomId, channelLogin,
+                    HelixPrediction(*predictionJson));
+                return true;
+            };
+
+        TwitchWebApi::getActivePollAndPredictions(
+            roomId, currentUser->getOAuthClient(),
+            currentUser->getOAuthToken(),
+            [channel, roomId, channelLogin,
+             openLocalPrediction](const HelixPolls &,
+                                  const HelixPredictions &result) {
+                const auto openPrediction = std::find_if(
+                    result.predictions.begin(), result.predictions.end(),
+                    [](const HelixPrediction &prediction) {
+                        return prediction.status == "ACTIVE" ||
+                               prediction.status == "LOCKED";
+                    });
+                if (openPrediction != result.predictions.end())
+                {
+                    TwitchPollsAndPredictionsBar::rememberLocalPrediction(
+                        roomId, *openPrediction);
+                    ManagePredictionDialog::showViewerDialog(
+                        channel, roomId, channelLogin, *openPrediction);
+                    return;
+                }
+
+                if (!openLocalPrediction() && channel != nullptr)
+                {
+                    channel->addSystemMessage(
+                        QStringLiteral("Could not find an open prediction"));
+                }
+            },
+            [channel, openLocalPrediction](const QString &error) {
+                if (!openLocalPrediction() && channel != nullptr)
+                {
+                    channel->addSystemMessage(
+                        QStringLiteral("Failed to query predictions - ") +
+                        error);
+                }
+            });
         return;
     }
 

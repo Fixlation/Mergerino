@@ -237,13 +237,32 @@ QString kickIdentityError(const NetworkResult &result)
             "Kick website session security data expired. Reconnect it under "
             "Settings > Accounts.");
     }
-    if (result.status() == 401 || result.status() == 403)
+    if (result.status() == 401)
     {
         return QStringLiteral(
             "Kick website session authorization expired. Reconnect it under "
             "Settings > Accounts.");
     }
+    if (result.status() == 403)
+    {
+        return message.isEmpty()
+                   ? QStringLiteral(
+                         "Kick denied this action for the connected account.")
+                   : message;
+    }
     return message.isEmpty() ? result.formatError() : message;
+}
+
+QString kickPredictionManagementError(const NetworkResult &result)
+{
+    if (result.status() == 403)
+    {
+        return QStringLiteral(
+            "Kick does not allow moderators who voted in this prediction to "
+            "manage or delete it.");
+    }
+
+    return kickIdentityError(result);
 }
 
 uint64_t kickWebsiteUserID(const QJsonObject &root)
@@ -612,6 +631,8 @@ KickPrivateChannelInfo::KickPrivateChannelInfo(BoostJsonObject obj)
 KickPrivateUserInChannelInfo::KickPrivateUserInChannelInfo(BoostJsonObject obj)
     : userID(obj["id"].toUint64())
     , username(obj["username"].toQString())
+    , isModerator(obj["is_moderator"].toBool())
+    , isChannelOwner(obj["is_channel_owner"].toBool())
 
 {
     auto badgesV2 = obj["badges_v2"].toArray();
@@ -1272,6 +1293,49 @@ void KickApi::updatePrediction(const QString &channelSlug,
     const auto url = u"https://kick.com/api/v2/channels/" % slug %
                      u"/predictions/" % id;
     NetworkRequest request(QUrl{url}, NetworkRequestType::Patch);
+    std::move(request)
+        .headerList(kickBrowserSessionHeaders(token, slug))
+        .json(payload)
+        .timeout(20000)
+        .onError([cb](const NetworkResult &result) {
+            cb(makeUnexpected(kickPredictionManagementError(result)));
+        })
+        .onSuccess([cb = std::move(cb)](const NetworkResult &) {
+            cb(ExpectedStr<void>{});
+        })
+        .execute();
+}
+
+void KickApi::votePrediction(const QString &channelSlug,
+                             const QString &chatIdentityToken,
+                             const QString &outcomeID, int amount,
+                             Callback<void> cb)
+{
+    const auto token = chatIdentityToken.trimmed();
+    const auto slug = slugify(channelSlug);
+    const auto outcome = outcomeID.trimmed();
+    if (token.isEmpty())
+    {
+        cb(makeUnexpected(
+            u"Connect Kick's website session under Settings > Accounts "
+            u"before making a prediction."_s));
+        return;
+    }
+    if (slug.isEmpty() || outcome.isEmpty() || amount < 10 || amount > 250000)
+    {
+        cb(makeUnexpected(
+            u"Choose an outcome and wager between 10 and 250,000 Channel "
+            u"Points."_s));
+        return;
+    }
+
+    const QJsonObject payload{
+        {QStringLiteral("amount"), amount},
+        {QStringLiteral("outcome_id"), outcome},
+    };
+    const auto url = u"https://kick.com/api/v2/channels/" % slug %
+                     u"/predictions/vote";
+    NetworkRequest request(QUrl{url}, NetworkRequestType::Post);
     std::move(request)
         .headerList(kickBrowserSessionHeaders(token, slug))
         .json(payload)

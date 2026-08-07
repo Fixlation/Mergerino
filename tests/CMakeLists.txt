@@ -10,6 +10,7 @@ set(test_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/ChannelChatters.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/AccessGuard.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/ActivityMessageUtils.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/KickApi.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkCommon.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkRequest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkResult.cpp

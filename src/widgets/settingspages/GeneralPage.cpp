@@ -1222,10 +1222,9 @@ void GeneralPage::initLayout(GeneralPageView &layout)
     SettingWidget::checkbox("Share anonymous usage analytics",
                             s.shareAnonymousUsageAnalytics)
         ->setTooltip(
-            "Share a random installation ID and Mergerino version to measure "
-            "total and currently active users. No account "
-            "details, usernames, channels, messages, or hardware identifiers "
-            "are sent.")
+            "Share a random installation ID, Mergerino version/build and "
+            "basic reliability information. No account details, usernames, "
+            "channels, or messages are sent.")
         ->addKeywords({"analytics", "telemetry", "privacy"})
         ->addTo(layout);
 

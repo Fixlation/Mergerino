@@ -42,6 +42,10 @@ public:
     };
 
     static bool isDowngradeOf(const QString &online, const QString &current);
+    static bool isUpdateAvailable(const QString &onlineVersion,
+                                  const QString &currentVersion,
+                                  const QString &onlineCommit,
+                                  const QString &currentCommit);
 
     /**
      * @brief Delete old files that belong to the update process
@@ -68,6 +72,7 @@ public:
 private:
     QString currentVersion_;
     QString onlineVersion_;
+    QString onlineCommit_;
     QString updateDownloadUrl_;
     Status status_ = None;
     bool isDowngrade_{};

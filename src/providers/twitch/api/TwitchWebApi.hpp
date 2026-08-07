@@ -112,6 +112,12 @@ public:
             successCallback,
         std::function<void(const QString &)> failureCallback);
 
+    static void makePrediction(
+        const QString &predictionId, const QString &outcomeId, int points,
+        const QString &oauthClient, const QString &oauthToken,
+        std::function<void()> successCallback,
+        std::function<void(const QString &)> failureCallback);
+
     static void getPredictions(
         const QString &channelId, QStringList ids, int first,
         const QString &after, const QString &oauthClient,
