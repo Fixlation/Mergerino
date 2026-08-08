@@ -246,14 +246,35 @@ public:
         this->invalidateContent();
     }
 
+    void setActive(bool active)
+    {
+        if (this->active_ == active)
+        {
+            return;
+        }
+
+        this->active_ = active;
+        this->update();
+    }
+
 protected:
     void paintContent(QPainter &painter) override
     {
+        if (this->active_)
+        {
+            auto highlightColor = this->theme->window.text;
+            highlightColor.setAlpha(55);
+            const int highlightInset = int(2 * this->scale());
+            painter.fillRect(
+                this->rect().adjusted(highlightInset, 0, -highlightInset, 0),
+                highlightColor);
+        }
+
         const auto scale = this->scale();
-        const int iconSize = int(16 * scale);
-        const int leftPadding = int(4 * scale);
-        const int gap = int(4 * scale);
-        const int rightPadding = int(7 * scale);
+        const int iconSize = int(ICON_SIZE * scale);
+        const int leftPadding = int(LEFT_PADDING * scale);
+        const int gap = int(GAP * scale);
+        const int rightPadding = int(RIGHT_PADDING * scale);
         const int textX = leftPadding + iconSize + gap;
 
         const QRectF iconRect{
@@ -262,6 +283,9 @@ protected:
         };
         this->icon_.render(&painter, iconRect);
 
+        auto textFont = this->font();
+        textFont.setWeight(QFont::Medium);
+        painter.setFont(textFont);
         painter.setPen(this->theme->window.text);
         painter.drawText(
             QRect{textX, 0, this->width() - textX - rightPadding,
@@ -296,15 +320,25 @@ private:
 
     void refreshWidth()
     {
-        const QFontMetrics metrics(this->font());
-        const int fixedContentWidth = int(31 * this->scale());
+        auto textFont = this->font();
+        textFont.setWeight(QFont::Medium);
+        const QFontMetrics metrics(textFont);
+        const int fixedContentWidth =
+            int((LEFT_PADDING + ICON_SIZE + GAP + RIGHT_PADDING) *
+                this->scale());
         this->setScaleIndependentWidth(0);
         this->setFixedWidth(fixedContentWidth +
                             metrics.horizontalAdvance(this->text_));
     }
 
+    static constexpr int ICON_SIZE = 24;
+    static constexpr int LEFT_PADDING = 2;
+    static constexpr int GAP = 0;
+    static constexpr int RIGHT_PADDING = 7;
+
     QString text_;
     QSvgRenderer icon_;
+    bool active_ = false;
 };
 
 Window::Window(WindowType type, QWidget *parent)
@@ -578,6 +612,12 @@ void Window::updateTopMostTitlebarButton()
 
 void Window::showUpdateDialog()
 {
+    if (this->updateDialogHandle_ != nullptr)
+    {
+        this->updateDialogHandle_->close();
+        return;
+    }
+
     if (this->updateTitlebarButton_ == nullptr ||
         getApp()->getUpdates().getStatus() != Updates::UpdateAvailable)
     {
@@ -585,6 +625,16 @@ void Window::showUpdateDialog()
     }
 
     auto *dialog = new UpdateDialog();
+    this->updateDialogHandle_ = dialog;
+    this->updateTitlebarButton_->setActive(true);
+    QObject::connect(dialog, &QObject::destroyed, this, [this] {
+        this->updateDialogHandle_.clear();
+        if (this->updateTitlebarButton_ != nullptr)
+        {
+            this->updateTitlebarButton_->setActive(false);
+        }
+    });
+
     auto globalPoint = this->updateTitlebarButton_->mapToGlobal(
         QPoint(int(-100 * this->scale()),
                this->updateTitlebarButton_->height()));
@@ -607,6 +657,10 @@ void Window::updateTitlebarUpdateButton()
     }
 
     const auto shouldShow = getApp()->getUpdates().shouldShowUpdateButton();
+    if (!shouldShow && this->updateDialogHandle_ != nullptr)
+    {
+        this->updateDialogHandle_->close();
+    }
     this->updateTitlebarButton_->setVisible(shouldShow);
     this->updateTitlebarButton_->setToolTip(
         shouldShow ? "View Mergerino update" : QString());

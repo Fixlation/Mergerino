@@ -30,8 +30,6 @@
 namespace chatterino::twitch {
 namespace detail {
 
-inline constexpr auto TWITCH_BADGE_IDENTITY_GQL_CLIENT_ID =
-    "kimne78kx3ncx6brgo4mv6brgo4mv6wki5h1ko";
 inline constexpr auto TWITCH_BADGE_IDENTITY_GQL_CLIENT_VERSION =
     "ef928475-9403-42f2-8a34-55784bd08e16";
 inline constexpr auto TWITCH_BADGE_IDENTITY_GQL_USER_AGENT =
@@ -120,7 +118,7 @@ inline bool setTwitchBadgeIdentityRequestHeaders(
     request.setRawHeader("Accept", "application/json");
     request.setRawHeader("Authorization",
                          QByteArray("OAuth ") + token.toUtf8());
-    request.setRawHeader("Client-Id", TWITCH_BADGE_IDENTITY_GQL_CLIENT_ID);
+    request.setRawHeader("Client-Id", account.clientId.trimmed().toUtf8());
     request.setRawHeader("Client-Session-Id",
                          twitchBadgeIdentitySessionId().toUtf8());
     request.setRawHeader("Client-Version",

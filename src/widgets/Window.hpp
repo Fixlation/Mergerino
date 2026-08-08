@@ -10,6 +10,9 @@
 #include <pajlada/settings/setting.hpp>
 #include <pajlada/signals/signal.hpp>
 #include <pajlada/signals/signalholder.hpp>
+
+#include <QPointer>
+
 namespace chatterino {
 
 class PixmapButton;
@@ -60,7 +63,7 @@ private:
     SvgButton *bulkDeleteTitlebarButton_ = nullptr;
     SvgButton *topMostTitlebarButton_ = nullptr;
     AccountTitlebarButton *accountTitlebarButton_ = nullptr;
-    std::shared_ptr<UpdateDialog> updateDialogHandle_;
+    QPointer<UpdateDialog> updateDialogHandle_;
     UpdateTitlebarButton *updateTitlebarButton_ = nullptr;
 
     pajlada::Signals::SignalHolder signalHolder_;

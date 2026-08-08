@@ -47,6 +47,7 @@ constexpr auto JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 constexpr auto PNG_CONTENT_TYPE = "image/png";
 constexpr qsizetype PKCE_VERIFIER_BYTES = 32;
 constexpr qsizetype STATE_BYTES = 32;
+constexpr qsizetype MAX_ERROR_DETAIL_LENGTH = 240;
 constexpr int AUTHORIZATION_TIMEOUT_MS = 5 * 60 * 1000;
 constexpr int NETWORK_STEP_TIMEOUT_MS = 30 * 1000;
 
@@ -67,8 +68,23 @@ QByteArray generateRandomBytes(qsizetype size)
 QString formatAPIError(const NetworkResult &result)
 {
     const auto json = result.parseJson();
-    auto error =
-        json["error_description"_L1].toString(json["message"_L1].toString());
+    auto error = json["error_description"_L1].toString();
+    if (error.isEmpty())
+    {
+        error = json["message"_L1].toString();
+    }
+    if (error.isEmpty())
+    {
+        error = json["error"_L1].toString();
+    }
+    if (error.isEmpty())
+    {
+        error = QString::fromUtf8(result.getData()).simplified();
+        if (error.size() > MAX_ERROR_DETAIL_LENGTH)
+        {
+            error = error.left(MAX_ERROR_DETAIL_LENGTH - 3) % u"...";
+        }
+    }
     if (!error.isEmpty())
     {
         return u"Error: " % error % u" (" % result.formatError() % ')';

@@ -3959,7 +3959,7 @@ void StreamDatabaseBadgePickerPopup::rebuildGrid()
                 rowLayout->setSpacing(8);
 
                 auto *icon = new QLabel(rowWidget);
-                icon->setFixedSize(34, 34);
+                icon->setFixedSize(28, 28);
                 icon->setAlignment(Qt::AlignCenter);
                 icon->setStyleSheet(QStringLiteral(
                     "background:#111114;border:1px solid #2d2d35;"
@@ -3994,7 +3994,7 @@ void StreamDatabaseBadgePickerPopup::rebuildGrid()
                 rowLayout->setSpacing(8);
 
                 auto *icon = new QLabel(rowWidget);
-                icon->setFixedSize(34, 34);
+                icon->setFixedSize(28, 28);
                 icon->setAlignment(Qt::AlignCenter);
                 icon->setStyleSheet(QStringLiteral(
                     "background:#111114;border:1px solid #2d2d35;"
@@ -4573,7 +4573,7 @@ void StreamDatabaseBadgePickerPopup::updateBadgeIconLabel(
     if (!pixmap.isNull())
     {
         label->setText(QString());
-        label->setPixmap(pixmap.scaled(QSize{32, 32}, Qt::KeepAspectRatio,
+        label->setPixmap(pixmap.scaled(QSize{26, 26}, Qt::KeepAspectRatio,
                                        Qt::SmoothTransformation));
         return;
     }

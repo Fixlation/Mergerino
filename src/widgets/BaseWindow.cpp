@@ -520,7 +520,7 @@ void BaseWindow::init()
             this->ui_.buttons.push_back(githubButton);
 
             Label *title = new Label;
-            title->setPadding(QMargins{0, 0, 8, 0});
+            title->setPadding(QMargins{3, 0, 0, 0});
             QObject::connect(this, &QWidget::windowTitleChanged,
                              [title](const QString &text) {
                                  title->setText(text);
@@ -899,7 +899,8 @@ void BaseWindow::appendTitlebarButton(Button *button)
 void BaseWindow::appendTitlebarTitleButton(Button *button)
 {
     this->ui_.buttons.push_back(button);
-    this->ui_.titlebarBox->insertWidget(1, button);
+    const auto titleIndex = this->ui_.titlebarBox->indexOf(this->ui_.titleLabel);
+    this->ui_.titlebarBox->insertWidget(titleIndex + 1, button);
 }
 
 LabelButton *BaseWindow::addTitleBarLabel(std::function<void()> onClicked)

@@ -88,6 +88,11 @@ void addDialogSocialButtons(QHBoxLayout *layout, QWidget *parent)
         QStringLiteral(":/social/github.svg"),
         QStringLiteral("Open the Mergerino GitHub"),
         QUrl(LINK_MERGERINO_SOURCE.toString()), parent));
+    layout->addSpacing(2);
+    layout->addWidget(makeDialogSocialButton(
+        QStringLiteral(":/social/x.svg"),
+        QStringLiteral("Open Mergerino on X"),
+        QUrl(LINK_MERGERINO_X.toString()), parent));
 }
 
 void setLogoPixmap(QLabel *label, const QPixmap &pixmap, const QSize &size)
@@ -579,7 +584,8 @@ UpdateDialog::UpdateDialog()
     : BaseWindow({BaseWindow::Frameless, BaseWindow::TopMost,
                   BaseWindow::EnableCustomFrame, BaseWindow::DisableLayoutSave})
 {
-    this->windowDeactivateAction = WindowDeactivateAction::Delete;
+    this->windowDeactivateAction = WindowDeactivateAction::Nothing;
+    this->setAttribute(Qt::WA_DeleteOnClose);
 
     auto layout =
         LayoutCreator<UpdateDialog>(this).setLayoutType<QVBoxLayout>();
