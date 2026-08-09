@@ -744,9 +744,8 @@ KickApi *KickApi::instance()
 
 QString KickApi::slugify(const QString &usernameOrSlug)
 {
-    auto slugified = usernameOrSlug;
-    slugified.replace('_', '-');
-    return slugified;
+    // Kick slugs can contain underscores, so preserve the exact channel name.
+    return usernameOrSlug;
 }
 
 void KickApi::privateChannelInfo(const QString &username,

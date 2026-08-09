@@ -7,6 +7,14 @@
 
 using namespace chatterino;
 
+TEST(KickApi, PreservesChannelSlugSeparators)
+{
+    EXPECT_EQ(KickApi::slugify(QStringLiteral("channel_with_underscores")),
+              QStringLiteral("channel_with_underscores"));
+    EXPECT_EQ(KickApi::slugify(QStringLiteral("hyphen-channel")),
+              QStringLiteral("hyphen-channel"));
+}
+
 TEST(KickApi, ParsesAuthoritativeChannelRolesWithoutSelectedBadges)
 {
     const boost::json::object payload{
