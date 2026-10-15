@@ -353,7 +353,7 @@ void GeneralPageView::updateNavigationHighlighting()
                       &group == &this->groups_.back()))
         {
             first = false;
-            group.navigationLink->setStyleSheet("color: #00ABF4");
+            group.navigationLink->setStyleSheet("font-weight: 600;");
         }
         else
         {

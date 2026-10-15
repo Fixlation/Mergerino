@@ -202,14 +202,64 @@ std::optional<QPixmap> Frames::first() const
 
 QList<Frame> readFrames(QImageReader &reader, const Url &url)
 {
-    QList<Frame> frames;
-    frames.reserve(reader.imageCount());
+    return readFrames(reader, url, {});
+}
 
-    for (int index = 0; index < reader.imageCount(); ++index)
+QList<Frame> readFrames(QImageReader &reader, const Url &url, QSize decodeBounds)
+{
+    auto size = reader.size();
+    const auto frameCount = reader.imageCount();
+    if (size.isEmpty() || frameCount <= 0)
+    {
+        qCDebug(chatterinoImage) << "Invalid image size or frame count" << url.string
+                                << reader.errorString();
+        return {};
+    }
+
+    if (decodeBounds.isValid() && !decodeBounds.isEmpty())
+    {
+        // Bound temporary source-frame decoding as well as retained image RAM.
+        constexpr double MAX_SOURCE_FRAME_BYTES = 64.0 * 1024 * 1024;
+        if (double(size.width()) * double(size.height()) * 4.0 >
+            MAX_SOURCE_FRAME_BYTES)
+        {
+            qCDebug(chatterinoImage) << "Source image too large" << url.string;
+            return {};
+        }
+        if (size.width() > decodeBounds.width() ||
+            size.height() > decodeBounds.height())
+        {
+            size.scale(decodeBounds, Qt::KeepAspectRatio);
+            size.setWidth(std::max(1, size.width()));
+            size.setHeight(std::max(1, size.height()));
+            reader.setScaledSize(size);
+        }
+    }
+
+    if (double(size.width()) * double(size.height()) * double(frameCount) * 4.0 >
+        double(Image::maxBytesRam))
+    {
+        qCDebug(chatterinoImage) << "Image too large in RAM" << url.string;
+        return {};
+    }
+
+    QList<Frame> frames;
+    frames.reserve(frameCount);
+
+    for (int index = 0; index < frameCount; ++index)
     {
         auto pixmap = QPixmap::fromImageReader(&reader);
         if (!pixmap.isNull())
         {
+            // Some animation plugins decode at source resolution despite
+            // setScaledSize(). Enforce the retained-frame bound as well.
+            if (decodeBounds.isValid() && !decodeBounds.isEmpty() &&
+                (pixmap.width() > decodeBounds.width() ||
+                 pixmap.height() > decodeBounds.height()))
+            {
+                pixmap = pixmap.scaled(decodeBounds, Qt::KeepAspectRatio,
+                                       Qt::SmoothTransformation);
+            }
             // It seems that browsers have special logic for fast animations.
             // This implements Chrome and Firefox's behavior which uses
             // a duration of 100 ms for any frames that specify a duration of <= 10 ms.
@@ -354,6 +404,20 @@ ImagePtr Image::fromAutoscaledUrl(const Url &url, uint16_t autoScale)
 {
     return Image::fromAutoscaledUrl(url, {autoScale, autoScale},
                                     {autoScale, autoScale});
+}
+
+ImagePtr Image::fromBadgeUrl(const Url &url, uint16_t logicalSize)
+{
+    return Image::fromBoundedAutoscaledUrl(url, {logicalSize, logicalSize},
+                                           {logicalSize, logicalSize});
+}
+
+ImagePtr Image::fromBoundedAutoscaledUrl(const Url &url, QSize autoScaleBounds,
+                                         QSize expectedSize)
+{
+    auto shared = Image::fromAutoscaledUrl(url, autoScaleBounds, expectedSize);
+    shared->boundedDecode_ = true;
+    return shared;
 }
 
 ImagePtr Image::fromAutoscaledUrl(const Url &url, QSize autoScaleBounds,
@@ -596,35 +660,17 @@ void Image::actuallyLoad()
             return;
         }
 
-        const auto size = reader.size();
-        if (size.isEmpty())
+        // Keep four physical pixels per logical pixel for high DPI/zoom.
+        const auto decodeBounds =
+            shared->boundedDecode_ && shared->autoScaleBounds_
+                ? *shared->autoScaleBounds_ * 4
+                : QSize{};
+        auto parsed = detail::readFrames(reader, shared->url(), decodeBounds);
+        if (parsed.empty())
         {
             shared->empty_ = true;
             return;
         }
-
-        // returns 1 for non-animated formats
-        if (reader.imageCount() <= 0)
-        {
-            qCDebug(chatterinoImage)
-                << "Error: image has less than 1 frame " << shared->url().string
-                << ": " << reader.errorString();
-            shared->empty_ = true;
-            return;
-        }
-
-        // use "double" to prevent int overflows
-        if (double(size.width()) * double(size.height()) *
-                double(reader.imageCount()) * 4.0 >
-            double(Image::maxBytesRam))
-        {
-            qCDebug(chatterinoImage) << "image too large in RAM";
-
-            shared->empty_ = true;
-            return;
-        }
-
-        auto parsed = detail::readFrames(reader, shared->url());
 
         assignFrames(shared, parsed);
     };

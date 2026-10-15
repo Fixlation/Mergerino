@@ -11,6 +11,9 @@ set(test_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/AccessGuard.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/ActivityMessageUtils.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/KickApi.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/StreamLink.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/ThemeModes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/BaseWindow.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkCommon.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkRequest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkResult.cpp
@@ -67,6 +70,10 @@ set(test_SOURCES
 
     ${CMAKE_CURRENT_LIST_DIR}/src/lib/Snapshot.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/lib/Snapshot.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/MassModeration.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/MemoryAndGiveaway.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/SettingsPersistence.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/YouTubeLiveChat.cpp
     # Add your new file above this line!
     )
 

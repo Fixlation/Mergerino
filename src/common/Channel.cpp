@@ -275,7 +275,9 @@ void Channel::addOrReplaceTimeout(MessagePtr message, const QDateTime &now)
         [this](auto msg) {
             this->addMessage(msg, MessageContext::Original);
         },
-        true);
+        true, [this](const MessagePtr &msg) {
+            Channel::messageFlagsChanged.invoke(this, msg);
+        });
 }
 
 void Channel::addOrReplaceClearChat(MessagePtr message, const QDateTime &now)
@@ -295,12 +297,13 @@ void Channel::disableAllMessages()
     for (const auto &message : this->getMessageSnapshot())
     {
         if (message->flags.hasAny({MessageFlag::System, MessageFlag::Timeout,
-                                   MessageFlag::Whisper}))
+                                   MessageFlag::Whisper, MessageFlag::Disabled}))
         {
             continue;
         }
 
         message->flags.set(MessageFlag::Disabled);
+        Channel::messageFlagsChanged.invoke(this, message);
     }
 }
 

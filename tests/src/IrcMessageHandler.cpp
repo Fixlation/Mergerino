@@ -6,6 +6,7 @@
 
 #include "common/Literals.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "controllers/accounts/AccountModel.hpp"
 #include "controllers/highlights/HighlightController.hpp"
 #include "controllers/ignores/IgnorePhrase.hpp"
 #include "controllers/sound/NullBackend.hpp"
@@ -35,6 +36,7 @@
 #include "util/VectorMessageSink.hpp"
 
 #include <IrcConnection>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -45,6 +47,7 @@
 #include <QString>
 #include <QStringBuilder>
 
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -572,6 +575,11 @@ public:
 
     void TearDown() override
     {
+        if (this->previousTwitchSubscriberGifs_.has_value())
+        {
+            getSettings()->enableTwitchGifs =
+                *this->previousTwitchSubscriberGifs_;
+        }
         this->twitchdevChannel.reset();
         this->mockApplication.reset();
         this->snapshot.reset();
@@ -580,6 +588,7 @@ public:
     std::shared_ptr<TwitchChannel> twitchdevChannel;
     std::unique_ptr<MockApplication> mockApplication;
     std::unique_ptr<testlib::Snapshot> snapshot;
+    std::optional<bool> previousTwitchSubscriberGifs_;
 };
 
 /// This tests the process of parsing IRC messages and emitting `MessagePtr`s.
@@ -600,9 +609,20 @@ public:
 /// - `findAllUsernames`: A boolean controlling the equally named setting
 ///   (default: false)
 /// - `nAdditional`: Include n additional built messages (from `prevMessages`)
+/// - `showTwitchSubscriberGifs`: Override whether incoming Twitch subscriber
+///   GIFs are rendered (default: true)
 TEST_P(TestIrcMessageHandlerP, Run)
 {
     auto channel = makeMockTwitchChannel(u"pajlada"_s, *snapshot);
+
+    if (const auto showTwitchSubscriberGifs =
+            snapshot->param("showTwitchSubscriberGifs");
+        showTwitchSubscriberGifs.isBool())
+    {
+        this->previousTwitchSubscriberGifs_ =
+            getSettings()->enableTwitchGifs.getValue();
+        getSettings()->enableTwitchGifs = showTwitchSubscriberGifs.toBool();
+    }
 
     VectorMessageSink sink;
 
@@ -657,4 +677,133 @@ INSTANTIATE_TEST_SUITE_P(
 TEST(TestIrcMessageHandlerP, Integrity)
 {
     ASSERT_FALSE(UPDATE_SNAPSHOTS);  // make sure fixtures are actually tested
+}
+
+namespace {
+class TestExpiredTwitchLogin : public ::testing::Test
+{
+protected:
+    MockApplication app{R"({"accounts":{
+        "current":"alice",
+        "uid100":{"username":"alice","userID":"100",
+                  "clientID":"test-client","oauthToken":"expired-token"},
+        "uid200":{"username":"bob","userID":"200",
+                  "clientID":"test-client","oauthToken":"other-token"}
+    }})"};
+    Communi::IrcConnection connection;
+
+    void SetUp() override
+    {
+        // Loading the saved list alone avoids making any login/API requests.
+        this->app.accounts.twitch.reloadUsers();
+        this->connection.setUserName("alice");
+        this->connection.setPassword("oauth:expired-token");
+    }
+
+    void notice(const QByteArray &text = "Login authentication failed")
+    {
+        std::unique_ptr<Communi::IrcMessage> message(
+            Communi::IrcMessage::fromData(":tmi.twitch.tv NOTICE * :" + text,
+                                          &this->connection));
+        ASSERT_NE(message, nullptr);
+        IrcMessageHandler::instance().handleNoticeMessage(
+            static_cast<Communi::IrcNoticeMessage *>(message.get()));
+    }
+
+    void drainRemoval()
+    {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+};
+}  // namespace
+
+TEST_F(TestExpiredTwitchLogin, RemovesAccountFromMenuAndSavedSettings)
+{
+    auto &manager = this->app.accounts.twitch;
+    std::unique_ptr<AccountModel> menu(this->app.accounts.createModel(nullptr));
+    ASSERT_EQ(menu->rowCount({}), 3);  // Twitch header and two accounts
+    this->notice();
+    ASSERT_TRUE(manager.userExists("alice"));  // Deferred until after delivery
+    this->drainRemoval();
+    EXPECT_FALSE(manager.userExists("alice"));
+    EXPECT_TRUE(manager.userExists("bob"));
+    EXPECT_EQ(menu->rowCount({}), 2);
+    EXPECT_TRUE(manager.currentUsername.getValue().isEmpty());
+    EXPECT_TRUE(
+        pajlada::Settings::Setting<QString>::get("/accounts/uid100/oauthToken")
+            .isEmpty());
+    EXPECT_EQ(
+        pajlada::Settings::Setting<QString>::get("/accounts/uid200/oauthToken"),
+        "other-token");
+    manager.reloadUsers();
+    EXPECT_FALSE(manager.userExists("alice"));
+}
+
+TEST_F(TestExpiredTwitchLogin, TemporaryFailureKeepsSavedAccount)
+{
+    this->notice("Server unavailable. Please try again later.");
+    this->drainRemoval();
+    EXPECT_TRUE(this->app.accounts.twitch.userExists("alice"));
+    EXPECT_EQ(this->app.accounts.twitch.currentUsername.getValue(), "alice");
+}
+
+TEST_F(TestExpiredTwitchLogin, RefreshedTokenSurvivesQueuedFailure)
+{
+    this->notice();
+    const auto account = this->app.accounts.twitch.findUserByUsername("alice");
+    ASSERT_NE(account, nullptr);
+    account->setOAuthToken("fresh-token");
+    this->drainRemoval();
+    EXPECT_EQ(this->app.accounts.twitch.findUserByUsername("alice"), account);
+    EXPECT_EQ(account->getOAuthToken(), "fresh-token");
+}
+
+TEST_F(TestExpiredTwitchLogin, OldConnectionCannotRemoveRefreshedLogin)
+{
+    const auto account = this->app.accounts.twitch.findUserByUsername("alice");
+    ASSERT_NE(account, nullptr);
+    account->setOAuthToken("fresh-token");
+    this->notice();
+    this->drainRemoval();
+    EXPECT_EQ(this->app.accounts.twitch.findUserByUsername("alice"), account);
+}
+
+TEST_F(TestExpiredTwitchLogin, SwitchingAccountsOnlyRemovesRejectedLogin)
+{
+    this->notice();
+    this->app.accounts.twitch.currentUsername = "bob";
+    this->drainRemoval();
+    EXPECT_FALSE(this->app.accounts.twitch.userExists("alice"));
+    EXPECT_TRUE(this->app.accounts.twitch.userExists("bob"));
+    EXPECT_EQ(this->app.accounts.twitch.currentUsername.getValue(), "bob");
+}
+
+TEST_F(TestExpiredTwitchLogin, ReaddedAccountSurvivesQueuedFailure)
+{
+    auto &manager = this->app.accounts.twitch;
+    const auto oldAccount = manager.findUserByUsername("alice");
+    this->notice();
+    manager.accounts.removeFirstMatching([&](const auto &item) {
+        return item == oldAccount;
+    });
+    auto replacement = std::make_shared<TwitchAccount>("alice", "fresh-token",
+                                                       "test-client", "100");
+    manager.accounts.insert(replacement);
+    this->drainRemoval();
+    EXPECT_EQ(manager.findUserByUsername("alice"), replacement);
+}
+
+TEST_F(TestExpiredTwitchLogin, DuplicateFailuresRemoveAccountOnce)
+{
+    auto &manager = this->app.accounts.twitch;
+    int removals = 0;
+    pajlada::Signals::SignalHolder connections;
+    connections.managedConnect(manager.userListUpdated, [&] {
+        ++removals;
+    });
+    this->notice();
+    this->notice();
+    this->drainRemoval();
+    EXPECT_FALSE(manager.userExists("alice"));
+    EXPECT_EQ(removals, 1);
 }

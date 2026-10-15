@@ -70,4 +70,18 @@ std::vector<TwitchEmoteOccurrence> parseTwitchEmotes(const QVariantMap &tags,
                                                      const QString &content,
                                                      int messageOffset);
 
+/// @brief Parses an incoming Twitch GIPHY GIF from the `gifs` IRC tag
+///
+/// The tag contains the inclusive text range occupied by Twitch's fallback
+/// description, the GIPHY ID, and the animated media URL. Invalid or untrusted
+/// entries are ignored so the fallback description remains visible.
+///
+/// @param tags The tags of the IRC message
+/// @param content The message text, adjusted in the same way as for emotes
+/// @param messageOffset The offset of `content` from the original message
+/// @returns A list containing the GIF occurrence when the tag is valid
+std::vector<TwitchEmoteOccurrence> parseTwitchGifs(const QVariantMap &tags,
+                                                   const QString &content,
+                                                   int messageOffset);
+
 }  // namespace chatterino

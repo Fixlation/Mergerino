@@ -39,6 +39,8 @@ protected:
     friend class AccountController;
 
 private:
+    int getSortedModelIndex(const std::shared_ptr<Account> &item) const;
+
     std::unordered_map<QString, int> categoryCount_;
 };
 

@@ -31,7 +31,6 @@ SettingsDialogTab::SettingsDialogTab(SettingsDialog *_dialog,
 
     this->setCursor(QCursor(Qt::PointingHandCursor));
 
-    this->setStyleSheet("color: #FFF");
 }
 
 void SettingsDialogTab::setSelected(bool _selected)
@@ -107,8 +106,8 @@ void SettingsDialogTab::paintEvent(QPaintEvent *)
 
     this->style()->drawItemText(
         &painter, QRect(pad, 0, this->width() - pad, this->height()),
-        Qt::AlignLeft | Qt::AlignVCenter, this->palette(), false,
-        this->ui_.labelText);
+        Qt::AlignLeft | Qt::AlignVCenter, this->palette(), this->isEnabled(),
+        this->ui_.labelText, QPalette::WindowText);
 }
 
 void SettingsDialogTab::mousePressEvent(QMouseEvent *event)

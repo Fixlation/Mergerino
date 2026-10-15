@@ -65,6 +65,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <unordered_set>
 
 using namespace chatterino::literals;
@@ -409,6 +410,43 @@ bool doesWordContainATwitchEmote(
     }
 
     return true;
+}
+
+QString replaceTwitchGifFallbacksForRendering(
+    const QString &content, std::vector<TwitchEmoteOccurrence> &occurrences)
+{
+    auto renderedContent = content;
+    const auto placeholder = QString(QChar(0xFFFC));
+    int removedCharacters = 0;
+
+    for (auto &occurrence : occurrences)
+    {
+        occurrence.start -= removedCharacters;
+        occurrence.end -= removedCharacters;
+
+        const auto isTwitchGif =
+            occurrence.ptr != nullptr &&
+            occurrence.ptr->id.string.startsWith(QStringLiteral("giphy:"));
+        if (!isTwitchGif)
+        {
+            continue;
+        }
+
+        const auto fallbackLength = occurrence.end - occurrence.start + 1;
+        if (occurrence.start < 0 || fallbackLength <= 0 ||
+            occurrence.end >= renderedContent.size())
+        {
+            continue;
+        }
+
+        renderedContent.replace(occurrence.start, fallbackLength,
+                                placeholder);
+        occurrence.end = occurrence.start;
+        occurrence.name = EmoteName{placeholder};
+        removedCharacters += fallbackLength - 1;
+    }
+
+    return renderedContent;
 }
 
 EmotePtr makeSharedChatBadge(const QString &sourceName,
@@ -1711,6 +1749,18 @@ std::pair<MessagePtrMut, HighlightAlert> MessageBuilder::makeIrcMessage(
     auto twitchEmotes =
         parseTwitchEmotes(tags, content, static_cast<int>(messageOffset));
 
+    // Twitch GIPHY GIFs use the same indexed occurrence path as emotes. Their
+    // names preserve Twitch's bracketed description for copying and fallback.
+    std::vector<TwitchEmoteOccurrence> twitchGifs;
+    if (getSettings()->enableTwitchGifs)
+    {
+        twitchGifs =
+            parseTwitchGifs(tags, content, static_cast<int>(messageOffset));
+    }
+    twitchEmotes.insert(twitchEmotes.end(),
+                        std::make_move_iterator(twitchGifs.begin()),
+                        std::make_move_iterator(twitchGifs.end()));
+
     // This runs through all ignored phrases and runs its replacements on content
     if (const auto ignoredMessages = getSettings()->ignoredMessages.readOnly())
     {
@@ -1726,8 +1776,14 @@ std::pair<MessagePtrMut, HighlightAlert> MessageBuilder::makeIrcMessage(
         });
     twitchEmotes.erase(uniqueEmotes.begin(), uniqueEmotes.end());
 
+    // The legacy word parser expects indexed media to fit inside one word.
+    // Collapse only GIF fallback descriptions in a rendering copy; the real
+    // message text and the Emote's copy fallback remain unchanged.
+    const auto renderedContent =
+        replaceTwitchGifFallbacksForRendering(content, twitchEmotes);
+
     // words
-    QStringList splits = content.split(' ');
+    QStringList splits = renderedContent.split(' ');
 
     builder.addWords(splits, twitchEmotes, textState);
 

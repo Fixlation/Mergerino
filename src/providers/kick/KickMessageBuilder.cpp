@@ -14,8 +14,10 @@
 #include "providers/emoji/Emojis.hpp"
 #include "providers/ffz/FfzEmotes.hpp"
 #include "providers/kick/KickAccount.hpp"
+#include "providers/kick/KickApi.hpp"
 #include "providers/kick/KickBadges.hpp"
 #include "providers/kick/KickChannel.hpp"
+#include "providers/kick/KickChatServer.hpp"
 #include "providers/kick/KickEmotes.hpp"
 #include "providers/seventv/SeventvBadges.hpp"
 #include "providers/seventv/SeventvEmotes.hpp"
@@ -30,6 +32,7 @@
 #include "util/Variant.hpp"
 
 #include <QRegularExpression>
+#include <QSet>
 
 #include <algorithm>
 #include <cstdint>
@@ -55,6 +58,16 @@ EmotePtr lookupEmote(const KickChannel &channel, uint64_t senderID,
                      QStringView word)
 {
     EmoteName wordStr(word.toString());  // FIXME: don't do this...
+    const auto channelEmotes = channel.kickChannelEmotes();
+    if (auto it = channelEmotes->find(wordStr); it != channelEmotes->end())
+    {
+        return it->second;
+    }
+    const auto globalEmotes = getApp()->getKickChatServer()->globalEmotes();
+    if (auto it = globalEmotes->find(wordStr); it != globalEmotes->end())
+    {
+        return it->second;
+    }
     const auto *globalFfzEmotes = getApp()->getFfzEmotes();
     const auto *globalBttvEmotes = getApp()->getBttvEmotes();
     const auto *globalSeventvEmotes = getApp()->getSeventvEmotes();
@@ -245,8 +258,8 @@ std::string firstStdString(BoostJsonObject obj,
 
 std::string badgeTypeFromObject(BoostJsonObject obj)
 {
-    return firstStdString(obj, {"type", "badge_type", "badgeType", "kind",
-                                "id", "slug", "key", "name", "title", "alt",
+    return firstStdString(obj, {"type", "name", "slug", "key", "badge_type",
+                                "badgeType", "kind", "id", "title", "alt",
                                 "tooltip", "display_name", "displayName",
                                 "badge_name", "badgeName"});
 }
@@ -476,7 +489,7 @@ bool appendKickLevelBadge(KickMessageBuilder &builder, BoostJsonObject badgeObj,
 
     auto emote = std::make_shared<const Emote>(Emote{
         .name = {name},
-        .images = ImageSet(Image::fromAutoscaledUrl(
+        .images = ImageSet(Image::fromBadgeUrl(
             {imageUrl}, KICK_LEVEL_BADGE_IMAGE_SIZE)),
         .tooltip = Tooltip{tooltip},
         .homePage = {u"https://kick.com/" % builder.channel()->slug()},
@@ -628,21 +641,45 @@ void appendReplyButtons(KickMessageBuilder &builder)
 }
 
 std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
-                                               BoostJsonArray badges,
-                                               bool updateSelfState = true)
+                                             BoostJsonObject identity)
 {
+    std::vector<std::pair<BoostJsonObject, KickPrivateUserBadgeInfo>> badges;
+    for (auto key : {"badges_v2", "badges"})
+    {
+        for (auto value : identity[key].toArray())
+        {
+            if (value.isObject())
+            {
+                const auto object = value.toObject();
+                badges.emplace_back(object, KickPrivateUserBadgeInfo(object));
+            }
+        }
+    }
+    std::stable_sort(badges.begin(), badges.end(),
+                     [](const auto &lhs, const auto &rhs) {
+                         if (lhs.second.channelAssigned !=
+                             rhs.second.channelAssigned)
+                         {
+                             return lhs.second.channelAssigned;
+                         }
+                         return lhs.second.sortOrder < rhs.second.sortOrder;
+                     });
+
     bool hasMod = false;
     bool hasVip = false;
     std::optional<KickLevelBadge> levelBadge;
-    for (auto badgeObj : badges)
+    QSet<QString> emittedBadges;
+    for (const auto &[obj, badgeInfo] : badges)
     {
-        auto obj = badgeObj.toObject();
         if (!isVisibleKickBadgeObject(obj))
         {
             continue;
         }
 
         auto ty = badgeTypeFromObject(obj);
+        auto normalizedType = qStringFromView(ty).toLower();
+        normalizedType.replace('-', '_');
+        ty = normalizedType.toStdString();
         if (ty == "moderator" || ty == "lead_moderator" ||
             ty == "lead-moderator")
         {
@@ -671,7 +708,7 @@ std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
             {
                 auto subscriberBadge =
                     builder.channel()->subscriberBadgeForMonths(
-                        obj["count"].toUint64());
+                         badgeInfo.count);
                 if (subscriberBadge)
                 {
                     return std::pair{subscriberBadge,
@@ -679,19 +716,33 @@ std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
                 }
             }
 
-            return KickBadges::lookup(ty);
+            return KickBadges::lookup(ty, badgeInfo.imageUrl, badgeInfo.text);
         }();
         if (!emote)
         {
             continue;
         }
 
+        auto badgeKey = normalizedType;
+        if (badgeKey == "lead_moderator")
+        {
+            badgeKey = "moderator";
+        }
+        if (!KickBadges::lookup(ty).first)
+        {
+            badgeKey += ':' + badgeInfo.imageUrl;
+        }
+        if (emittedBadges.contains(badgeKey))
+        {
+            continue;
+        }
+        emittedBadges.insert(badgeKey);
         builder.emplace<BadgeElement>(emote, flag);
     }
 
     bool isSelf = builder->loginName ==
                   getApp()->getAccounts()->kick.current()->username();
-    if (updateSelfState && isSelf)
+    if (isSelf)
     {
         // A message payload is not guaranteed to contain every role badge.
         // Let it confirm privileges, but leave removals to the authoritative
@@ -853,15 +904,8 @@ std::pair<MessagePtrMut, HighlightAlert> KickMessageBuilder::makeChatMessage(
     builder.emplace<TimestampElement>(builder->serverReceivedTime.time());
     builder.emplace<TwitchModerationElement>();
 
-    const auto levelBadgeV2 =
-        appendKickBadges(builder, identity["badges_v2"].toArray(), false);
-    const auto levelBadge =
-        appendKickBadges(builder, identity["badges"].toArray(), true);
-    auto hasLevelBadge = appendDeferredKickLevelBadge(builder, levelBadgeV2);
-    if (!hasLevelBadge)
-    {
-        hasLevelBadge = appendDeferredKickLevelBadge(builder, levelBadge);
-    }
+    const auto levelBadge = appendKickBadges(builder, identity);
+    appendDeferredKickLevelBadge(builder, levelBadge);
     appendSeventvBadge(builder);
 
     builder.appendUsername(identity);
@@ -895,7 +939,7 @@ MessagePtrMut KickMessageBuilder::makeSentMessage(KickChannel *kickChannel,
     }
 
     const auto now = QDateTime::currentDateTime();
-    const auto *identity = kickChannel->ownIdentity();
+    const auto *identity = kickChannel->ownIdentity(account->userID());
     const auto displayName =
         identity && !identity->displayName.isEmpty() ? identity->displayName
                                                      : account->username();
@@ -1133,6 +1177,7 @@ MessagePtrMut KickMessageBuilder::makeHostMessage(KickChannel *channel,
     const auto viewers = data["number_viewers"].toUint64();
     KickMessageBuilder builder(systemMessage, channel,
                                QDateTime::currentDateTime());
+    builder->flags.set(MessageFlag::Raid);
     QString text;
     builder.appendMentionedUser(user, text);
     builder.appendOrEmplaceSystemTextAndUpdate(

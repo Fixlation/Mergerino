@@ -337,6 +337,23 @@ TEST(Filters, Evaluation)
     }
 }
 
+TEST(Filters, RaidIdentifierDoesNotMatchSubscriptionsOrWatchStreaks)
+{
+    auto result = Filter::fromString("flags.raid_message");
+    ASSERT_TRUE(std::holds_alternative<Filter>(result));
+    auto filter = std::move(std::get<Filter>(result));
+
+    for (const auto flag : {MessageFlag::Raid, MessageFlag::Subscription,
+                            MessageFlag::WatchStreak, MessageFlag::None})
+    {
+        Message message;
+        message.flags.set(flag);
+        EXPECT_EQ(
+            filter.execute({.message = message, .channel = nullptr}).toBool(),
+            flag == MessageFlag::Raid);
+    }
+}
+
 TEST(Filters, Identifier)
 {
     for (const auto &[identifier, _] : VALID_IDENTIFIERS_MAP.asKeyValueRange())

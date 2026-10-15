@@ -12,6 +12,9 @@ class KickBadges
 public:
     static std::pair<EmotePtr, MessageElementFlag> lookup(
         std::string_view name);
+    static std::pair<EmotePtr, MessageElementFlag> lookup(
+        std::string_view name, const QString &imageUrl,
+        const QString &displayName);
 };
 
 }  // namespace chatterino

@@ -462,7 +462,8 @@ bool MergedChannel::isRerun() const
 {
     if (auto *twitch = dynamic_cast<TwitchChannel *>(this->twitchChannel_.get()))
     {
-        return twitch->isRerun();
+        return twitch->isRerun() && !this->kickLive_ && !this->youtubeLive_ &&
+               !this->tiktokLive_;
     }
     return false;
 }
@@ -975,18 +976,22 @@ void MergedChannel::connectSourceSignals(
             }
 
             const auto key = messageKey(message, platform);
-            const auto it = this->mirroredMessages_.find(key);
-            if (it == this->mirroredMessages_.end())
+            const auto mirrored = this->mirroredMessages_.find(key);
+            if (!mirrored)
             {
                 return;
             }
 
-            it->second->flags.set(
-                MessageFlag::Disabled,
-                message->flags.has(MessageFlag::Disabled));
-            it->second->flags.set(
+            const auto previousFlags = mirrored->flags;
+            mirrored->flags.set(MessageFlag::Disabled,
+                                message->flags.has(MessageFlag::Disabled));
+            mirrored->flags.set(
                 MessageFlag::InvalidReplyTarget,
                 message->flags.has(MessageFlag::InvalidReplyTarget));
+            if (mirrored->flags != previousFlags)
+            {
+                Channel::messageFlagsChanged.invoke(this, mirrored);
+            }
         });
 
     if (auto *twitch = dynamic_cast<TwitchChannel *>(source.get()))
@@ -1120,30 +1125,31 @@ void MergedChannel::replaceMergedMessage(const MessagePtr &previous,
         return;
     }
 
-    auto it = this->mirroredMessages_.find(key);
-    if (it == this->mirroredMessages_.end())
+    auto previousMirror = this->mirroredMessages_.find(key);
+    if (!previousMirror)
     {
         return;
     }
 
     auto updated = this->createMergedMessage(
         replacement, platform,
-        it->second->flags.has(MessageFlag::RecentMessage));
+        previousMirror->flags.has(MessageFlag::RecentMessage));
     if (!updated)
     {
         return;
     }
 
-    this->replaceMessage(it->second, updated);
+    this->replaceMessage(previousMirror, updated);
     const auto updatedKey = messageKey(replacement, platform);
     if (!updatedKey.isEmpty() && updatedKey != key)
     {
-        this->mirroredMessages_.erase(it);
-        this->mirroredMessages_[updatedKey] = updated;
+        this->mirroredMessages_.erase(key);
+        this->mirroredMessages_.insert(updatedKey, updated);
+        this->recentMessageKeys_.insert(updatedKey);
         return;
     }
 
-    it->second = updated;
+    this->mirroredMessages_.insert(key, updated);
 }
 
 std::shared_ptr<Message> MergedChannel::createAndTrackMergedMessage(
@@ -1155,7 +1161,8 @@ std::shared_ptr<Message> MergedChannel::createAndTrackMergedMessage(
     }
 
     const auto key = messageKey(source, platform);
-    if (!key.isEmpty() && this->mirroredMessages_.contains(key))
+    if (!key.isEmpty() && (this->mirroredMessages_.contains(key) ||
+                           this->recentMessageKeys_.contains(key)))
     {
         return nullptr;
     }
@@ -1168,7 +1175,8 @@ std::shared_ptr<Message> MergedChannel::createAndTrackMergedMessage(
 
     if (!key.isEmpty())
     {
-        this->mirroredMessages_[key] = merged;
+        this->mirroredMessages_.insert(key, merged);
+        this->recentMessageKeys_.insert(key);
     }
 
     const auto chatterName =
@@ -1237,7 +1245,8 @@ std::shared_ptr<Message> MergedChannel::createMergedMessage(
 void MergedChannel::addYouTubeMessage(const MessagePtr &message)
 {
     const auto key = messageKey(message, MessagePlatform::YouTube);
-    if (!key.isEmpty() && this->mirroredMessages_.contains(key))
+    if (!key.isEmpty() && (this->mirroredMessages_.contains(key) ||
+                           this->recentMessageKeys_.contains(key)))
     {
         return;
     }
@@ -1250,7 +1259,8 @@ void MergedChannel::addYouTubeMessage(const MessagePtr &message)
 
     if (!key.isEmpty())
     {
-        this->mirroredMessages_[key] = merged;
+        this->mirroredMessages_.insert(key, merged);
+        this->recentMessageKeys_.insert(key);
     }
 
     const auto chatterName =
@@ -1269,7 +1279,8 @@ void MergedChannel::addYouTubeMessage(const MessagePtr &message)
 void MergedChannel::addTikTokMessage(const MessagePtr &message)
 {
     const auto key = messageKey(message, MessagePlatform::TikTok);
-    if (!key.isEmpty() && this->mirroredMessages_.contains(key))
+    if (!key.isEmpty() && (this->mirroredMessages_.contains(key) ||
+                           this->recentMessageKeys_.contains(key)))
     {
         return;
     }
@@ -1282,7 +1293,8 @@ void MergedChannel::addTikTokMessage(const MessagePtr &message)
 
     if (!key.isEmpty())
     {
-        this->mirroredMessages_[key] = merged;
+        this->mirroredMessages_.insert(key, merged);
+        this->recentMessageKeys_.insert(key);
     }
 
     if (!merged->flags.has(MessageFlag::System))
@@ -1436,23 +1448,23 @@ QColor MergedChannel::platformAccent(MessagePlatform platform)
 
 EmotePtr MergedChannel::platformBadge(MessagePlatform platform)
 {
-    static EmoteMap cache;
-
-    const auto name = EmoteName{platformName(platform).toLower()};
-    auto it = cache.find(name);
-    if (it != cache.end())
+    // Messages own these images. The static lookup must not retain Qt image
+    // resources beyond the QApplication lifetime.
+    static std::unordered_map<QString, std::weak_ptr<const Emote>> cache;
+    const auto key = platformName(platform).toLower();
+    if (auto badge = cache[key].lock())
     {
-        return it->second;
+        return badge;
     }
 
-    Emote emote{
-        .name = name,
-        .images = ImageSet{Image::fromResourcePixmap(renderPlatformBadge(platform))},
+    auto badge = std::make_shared<const Emote>(Emote{
+        .name = EmoteName{key},
+        .images =
+            ImageSet{Image::fromResourcePixmap(renderPlatformBadge(platform))},
         .tooltip = Tooltip{platformName(platform)},
         .homePage = Url{},
-    };
-    auto badge = cachedOrMakeEmotePtr(std::move(emote), cache);
-    cache[badge->name] = badge;
+    });
+    cache[key] = badge;
     return badge;
 }
 

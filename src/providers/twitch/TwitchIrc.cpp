@@ -8,12 +8,56 @@
 #include "common/Aliases.hpp"
 #include "common/QLogging.hpp"
 #include "controllers/emotes/EmoteController.hpp"
+#include "messages/Image.hpp"
 #include "providers/twitch/TwitchEmotes.hpp"
 #include "util/IrcHelpers.hpp"
+
+#include <QUrl>
 
 namespace {
 
 using namespace chatterino;
+
+std::vector<int> correctCharacterPositions(const QString &content)
+{
+    std::vector<int> positions;
+    positions.reserve(content.size());
+    for (int i = 0; i < content.size(); ++i)
+    {
+        if (!content.at(i).isLowSurrogate())
+        {
+            positions.push_back(i);
+        }
+    }
+    return positions;
+}
+
+bool isTrustedGiphyUrl(const QUrl &url)
+{
+    if (!url.isValid() || url.scheme().compare(
+                              QStringLiteral("https"),
+                              Qt::CaseInsensitive) != 0)
+    {
+        return false;
+    }
+
+    const auto host = url.host().toLower();
+    return host == QStringLiteral("giphy.com") ||
+           host.endsWith(QStringLiteral(".giphy.com"));
+}
+
+QUrl smallerGiphyGifUrl(QUrl url)
+{
+    auto path = url.path();
+    const auto originalFilename = QStringLiteral("giphy.gif");
+    if (path.endsWith(originalFilename, Qt::CaseInsensitive))
+    {
+        path.chop(originalFilename.size());
+        path += QStringLiteral("100w.gif");
+        url.setPath(path);
+    }
+    return url;
+}
 
 void appendTwitchEmoteOccurrences(const QString &emote,
                                   std::vector<TwitchEmoteOccurrence> &vec,
@@ -152,14 +196,7 @@ std::vector<TwitchEmoteOccurrence> parseTwitchEmotes(const QVariantMap &tags,
     }
 
     QStringList emoteString = emotesTag.value().toString().split('/');
-    std::vector<int> correctPositions;
-    for (int i = 0; i < content.size(); ++i)
-    {
-        if (!content.at(i).isLowSurrogate())
-        {
-            correctPositions.push_back(i);
-        }
-    }
+    auto correctPositions = correctCharacterPositions(content);
     for (const QString &emote : emoteString)
     {
         appendTwitchEmoteOccurrences(emote, twitchEmotes, correctPositions,
@@ -167,6 +204,83 @@ std::vector<TwitchEmoteOccurrence> parseTwitchEmotes(const QVariantMap &tags,
     }
 
     return twitchEmotes;
+}
+
+std::vector<TwitchEmoteOccurrence> parseTwitchGifs(const QVariantMap &tags,
+                                                   const QString &content,
+                                                   int messageOffset)
+{
+    std::vector<TwitchEmoteOccurrence> gifs;
+
+    const auto gifsIt = tags.constFind(QStringLiteral("gifs"));
+    if (gifsIt == tags.cend())
+    {
+        return gifs;
+    }
+
+    const auto tag = gifsIt.value().toString();
+    const auto firstSeparator = tag.indexOf(QLatin1Char('|'));
+    const auto secondSeparator = tag.indexOf(QLatin1Char('|'),
+                                             firstSeparator + 1);
+    if (firstSeparator <= 0 || secondSeparator <= firstSeparator + 1)
+    {
+        return gifs;
+    }
+
+    const auto range = tag.left(firstSeparator).split(QLatin1Char('-'));
+    if (range.size() != 2)
+    {
+        return gifs;
+    }
+
+    bool validStart = false;
+    bool validEnd = false;
+    const auto taggedStart = range.at(0).toInt(&validStart);
+    const auto taggedEnd = range.at(1).toInt(&validEnd);
+    const auto startPosition = taggedStart - messageOffset;
+    const auto endPosition = taggedEnd - messageOffset;
+    if (!validStart || !validEnd || startPosition < 0 ||
+        endPosition < startPosition)
+    {
+        return gifs;
+    }
+
+    const auto positions = correctCharacterPositions(content);
+    if (endPosition >= static_cast<int>(positions.size()))
+    {
+        return gifs;
+    }
+
+    const auto start = positions.at(startPosition);
+    const auto end = positions.at(endPosition);
+    if (start < 0 || end < start || end >= content.size())
+    {
+        return gifs;
+    }
+
+    const auto gifID = tag.mid(firstSeparator + 1,
+                               secondSeparator - firstSeparator - 1)
+                           .trimmed();
+    const QUrl sourceUrl(tag.mid(secondSeparator + 1).trimmed());
+    if (gifID.isEmpty() || !isTrustedGiphyUrl(sourceUrl))
+    {
+        return gifs;
+    }
+
+    const auto displayUrl = smallerGiphyGifUrl(sourceUrl);
+    const auto name = EmoteName{content.mid(start, end - start + 1)};
+    const auto emote = std::make_shared<const Emote>(Emote{
+        .name = name,
+        .images = ImageSet{
+            Image::fromAutoscaledUrl({displayUrl.toString()}, 100)},
+        .tooltip = Tooltip{name.string.toHtmlEscaped() +
+                           QStringLiteral("<br>GIPHY GIF")},
+        .homePage = Url{QStringLiteral("https://giphy.com/gifs/") + gifID},
+        .id = EmoteId{QStringLiteral("giphy:") + gifID},
+    });
+
+    gifs.push_back(TwitchEmoteOccurrence{start, end, emote, name});
+    return gifs;
 }
 
 }  // namespace chatterino

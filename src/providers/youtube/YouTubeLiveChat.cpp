@@ -182,7 +182,7 @@ const QColor YOUTUBE_PLATFORM_ACCENT(255, 48, 64, 60);
 const QColor YOUTUBE_MEMBER_NAME_COLOR(43, 166, 64);
 constexpr int YOUTUBE_RECONNECT_DELAY_MS = 3000;
 constexpr int YOUTUBE_BLOCKED_RETRY_DELAY_MS = 60000;
-constexpr int YOUTUBE_FOREGROUND_DISCOVERY_DELAY_MS = 15000;
+constexpr int YOUTUBE_FOREGROUND_DISCOVERY_DELAY_MS = 5000;
 constexpr int YOUTUBE_BACKGROUND_DISCOVERY_DELAY_MS = 60000;
 constexpr int YOUTUBE_SESSION_REFRESH_MS = 10 * 60 * 1000;
 constexpr int YOUTUBE_HEALTH_CHECK_INTERVAL_MS = 10000;
@@ -1421,7 +1421,8 @@ void YouTubeLiveChat::setDiscoveryForeground(bool foreground)
     }
 
     this->discoveryForeground_ = foreground;
-    if (foreground && this->running_ && this->continuation_.isEmpty())
+    if (foreground && this->running_ && this->videoId_.isEmpty() &&
+        this->continuation_.isEmpty())
     {
         this->scheduleResolve(0);
     }
@@ -1801,19 +1802,21 @@ void YouTubeLiveChat::resolveVideoId()
         return;
     }
 
+    ++this->resolveGeneration_;
+    auto isCurrent = this->discoveryGuard();
     const auto sourceVideoId = maybeExtractVideoId(this->streamUrl_);
     auto source = this->resolvedSource();
     if (source.isEmpty() && !sourceVideoId.isEmpty())
     {
         this->resolveChannelIdFromVideoId(
-            sourceVideoId, [this, sourceVideoId](QString channelId) {
-                if (!this->running_)
+            sourceVideoId, [this, isCurrent, sourceVideoId](QString channelId) {
+                if (!isCurrent())
                 {
                     return;
                 }
 
-                auto joinSourceVideo = [this, sourceVideoId] {
-                    if (!this->running_)
+                auto joinSourceVideo = [this, isCurrent, sourceVideoId] {
+                    if (!isCurrent())
                     {
                         return;
                     }
@@ -1836,8 +1839,9 @@ void YouTubeLiveChat::resolveVideoId()
                 }
 
                 this->probeLiveVideoIdFromSource(
-                    channelId, [this, joinSourceVideo](QString videoId) {
-                        if (!this->running_)
+                    channelId,
+                    [this, isCurrent, joinSourceVideo](QString videoId) {
+                        if (!isCurrent())
                         {
                             return;
                         }
@@ -1858,56 +1862,99 @@ void YouTubeLiveChat::resolveVideoId()
 
     if (source.isEmpty())
     {
-        this->setStatusText(
-            "Enter a YouTube @handle or any video link from the desired channel.",
+        this->setStatusText("Enter a YouTube @handle or any video link from "
+                            "the desired channel.",
                             !this->failureReported_);
         this->failureReported_ = true;
         return;
     }
 
-    this->resolveChannelIdFromSource(source, [this](QString channelId) {
-        if (!this->running_)
+    this->resolveChannelIdFromSource(
+        source, [this, isCurrent](QString channelId) {
+            if (!isCurrent())
+            {
+                return;
+            }
+
+            if (channelId.isEmpty())
+            {
+                this->setStatusText(
+                    "Couldn't resolve that YouTube source to a channel ID.",
+                    !this->failureReported_);
+                this->failureReported_ = true;
+                this->scheduleResolve(this->liveDiscoveryRetryDelayMs());
+                return;
+            }
+
+            if (this->streamUrl_ != channelId)
+            {
+                this->streamUrl_ = channelId;
+                this->sourceResolved.invoke(channelId);
+            }
+
+            this->probeLiveVideoIdFromSource(
+                channelId, [this, isCurrent, channelId](QString videoId) {
+                    if (!isCurrent())
+                    {
+                        return;
+                    }
+
+                    if (videoId.isEmpty())
+                    {
+                        this->waitForNextLive(
+                            QString("Waiting for %1 to go live on YouTube.")
+                                .arg(channelId),
+                            this->liveDiscoveryRetryDelayMs());
+                        return;
+                    }
+
+                    this->videoId_ = std::move(videoId);
+                    this->seenMessageIds_.clear();
+                    this->fetchLiveChatPage();
+                });
+        });
+}
+
+std::function<bool()> YouTubeLiveChat::discoveryGuard() const
+{
+    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    const auto resolveGeneration = this->resolveGeneration_;
+    const auto sessionGeneration = this->chatSessionGeneration_;
+    return [this, weak, resolveGeneration, sessionGeneration] {
+        return weak.lock() && this->running_ &&
+               resolveGeneration == this->resolveGeneration_ &&
+               sessionGeneration == this->chatSessionGeneration_;
+    };
+}
+
+void YouTubeLiveChat::probeLiveVideoIdInParallel(
+    LiveVideoProbe first, LiveVideoProbe second,
+    std::function<void(QString)> onResolved)
+{
+    struct PendingProbes {
+        int remaining{2};
+        bool finished{false};
+        std::function<void(QString)> callback;
+    };
+    auto pending = std::make_shared<PendingProbes>();
+    pending->callback = std::move(onResolved);
+    // NetworkRequest delivers both replies on the GUI thread. An empty reply
+    // must not hide a live result that the other request has yet to return.
+    auto onProbeResolved = [pending](QString videoId) {
+        if (pending->finished)
         {
             return;
         }
-
-        if (channelId.isEmpty())
+        --pending->remaining;
+        if (!videoId.isEmpty() || pending->remaining == 0)
         {
-            this->setStatusText(
-                "Couldn't resolve that YouTube source to a channel ID.",
-                !this->failureReported_);
-            this->failureReported_ = true;
-            this->scheduleResolve(this->liveDiscoveryRetryDelayMs());
-            return;
+            pending->finished = true;
+            auto callback = std::move(pending->callback);
+            callback(std::move(videoId));
         }
-
-        if (this->streamUrl_ != channelId)
-        {
-            this->streamUrl_ = channelId;
-            this->sourceResolved.invoke(channelId);
-        }
-
-        this->probeLiveVideoIdFromSource(
-            channelId, [this, channelId](QString videoId) {
-                if (!this->running_)
-                {
-                    return;
-                }
-
-                if (videoId.isEmpty())
-                {
-                    this->waitForNextLive(
-                        QString("Waiting for %1 to go live on YouTube.")
-                            .arg(channelId),
-                        this->liveDiscoveryRetryDelayMs());
-                    return;
-                }
-
-                this->videoId_ = std::move(videoId);
-                this->seenMessageIds_.clear();
-                this->fetchLiveChatPage();
-            });
-    });
+    };
+    first(onProbeResolved);
+    second(std::move(onProbeResolved));
 }
 
 void YouTubeLiveChat::resolveChannelIdFromSource(
@@ -1942,11 +1989,12 @@ void YouTubeLiveChat::resolveChannelIdFromSource(
     static const QRegularExpression handleLikeSourceRegex("^[A-Za-z0-9._-]+$");
     if (handleLikeSourceRegex.match(trimmed).hasMatch())
     {
+        auto isCurrent = this->discoveryGuard();
         this->resolveChannelIdFromSearch(
             trimmed,
-            [this, trimmed, onResolved = std::move(onResolved)](
-                QString channelId) mutable {
-                if (!this->running_)
+            [this, isCurrent, trimmed,
+             onResolved = std::move(onResolved)](QString channelId) mutable {
+                if (!isCurrent())
                 {
                     return;
                 }
@@ -1978,19 +2026,21 @@ void YouTubeLiveChat::resolveChannelIdFromHandle(
 
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    auto isCurrent = this->discoveryGuard();
     const auto url = QString("https://www.youtube.com/%1").arg(trimmed);
     NetworkRequest(url.toStdString())
         .headerList(youtubeHeaders())
         .followRedirects(true)
         .timeout(15000)
-        .onSuccess([this, weak, callback, trimmed](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([this, isCurrent, callback,
+                    trimmed](const NetworkResult &result) {
+            if (!isCurrent())
             {
                 return;
             }
 
             const auto html = QString::fromUtf8(result.getData());
+            this->cacheInnertubeContextFromHtml(html);
             const auto channelId = extractVideoChannelId(html);
             if (!channelId.isEmpty())
             {
@@ -2002,8 +2052,8 @@ void YouTubeLiveChat::resolveChannelIdFromHandle(
                 (*callback)(std::move(id));
             });
         })
-        .onError([this, weak, callback, trimmed](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([this, isCurrent, callback, trimmed](NetworkResult) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2026,23 +2076,25 @@ void YouTubeLiveChat::resolveChannelIdFromVideoId(
 
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
-    NetworkRequest(
-        QString("https://www.youtube.com/watch?v=%1").arg(videoId).toStdString())
+    auto isCurrent = this->discoveryGuard();
+    NetworkRequest(QString("https://www.youtube.com/watch?v=%1")
+                       .arg(videoId)
+                       .toStdString())
         .headerList(youtubeHeaders())
         .followRedirects(true)
         .timeout(15000)
-        .onSuccess([this, weak, callback](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([this, isCurrent, callback](const NetworkResult &result) {
+            if (!isCurrent())
             {
                 return;
             }
 
             const auto html = QString::fromUtf8(result.getData());
+            this->cacheInnertubeContextFromHtml(html);
             (*callback)(extractVideoChannelId(html));
         })
-        .onError([this, weak, callback](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([isCurrent, callback](NetworkResult) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2069,22 +2121,23 @@ void YouTubeLiveChat::resolveChannelIdFromSearch(
 
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    auto isCurrent = this->discoveryGuard();
     NetworkRequest(url.toString().toStdString())
         .headerList(youtubeHeaders())
         .followRedirects(true)
         .timeout(15000)
-        .onSuccess([this, weak, callback](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([this, isCurrent, callback](const NetworkResult &result) {
+            if (!isCurrent())
             {
                 return;
             }
 
             const auto html = QString::fromUtf8(result.getData());
+            this->cacheInnertubeContextFromHtml(html);
             (*callback)(extractVideoChannelId(html));
         })
-        .onError([this, weak, callback](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([isCurrent, callback](NetworkResult) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2113,46 +2166,60 @@ void YouTubeLiveChat::probeLiveVideoIdFromSource(
 
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
+    auto isCurrent = this->discoveryGuard();
+    const bool parallelDiscovery =
+        this->discoveryForeground_ && isLikelyChannelId(source);
 
     auto finishEmpty = [callback] {
         (*callback)({});
     };
 
-    auto tryStreams = [this, streamsPath, finishEmpty, callback] {
+    auto tryStreams = [this, isCurrent, streamsPath, finishEmpty, callback] {
+        if (!isCurrent())
+        {
+            return;
+        }
         if (streamsPath.isEmpty())
         {
             finishEmpty();
             return;
         }
 
-        this->probeLiveVideoIdFromPath(streamsPath,
-                                       [this, finishEmpty, callback](
-                                           QString videoId) {
-            if (!this->running_)
-            {
-                return;
-            }
+        this->probeLiveVideoIdFromPath(
+            streamsPath, [isCurrent, finishEmpty, callback](QString videoId) {
+                if (!isCurrent())
+                {
+                    return;
+                }
 
-            if (videoId.isEmpty())
-            {
-                finishEmpty();
-                return;
-            }
+                if (videoId.isEmpty())
+                {
+                    finishEmpty();
+                    return;
+                }
 
-            (*callback)(std::move(videoId));
-        });
+                (*callback)(std::move(videoId));
+            });
     };
 
-    auto tryEmbed = [this, source, tryStreams, callback] {
+    // The streams page is already checked in the focused parallel path.
+    std::function<void()> afterEmbed = parallelDiscovery
+                                           ? std::function<void()>(finishEmpty)
+                                           : std::function<void()>(tryStreams);
+    auto tryEmbed = [this, isCurrent, source, afterEmbed, callback] {
+        if (!isCurrent())
+        {
+            return;
+        }
         if (!isLikelyChannelId(source))
         {
-            tryStreams();
+            afterEmbed();
             return;
         }
 
         this->probeLiveVideoIdFromEmbed(
-            source, [this, tryStreams, callback](QString videoId) {
-                if (!this->running_)
+            source, [isCurrent, afterEmbed, callback](QString videoId) {
+                if (!isCurrent())
                 {
                     return;
                 }
@@ -2163,11 +2230,15 @@ void YouTubeLiveChat::probeLiveVideoIdFromSource(
                     return;
                 }
 
-                tryStreams();
+                afterEmbed();
             });
     };
 
-    auto tryBrowse = [this, source, tryEmbed, callback] {
+    auto tryBrowse = [this, isCurrent, source, tryEmbed, callback] {
+        if (!isCurrent())
+        {
+            return;
+        }
         if (!isLikelyChannelId(source))
         {
             tryEmbed();
@@ -2175,23 +2246,50 @@ void YouTubeLiveChat::probeLiveVideoIdFromSource(
         }
 
         this->probeLiveVideoIdFromBrowse(
-            source, [this, tryEmbed, callback](QString videoId) {
-                    if (!this->running_)
-                    {
-                        return;
-                    }
+            source, [isCurrent, tryEmbed, callback](QString videoId) {
+                if (!isCurrent())
+                {
+                    return;
+                }
 
-                    if (!videoId.isEmpty())
-                    {
-                        (*callback)(std::move(videoId));
-                        return;
-                    }
+                if (!videoId.isEmpty())
+                {
+                    (*callback)(std::move(videoId));
+                    return;
+                }
 
-                    tryEmbed();
-                });
+                tryEmbed();
+            });
     };
 
-    auto tryLivePath = [this, source, livePath, tryStreams, tryBrowse, callback] {
+    if (parallelDiscovery)
+    {
+        probeLiveVideoIdInParallel(
+            [this, livePath](std::function<void(QString)> onProbeResolved) {
+                this->probeLiveVideoIdFromPath(livePath,
+                                               std::move(onProbeResolved));
+            },
+            [this, streamsPath](std::function<void(QString)> onProbeResolved) {
+                this->probeLiveVideoIdFromPath(streamsPath,
+                                               std::move(onProbeResolved));
+            },
+            [isCurrent, tryBrowse, callback](QString videoId) {
+                if (!isCurrent())
+                {
+                    return;
+                }
+                if (!videoId.isEmpty())
+                {
+                    (*callback)(std::move(videoId));
+                    return;
+                }
+                tryBrowse();
+            });
+        return;
+    }
+
+    auto tryLivePath = [this, isCurrent, source, livePath, tryStreams,
+                        tryBrowse, callback] {
         if (livePath.isEmpty())
         {
             if (isLikelyChannelId(source))
@@ -2205,9 +2303,9 @@ void YouTubeLiveChat::probeLiveVideoIdFromSource(
         }
 
         this->probeLiveVideoIdFromPath(
-            livePath, [this, source, tryStreams, tryBrowse, callback](
-                          QString videoId) {
-                if (!this->running_)
+            livePath, [isCurrent, source, tryStreams, tryBrowse,
+                       callback](QString videoId) {
+                if (!isCurrent())
                 {
                     return;
                 }
@@ -2247,24 +2345,25 @@ void YouTubeLiveChat::probeLiveVideoIdFromEmbed(
 
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    auto isCurrent = this->discoveryGuard();
     NetworkRequest(url.toString().toStdString())
         .headerList(youtubeHeaders())
         .followRedirects(true)
         .timeout(15000)
         .header("Referer",
                 QString("https://www.youtube.com/channel/%1").arg(channelId))
-        .onSuccess([this, weak, callback](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([this, isCurrent, callback](const NetworkResult &result) {
+            if (!isCurrent())
             {
                 return;
             }
 
             const auto html = QString::fromUtf8(result.getData());
+            this->cacheInnertubeContextFromHtml(html);
             (*callback)(extractEmbedLiveVideoId(html));
         })
-        .onError([this, weak, callback](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([isCurrent, callback](NetworkResult) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2286,22 +2385,24 @@ void YouTubeLiveChat::probeLiveVideoIdFromPath(
     const auto url = QString("https://www.youtube.com%1").arg(path);
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    auto isCurrent = this->discoveryGuard();
     NetworkRequest(url.toStdString())
         .headerList(youtubeHeaders())
         .followRedirects(true)
         .timeout(15000)
-        .onSuccess([this, weak, callback, path](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
-            {
-                return;
-            }
+        .onSuccess(
+            [this, isCurrent, callback, path](const NetworkResult &result) {
+                if (!isCurrent())
+                {
+                    return;
+                }
 
-            const auto html = QString::fromUtf8(result.getData());
-            (*callback)(extractLiveVideoId(html, path.endsWith("/live")));
-        })
-        .onError([this, weak, callback](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+                const auto html = QString::fromUtf8(result.getData());
+                this->cacheInnertubeContextFromHtml(html);
+                (*callback)(extractLiveVideoId(html, path.endsWith("/live")));
+            })
+        .onError([isCurrent, callback](NetworkResult) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2331,17 +2432,23 @@ void YouTubeLiveChat::probeLiveVideoIdFromBrowse(
         return;
     }
 
+    auto isCurrent = this->discoveryGuard();
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
     const auto liveRefererPath = QString("/channel/%1/live").arg(channelId);
     const auto streamsRefererPath =
         QString("/channel/%1/streams").arg(channelId);
 
-    auto tryStreamsTab = [this, channelId, streamsRefererPath, callback] {
+    auto tryStreamsTab = [this, isCurrent, channelId, streamsRefererPath,
+                          callback] {
+        if (!isCurrent())
+        {
+            return;
+        }
         this->probeLiveVideoIdFromBrowseTab(
             channelId, QStringLiteral("EgdzdHJlYW1zuAEAkgMA8gYECgJ6AA=="),
-            streamsRefererPath, [this, callback](QString videoId) {
-                if (!this->running_)
+            streamsRefererPath, [isCurrent, callback](QString videoId) {
+                if (!isCurrent())
                 {
                     return;
                 }
@@ -2352,9 +2459,8 @@ void YouTubeLiveChat::probeLiveVideoIdFromBrowse(
 
     this->probeLiveVideoIdFromBrowseTab(
         channelId, QStringLiteral("EgRsaXZluAEAkgMA8gYECgJ6AA=="),
-        liveRefererPath,
-        [this, tryStreamsTab, callback](QString videoId) {
-            if (!this->running_)
+        liveRefererPath, [isCurrent, tryStreamsTab, callback](QString videoId) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2384,40 +2490,40 @@ void YouTubeLiveChat::probeLiveVideoIdFromBrowseTab(
         QString("https://www.youtube.com/youtubei/v1/browse?key=%1")
             .arg(this->apiKey_);
     QJsonObject root{
-        {"context",
-         QJsonObject{{"client", makeYoutubeClientContext(this->clientVersion_)}}},
+        {"context", QJsonObject{{"client", makeYoutubeClientContext(
+                                               this->clientVersion_)}}},
         {"browseId", channelId},
         {"params", params},
     };
 
-    auto request = NetworkRequest(url.toStdString())
-                       .type(NetworkRequestType::Post)
-                       .headerList(youtubeHeaders())
-                       .json(root)
-                       .timeout(15000)
-                       .header("Referer",
-                               QString("https://www.youtube.com%1")
-                                   .arg(refererPath));
+    auto request =
+        NetworkRequest(url.toStdString())
+            .type(NetworkRequestType::Post)
+            .headerList(youtubeHeaders())
+            .json(root)
+            .timeout(15000)
+            .header("Referer",
+                    QString("https://www.youtube.com%1").arg(refererPath));
     if (!this->visitorData_.isEmpty())
     {
-        request = std::move(request).header("X-Goog-Visitor-Id",
-                                            this->visitorData_);
+        request =
+            std::move(request).header("X-Goog-Visitor-Id", this->visitorData_);
     }
 
     auto callback =
         std::make_shared<std::function<void(QString)>>(std::move(onResolved));
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    auto isCurrent = this->discoveryGuard();
     std::move(request)
-        .onSuccess([this, weak, callback](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([isCurrent, callback](const NetworkResult &result) {
+            if (!isCurrent())
             {
                 return;
             }
 
             (*callback)(extractLiveVideoIdFromJson(result.parseJson()));
         })
-        .onError([this, weak, callback](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([isCurrent, callback](NetworkResult) {
+            if (!isCurrent())
             {
                 return;
             }
@@ -2477,14 +2583,14 @@ void YouTubeLiveChat::bootstrapInnertubeContextFromUrls(
     }
 
     const auto bootstrapUrl = urls.at(index);
-    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    auto isCurrent = this->discoveryGuard();
     NetworkRequest(bootstrapUrl.toStdString())
         .headerList(youtubeHeaders())
         .followRedirects(true)
         .timeout(15000)
-        .onSuccess([this, weak, urls, index, onReady, failureText,
+        .onSuccess([this, isCurrent, urls, index, onReady, failureText,
                     blockedText](const NetworkResult &result) mutable {
-            if (!weak.lock() || !this->running_)
+            if (!isCurrent())
             {
                 return;
             }
@@ -2518,9 +2624,9 @@ void YouTubeLiveChat::bootstrapInnertubeContextFromUrls(
             this->failureReported_ = false;
             (*onReady)();
         })
-        .onError([this, weak, urls, index, onReady, failureText,
+        .onError([this, isCurrent, urls, index, onReady, failureText,
                   blockedText](NetworkResult) mutable {
-            if (!weak.lock() || !this->running_)
+            if (!isCurrent())
             {
                 return;
             }
@@ -3262,6 +3368,18 @@ void YouTubeLiveChat::poll()
                 return;
             }
 
+            // The initial and refreshed sessions can start in Top chat.
+            // Switch before consuming its filtered backlog, leaving the
+            // initial-backlog policy and message deduplication untouched.
+            const auto liveChatContinuation =
+                extractLiveChatViewContinuation(continuation, true);
+            if (!liveChatContinuation.isEmpty())
+            {
+                this->continuation_ = liveChatContinuation;
+                this->schedulePoll(0);
+                return;
+            }
+
             auto actions = continuation["actions"].toArray();
             this->updateLiveViewerCount(extractLiveViewerCount(continuation));
 
@@ -3292,8 +3410,8 @@ void YouTubeLiveChat::poll()
                     continue;
                 }
 
-                auto inserted = this->seenMessageIds_.emplace(message->id);
-                if (!inserted.second)
+                const bool inserted = this->seenMessageIds_.insert(message->id);
+                if (!inserted)
                 {
                     continue;
                 }
@@ -3496,6 +3614,15 @@ QStringList YouTubeLiveChat::innertubeBootstrapUrls() const
     urls.append(QStringLiteral("https://www.youtube.com/"));
     urls.removeDuplicates();
     return urls;
+}
+
+void YouTubeLiveChat::cacheInnertubeContextFromHtml(const QString &html)
+{
+    if (this->apiKey_.isEmpty() || this->clientVersion_.isEmpty() ||
+        this->visitorData_.isEmpty())
+    {
+        this->updateInnertubeContextFromHtml(html);
+    }
 }
 
 bool YouTubeLiveChat::updateInnertubeContextFromHtml(const QString &html)
@@ -3992,6 +4119,9 @@ QString YouTubeLiveChat::extractFirstMatch(const QString &text,
 QString YouTubeLiveChat::extractLiveChatContinuation(
     const QJsonObject &liveChatRenderer)
 {
+    // Watch-page selector tokens cannot initialize get_live_chat. Start with
+    // its normal continuation, then switch views using the first chat reply
+    // before delivering messages from its filtered backlog.
     const auto continuations = liveChatRenderer["continuations"].toArray();
     for (const auto &continuationValue : continuations)
     {
@@ -4003,6 +4133,12 @@ QString YouTubeLiveChat::extractLiveChatContinuation(
         }
     }
 
+    return {};
+}
+
+QString YouTubeLiveChat::extractLiveChatViewContinuation(
+    const QJsonObject &liveChatRenderer, bool onlyIfUnselected)
+{
     const auto items =
         liveChatRenderer["header"]
             .toObject()["liveChatHeaderRenderer"]
@@ -4010,18 +4146,21 @@ QString YouTubeLiveChat::extractLiveChatContinuation(
             .toObject()["sortFilterSubMenuRenderer"]
             .toObject()["subMenuItems"]
             .toArray();
-    for (const auto &itemValue : items)
+    // YouTube's selector order is Top chat, then unfiltered Live Chat. Use
+    // the protocol order so translated labels work too.
+    if (items.size() < 2)
     {
-        const auto continuation =
-            extractContinuationFromObject(
-                itemValue.toObject()["continuation"].toObject());
-        if (!continuation.isEmpty())
-        {
-            return continuation;
-        }
+        return {};
     }
 
-    return {};
+    const auto liveChatItem = items.at(1).toObject();
+    if (onlyIfUnselected && liveChatItem["selected"].toBool(true))
+    {
+        return {};
+    }
+
+    return extractContinuationFromObject(
+        liveChatItem["continuation"].toObject());
 }
 
 QString YouTubeLiveChat::extractVideoChannelId(const QString &html)

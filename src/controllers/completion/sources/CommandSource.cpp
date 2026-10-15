@@ -10,6 +10,7 @@
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/completion/sources/Helpers.hpp"
 #include "messages/Message.hpp"
+#include "providers/merged/MergedChannel.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
 #include "widgets/splits/InputCompletionItem.hpp"
 
@@ -107,14 +108,8 @@ const QStringList &kickDefaultCommands()
 const QStringList &kickCompatibleChatterinoCommands()
 {
     static const QStringList commands{
-        "/ban",
-        "/debug-kick-raw-event",
-        "/delete",
-        "/pin",
-        "/streamlink",
-        "/timeout",
-        "/unban",
-        "/untimeout",
+        "/ban",  "/debug-kick-raw-event", "/delete",  "/massban", "/massunban",
+        "/pin",  "/streamlink",           "/timeout", "/unban",   "/untimeout",
         "/user",
     };
 
@@ -155,48 +150,17 @@ const QStringList &clientOnlyChatterinoCommands()
 const QStringList &moderatorCommands()
 {
     static const QStringList commands{
-        "/announce",
-        "/announceblue",
-        "/announcegreen",
-        "/announceorange",
-        "/announcepurple",
-        "/ban",
-        "/banid",
-        "/chatters",
-        "/clear",
-        "/delete",
-        "/emoteonly",
-        "/emoteonlyoff",
-        "/followers",
-        "/followersoff",
-        "/lowtrust",
-        "/monitor",
-        "/mod",
-        "/pin",
-        "/poll",
-        "/prediction",
-        "/requests",
-        "/restrict",
-        "/r9kbeta",
-        "/r9kbetaoff",
-        "/shield",
-        "/shieldoff",
-        "/shoutout",
-        "/slow",
-        "/slowoff",
-        "/subscribers",
-        "/subscribersoff",
-        "/timeout",
-        "/unban",
-        "/uniquechat",
-        "/uniquechatoff",
-        "/unmonitor",
-        "/unmod",
-        "/unrestrict",
-        "/untimeout",
-        "/unvip",
-        "/vip",
-        "/warn",
+        "/announce",       "/announceblue", "/announcegreen", "/announceorange",
+        "/announcepurple", "/ban",          "/banid",         "/chatters",
+        "/clear",          "/delete",       "/emoteonly",     "/emoteonlyoff",
+        "/followers",      "/followersoff", "/lowtrust",      "/massban",
+        "/massunban",      "/monitor",      "/mod",           "/pin",
+        "/poll",           "/prediction",   "/requests",      "/restrict",
+        "/r9kbeta",        "/r9kbetaoff",   "/shield",        "/shieldoff",
+        "/shoutout",       "/slow",         "/slowoff",       "/subscribers",
+        "/subscribersoff", "/timeout",      "/unban",         "/uniquechat",
+        "/uniquechatoff",  "/unmonitor",    "/unmod",         "/unrestrict",
+        "/untimeout",      "/unvip",        "/vip",           "/warn",
     };
 
     return commands;
@@ -261,6 +225,8 @@ CommandSource::CommandSource(
 
 void CommandSource::update(const QString &query)
 {
+    // Completion sources are reused while typing; permissions can change.
+    this->initializeItems();
     this->output_.clear();
     if (this->strategy_)
     {
@@ -401,18 +367,48 @@ void CommandSource::initializeItems()
         }
     }
 
-    commands.erase(std::remove_if(commands.begin(), commands.end(),
-                                  [this](const CommandItem &command) {
-                                      if (this->slashCommandsOnly_ &&
-                                          command.prefix != "/")
-                                      {
-                                          return true;
-                                      }
+    // Merged channels aggregate roles, but mass actions target one service.
+    for (auto &command : commands)
+    {
+        const auto key = commandKey(command);
+        if (key != "/massban" && key != "/massunban")
+        {
+            continue;
+        }
+        const auto *merged =
+            dynamic_cast<const MergedChannel *>(this->channel_);
+        std::erase_if(command.platforms, [this, merged](auto platform) {
+            auto target = this->channel_;
+            if (merged)
+            {
+                target = (platform == MessagePlatform::Kick
+                              ? merged->kickChannel()
+                              : merged->twitchChannel())
+                             .get();
+            }
+            return !target || !target->isTwitchOrKickChannel() ||
+                   !target->hasModRights();
+        });
+    }
 
-                                      return !canUseCommand(command,
-                                                            this->channel_);
-                                  }),
-                   commands.end());
+    commands.erase(
+        std::remove_if(commands.begin(), commands.end(),
+                       [this](const CommandItem &command) {
+                           if (this->slashCommandsOnly_ &&
+                               command.prefix != "/")
+                           {
+                               return true;
+                           }
+
+                           const auto key = commandKey(command);
+                           if ((key == "/massban" || key == "/massunban") &&
+                               command.platforms.empty())
+                           {
+                               return true;
+                           }
+                           return !canUseCommand(command, this->channel_);
+                       }),
+        commands.end());
 
     std::sort(commands.begin(), commands.end(), commandLessThan);
     std::vector<CommandItem> merged;
@@ -434,8 +430,7 @@ void CommandSource::initializeItems()
     {
         for (auto &command : merged)
         {
-            command.platforms =
-                filteredPlatforms(std::move(command.platforms));
+            command.platforms = filteredPlatforms(std::move(command.platforms));
         }
     }
 

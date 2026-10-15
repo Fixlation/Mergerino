@@ -306,6 +306,10 @@ const AccessorMap &accessorMap()
             u"flags.watch_streak"_s,
             {Type::Bool, flagAccessor<MessageFlag::WatchStreak>},
         },
+        {
+            u"flags.raid_message"_s,
+            {Type::Bool, flagAccessor<MessageFlag::Raid>},
+        },
 
         // message.*
         {

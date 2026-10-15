@@ -19,8 +19,10 @@
 #include "util/PostToThread.hpp"
 
 #include <QPointer>
+#include <QTimer>
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 
 namespace {
@@ -829,7 +831,13 @@ void KickChatServer::loadGlobalEmotesIfNeeded()
             {
                 qCWarning(chatterinoKick)
                     << "Failed to fetch global emotes:" << res.error();
-                self->globalEmotes_ = EMPTY_EMOTE_MAP;
+                // An empty sentinel would prevent all later attempts.
+                QTimer::singleShot(std::chrono::seconds(30), self, [self] {
+                    if (self)
+                    {
+                        self->loadGlobalEmotesIfNeeded();
+                    }
+                });
                 return;
             }
             auto emotes = std::make_shared<EmoteMap>();
@@ -841,12 +849,14 @@ void KickChatServer::loadGlobalEmotesIfNeeded()
                 }
                 for (const auto &emoteInfo : set.emotes)
                 {
-                    if (emoteInfo.subscribersOnly)
+                    if (emoteInfo.subscribersOnly || emoteInfo.emoteID == 0 ||
+                        emoteInfo.name.isEmpty())
                     {
                         continue;
                     }
                     auto id = QString::number(emoteInfo.emoteID);
-                    auto emote = KickEmotes::emoteForID(id, emoteInfo.name);
+                    auto emote = KickEmotes::emoteForID(
+                        id, emoteInfo.name, emoteInfo.imageUrl);
                     (*emotes)[emote->name] = emote;
                 }
             }

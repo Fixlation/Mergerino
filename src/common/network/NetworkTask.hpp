@@ -37,6 +37,12 @@ public Q_SLOTS:
     void run();
 
 private:
+    enum class State {
+        WaitingForSend,
+        WaitingForReply,
+        Finished,
+    };
+
     QNetworkReply *createReply();
 
     void logReply();
@@ -45,6 +51,7 @@ private:
     std::shared_ptr<NetworkData> data_;
     QNetworkReply *reply_{};  // parent: default (accessManager)
     QTimer *timer_{};         // parent: this
+    State state_ = State::WaitingForSend;
 
     // NOLINTNEXTLINE(readability-redundant-access-specifiers)
 private Q_SLOTS:

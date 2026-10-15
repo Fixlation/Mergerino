@@ -27,12 +27,12 @@
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/api/TwitchModerationAuth.hpp"
 #include "providers/twitch/api/TwitchWebApi.hpp"
-#include "providers/twitch/TwitchAccount.hpp"
-#include "providers/twitch/TwitchChannel.hpp"
-#include "providers/twitch/TwitchCommon.hpp"
 #include "providers/twitch/CurrentUserBadges.hpp"
+#include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchBadgeIdentity.hpp"
 #include "providers/twitch/TwitchBadges.hpp"
+#include "providers/twitch/TwitchChannel.hpp"
+#include "providers/twitch/TwitchCommon.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/youtube/YouTubeAccount.hpp"
 #include "providers/youtube/YouTubeLiveChat.hpp"
@@ -52,6 +52,7 @@
 #include "widgets/dialogs/GiveawayPopup.hpp"
 #include "widgets/dialogs/KickPredictionDialog.hpp"
 #include "widgets/dialogs/ManagePredictionDialog.hpp"
+#include "widgets/dialogs/MassModerationDialog.hpp"
 #include "widgets/dialogs/SeventvAccountDialog.hpp"
 #include "widgets/helper/ChannelView.hpp"
 #include "widgets/helper/CmdDeleteKeyFilter.hpp"
@@ -59,39 +60,40 @@
 #include "widgets/helper/ResizingTextEdit.hpp"
 #include "widgets/Notebook.hpp"
 #include "widgets/Scrollbar.hpp"
+#include "widgets/splits/EmoteBar.hpp"
 #include "widgets/splits/InputCompletionPopup.hpp"
 #include "widgets/splits/InputHighlighter.hpp"
-#include "widgets/splits/EmoteBar.hpp"
 #include "widgets/splits/Split.hpp"
 #include "widgets/splits/SplitContainer.hpp"
 #include "widgets/splits/StreamDatabaseBadgeBar.hpp"
 #include "widgets/splits/TwitchPollsAndPredictionsBar.hpp"
 
 #include <QAbstractAnimation>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QCompleter>
-#include <QCheckBox>
 #include <QCursor>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QEasingCurve>
 #include <QElapsedTimer>
 #include <QEnterEvent>
-#include <QFrame>
 #include <QFontMetrics>
-#include <QGridLayout>
-#include <QGuiApplication>
+#include <QFrame>
 #include <QGraphicsBlurEffect>
 #include <QGraphicsOpacityEffect>
+#include <QGridLayout>
+#include <QGuiApplication>
 #include <QHash>
-#include <QHideEvent>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QIcon>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -100,14 +102,15 @@
 #include <QPen>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QScreen>
+#include <QSet>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QStackedWidget>
 #include <QSvgRenderer>
-#include <QSet>
-#include <QSizePolicy>
+#include <QtCore/qscopeguard.h>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -116,10 +119,8 @@
 #include <QVector>
 #include <QWidgetAction>
 
-#include <QtCore/qscopeguard.h>
-
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -192,6 +193,67 @@ QString platformDisplayName(const std::vector<MessagePlatform> &platforms)
         names.append(platformDisplayName(platform));
     }
     return names.join(u" + "_s);
+}
+
+// "Twitch", "Twitch and Kick", "Twitch, Kick and YouTube"
+QString listPlatformNames(const QStringList &names)
+{
+    if (names.size() < 2)
+    {
+        return names.value(0);
+    }
+    return names.mid(0, names.size() - 1).join(u", "_s) + u" and "_s +
+           names.last();
+}
+
+// Leaving anonymous mode: the notice fades out, the accounts switch, and
+// once that work has settled the logged-in bits fade in
+constexpr int ANONYMOUS_FADE_OUT_MS = 150;
+constexpr int ANONYMOUS_SETTLE_MS = 60;
+constexpr int ANONYMOUS_FADE_IN_MS = 220;
+
+// Leaving anonymous mode only needs a click when there's exactly one saved
+// account to go back to. With several, the user picks in the account switcher.
+bool hasOneSavedAccount(const QString &platform)
+{
+    auto *accounts = getApp()->getAccounts();
+    if (platform == u"Twitch")
+    {
+        return accounts->twitch.accounts.raw().size() == 1;
+    }
+    if (platform == u"Kick")
+    {
+        return accounts->kick.accounts.raw().size() == 1;
+    }
+    if (platform == u"YouTube")
+    {
+        return accounts->youtube.accounts.raw().size() == 1;
+    }
+    return false;
+}
+
+void switchToSavedAccount(const QString &platform)
+{
+    if (!hasOneSavedAccount(platform))
+    {
+        return;
+    }
+    auto *accounts = getApp()->getAccounts();
+    if (platform == u"Twitch")
+    {
+        accounts->twitch.currentUsername =
+            accounts->twitch.accounts.raw().front()->getUserName();
+    }
+    else if (platform == u"Kick")
+    {
+        accounts->kick.currentUsername =
+            accounts->kick.accounts.raw().front()->username();
+    }
+    else if (platform == u"YouTube")
+    {
+        accounts->youtube.currentChannelID =
+            accounts->youtube.accounts.raw().front()->channelID();
+    }
 }
 
 bool containsPlatform(const std::vector<MessagePlatform> &platforms,
@@ -2451,7 +2513,7 @@ void KickChatIdentityPopup::setContext(
                                          : QString{};
     if (channel)
     {
-        if (const auto *ownIdentity = channel->ownIdentity())
+        if (const auto *ownIdentity = channel->ownIdentity(userID))
         {
             if (!ownIdentity->displayName.trimmed().isEmpty())
             {
@@ -5022,9 +5084,18 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
     , backgroundColorAnimation(this, "backgroundColor"_ba)
     , badgeButtonVisibilityAnimation_(this)
     , sendWaitLockVisibilityAnimation_(this)
+    , placeholderFade_(this)
 {
     this->installEventFilter(this);
     this->initLayout();
+
+    this->placeholderFade_.setEasingCurve(QEasingCurve::OutCubic);
+    QObject::connect(&this->placeholderFade_, &QVariantAnimation::valueChanged,
+                     this, [this](const QVariant &value) {
+                         this->placeholderOpacity_ =
+                             std::clamp(value.toReal(), 0.0, 1.0);
+                         this->updateTextEditPalette();
+                     });
 
     this->badgeButtonVisibilityAnimation_.setDuration(160);
     this->badgeButtonVisibilityAnimation_.setEasingCurve(QEasingCurve::OutCubic);
@@ -5145,6 +5216,7 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
     this->signalHolder_.managedConnect(this->split_->channelChanged, [this] {
         auto channel = this->split_->getChannel();
         this->ui_.textEdit->setCompleter(this->createCompleter(channel));
+        this->ui_.massModerationPreview->setChannel(channel);
         this->inputHighlighter->setChannel(this->split_->getChannel());
         this->updatePlatformSelector();
         this->updateBadgeButton();
@@ -5314,6 +5386,19 @@ void SplitInput::initLayout()
                          this->openShareResubDialog();
                      });
 
+    this->ui_.massModerationPreview = new MassModerationPreview(this);
+    layout->addWidget(this->ui_.massModerationPreview);
+    this->signalHolder_.managedConnect(
+        this->ui_.massModerationPreview->heightChanged, [this] {
+            if (!this->hidden)
+            {
+                this->setMaximumHeight(this->scaledMaxHeight());
+                this->updateGeometry();
+                this->update();
+            }
+        });
+    this->ui_.massModerationPreview->setChannel(this->split_->getChannel());
+
     this->ui_.emoteBar = new EmoteBar(
         this,
         [this] {
@@ -5410,6 +5495,7 @@ void SplitInput::initLayout()
 
     this->ui_.sendWaitLockIcon = new QLabel(this->ui_.inputWrapper);
     this->ui_.sendWaitLockIcon->setAlignment(Qt::AlignCenter);
+    this->ui_.sendWaitLockIcon->installEventFilter(this);
     this->ui_.sendWaitLockIcon->hide();
     auto *sendWaitLockOpacity =
         new QGraphicsOpacityEffect(this->ui_.sendWaitLockIcon);
@@ -5426,6 +5512,7 @@ void SplitInput::initLayout()
 
     auto *shortcutFilter = new CmdDeleteKeyFilter(this);
     textEdit->installEventFilter(shortcutFilter);
+    textEdit->viewport()->installEventFilter(this);
 
     hboxLayout.emplace<LabelButton>("SEND").assign(&this->ui_.sendButton);
     this->ui_.sendButton->hide();
@@ -5978,7 +6065,8 @@ void SplitInput::updateBadgeButton()
             }
         }
     }
-    else if (const auto *ownIdentity = kick->ownIdentity())
+    else if (const auto *ownIdentity =
+                 kick->ownIdentity(kickAccount->userID()))
     {
         int badgeIndex = 0;
         for (const auto &element : ownIdentity->badges)
@@ -6044,6 +6132,40 @@ void SplitInput::updateSendWaitLockIcon()
     painter.setPen(
         QPen(color, stroke, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter.setBrush(Qt::NoBrush);
+
+    if (this->inputIconIsGhost_)
+    {
+        // Rounded head, straight sides and a wavy hem, with two eyes
+        const qreal left = size * 0.2;
+        const qreal right = size * 0.8;
+        const qreal top = size * 0.1;
+        const qreal hem = size * 0.88;
+        const qreal width = right - left;
+        QPainterPath ghost;
+        ghost.moveTo(left, hem);
+        ghost.lineTo(left, top + width / 2);
+        ghost.arcTo(QRectF(left, top, width, width), 180, -180);
+        ghost.lineTo(right, hem);
+        const qreal wave = width / 3;
+        for (int i = 0; i < 3; ++i)
+        {
+            const qreal from = right - wave * i;
+            ghost.quadTo(from - wave / 2, hem - size * 0.16, from - wave, hem);
+        }
+        ghost.closeSubpath();
+        painter.drawPath(ghost);
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        const qreal eye = size * 0.065;
+        painter.drawEllipse(QPointF(size * 0.4, size * 0.43), eye, eye * 1.25);
+        painter.drawEllipse(QPointF(size * 0.6, size * 0.43), eye, eye * 1.25);
+
+        this->ui_.sendWaitLockIcon->setFixedSize(size, size);
+        this->ui_.sendWaitLockIcon->setPixmap(pixmap);
+        this->positionSendWaitLockIcon();
+        return;
+    }
 
     const qreal side = size * 0.23;
     const qreal bodyTop = size * 0.43;
@@ -6157,6 +6279,17 @@ void SplitInput::setBadgeButtonShown(bool shown, bool animate)
         this->ui_.badgeButtonWrapper->setVisible(shown);
         this->ui_.badgeButton->setEnabled(shown);
         applyProgress(shown ? 1.0 : 0.0);
+        return;
+    }
+
+    // Leaving anonymous mode: stay collapsed until it's time to come back in
+    if (shown && this->anonymousExit_ != AnonymousExit::None)
+    {
+        this->badgeButtonShown_ = true;
+        this->badgeButtonVisibilityAnimation_.stop();
+        this->ui_.badgeButtonWrapper->show();
+        this->ui_.badgeButton->setEnabled(true);
+        applyProgress(0.0);
         return;
     }
 
@@ -6664,6 +6797,14 @@ void SplitInput::updatePlatformSelector(bool animate)
 
     this->updatePlatformButtonLayout(static_cast<int>(selectedPlatforms.size()));
     this->updateBadgeButton();
+    if (this->anonymousExit_ != AnonymousExit::None &&
+        this->ui_.platformButton->isHidden())
+    {
+        // fades in with the rest once anonymous mode is gone
+        auto *effect = new QGraphicsOpacityEffect(this->ui_.platformButton);
+        effect->setOpacity(0.0);
+        this->ui_.platformButton->setGraphicsEffect(effect);
+    }
     this->ui_.platformButton->show();
     this->ui_.platformButton->setEnabled(
         !replyLocked && (canChoosePlatforms || targetCount > 1));
@@ -9139,15 +9280,21 @@ int SplitInput::scaledMaxHeight() const
                                     this->ui_.resubCalloutWrapper->isVisible()
                                 ? int(32 * this->scale())
                                 : 0;
+    const int massModerationHeight =
+        this->ui_.massModerationPreview != nullptr
+            ? this->ui_.massModerationPreview->preferredHeight()
+            : 0;
     const int emoteBarHeight = this->ui_.emoteBar != nullptr
                                    ? this->ui_.emoteBar->preferredHeight()
                                    : 0;
     if (this->replyTarget_ != nullptr)
     {
         // give more space for showing the message being replied to
-        return int(250 * this->scale()) + resubHeight + emoteBarHeight;
+        return int(250 * this->scale()) + resubHeight + emoteBarHeight +
+               massModerationHeight;
     }
-    return int(150 * this->scale()) + resubHeight + emoteBarHeight;
+    return int(150 * this->scale()) + resubHeight + emoteBarHeight +
+           massModerationHeight;
 }
 
 void SplitInput::addShortcuts()
@@ -9245,6 +9392,11 @@ void SplitInput::addShortcuts()
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
 
+             if (this->isAnonymousBlocked())
+             {
+                 return "";
+             }
+
              if (this->prevMsg_.isEmpty() || this->prevIndex_ == 0)
              {
                  return "";
@@ -9269,6 +9421,11 @@ void SplitInput::addShortcuts()
         {"nextMessage",
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
+
+             if (this->isAnonymousBlocked())
+             {
+                 return "";
+             }
 
              // If user did not write anything before then just do nothing.
              if (this->prevMsg_.isEmpty())
@@ -9409,6 +9566,18 @@ void SplitInput::addShortcuts()
 
 bool SplitInput::eventFilter(QObject *obj, QEvent *event)
 {
+    // The read-only box and the ghost both switch back to the saved account
+    if (!this->anonymousSwitchable_.isEmpty() &&
+        event->type() == QEvent::MouseButtonRelease &&
+        static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton &&
+        ((this->isAnonymousBlocked() && this->ui_.textEdit != nullptr &&
+          obj == this->ui_.textEdit->viewport()) ||
+         (this->inputIconIsGhost_ && obj == this->ui_.sendWaitLockIcon)))
+    {
+        this->disableAnonymousMode();
+        return true;
+    }
+
     const bool isPollPredictionButton =
         (this->ui_.predictionButton != nullptr &&
          obj == this->ui_.predictionButton) ||
@@ -9782,6 +9951,10 @@ QString SplitInput::getInputText() const
 
 void SplitInput::insertText(const QString &text)
 {
+    if (this->isAnonymousBlocked())
+    {
+        return;  // emote and mention clicks can't fill an anonymous box
+    }
     this->ui_.textEdit->insertPlainText(text);
 }
 
@@ -9974,8 +10147,10 @@ void SplitInput::paintEvent(QPaintEvent * /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
 
-    QColor borderColor =
-        this->theme->isLightTheme() ? QColor("#ccc") : QColor("#333");
+    const auto classicDark = this->theme->themeName.getValue() == "Dark" &&
+                             !this->theme->isLightTheme();
+    const auto borderColor =
+        classicDark ? QColor("#333") : this->theme->splits.input.border;
 
     auto *inputWrap = this->ui_.inputWrapper;
     auto inputBoxRect = inputWrap->geometry();
@@ -9984,7 +10159,12 @@ void SplitInput::paintEvent(QPaintEvent * /*event*/)
     const auto inputBackground = this->theme->splits.input.background;
 
     auto composerRect = inputBoxRect;
-    if (this->ui_.emoteBar != nullptr && this->ui_.emoteBar->isVisible())
+    if (this->ui_.massModerationPreview != nullptr &&
+        this->ui_.massModerationPreview->isVisible())
+    {
+        composerRect.setTop(this->ui_.massModerationPreview->geometry().top());
+    }
+    else if (this->ui_.emoteBar != nullptr && this->ui_.emoteBar->isVisible())
     {
         composerRect.setTop(this->ui_.emoteBar->geometry().top() +
                             this->ui_.emoteBar->contentTop());
@@ -9996,9 +10176,8 @@ void SplitInput::paintEvent(QPaintEvent * /*event*/)
     }
 
     const QRectF composerBounds(composerRect);
-    const qreal radius =
-        std::min(std::max<qreal>(5.0, 7.0 * this->scale()),
-                 composerBounds.width() / 2.0);
+    const qreal radius = std::min(std::max<qreal>(5.0, 7.0 * this->scale()),
+                                  composerBounds.width() / 2.0);
     QPainterPath composerPath;
     composerPath.moveTo(composerBounds.bottomLeft());
     composerPath.lineTo(composerBounds.left(),
@@ -10138,6 +10317,128 @@ void SplitInput::setPlaceholderText(const QString &text)
     this->refreshSendWaitStatus();
 }
 
+void SplitInput::setAnonymousState(const QStringList &anonymousOn)
+{
+    this->anonymousPlatforms_ = anonymousOn;
+    this->anonymousSwitchable_.clear();
+    for (const auto &platform : anonymousOn)
+    {
+        if (hasOneSavedAccount(platform))
+        {
+            this->anonymousSwitchable_.append(platform);
+        }
+    }
+    const bool blocked = this->isAnonymousBlocked();
+    this->ui_.textEdit->setReadOnly(blocked);
+    this->ui_.textEdit->viewport()->setCursor(
+        !blocked ? Qt::IBeamCursor
+        : this->anonymousSwitchable_.isEmpty() ||
+                this->anonymousExit_ != AnonymousExit::None
+            ? Qt::ArrowCursor
+            : Qt::PointingHandCursor);
+    this->refreshSendWaitStatus();
+}
+
+bool SplitInput::isAnonymousBlocked() const
+{
+    return !this->anonymousPlatforms_.isEmpty();
+}
+
+const QStringList &SplitInput::switchableAnonymousPlatforms() const
+{
+    return this->anonymousSwitchable_;
+}
+
+void SplitInput::disableAnonymousMode()
+{
+    if (this->anonymousSwitchable_.isEmpty() ||
+        this->anonymousExit_ != AnonymousExit::None)
+    {
+        return;
+    }
+    // Each switch updates this input, so work from a copy
+    const auto platforms = this->anonymousSwitchable_;
+    const auto switchAccounts = [platforms] {
+        for (const auto &platform : platforms)
+        {
+            switchToSavedAccount(platform);
+        }
+        std::ignore = getSettings()->requestSave();
+    };
+    if (!this->isVisible())
+    {
+        switchAccounts();
+        return;
+    }
+
+    // Switching accounts holds up the UI for a moment, so it happens while
+    // the box is empty: the notice fades out first, and the identity badge,
+    // platform button and new placeholder fade in once the switch settles.
+    this->anonymousExit_ = AnonymousExit::FadingOut;
+    this->ui_.textEdit->viewport()->setCursor(Qt::ArrowCursor);
+    this->ui_.sendWaitLockIcon->setCursor(Qt::ArrowCursor);
+    this->refreshSendWaitStatus();
+    this->fadePlaceholder(0.0, ANONYMOUS_FADE_OUT_MS);
+    QTimer::singleShot(ANONYMOUS_FADE_OUT_MS + 20, this,
+                       [this, switchAccounts] {
+        this->anonymousExit_ = AnonymousExit::Switching;
+        switchAccounts();
+        QTimer::singleShot(ANONYMOUS_SETTLE_MS, this, [this] {
+            this->finishAnonymousExit();
+        });
+    });
+}
+
+void SplitInput::finishAnonymousExit()
+{
+    this->anonymousExit_ = AnonymousExit::None;
+
+    if (this->badgeButtonShown_)
+    {
+        this->badgeButtonVisibilityAnimation_.stop();
+        this->badgeButtonVisibilityAnimation_.setStartValue(0.0);
+        this->badgeButtonVisibilityAnimation_.setEndValue(1.0);
+        this->badgeButtonVisibilityAnimation_.start();
+    }
+
+    auto *button = this->ui_.platformButton;
+    if (auto *effect = button != nullptr
+                           ? qobject_cast<QGraphicsOpacityEffect *>(
+                                 button->graphicsEffect())
+                           : nullptr)
+    {
+        auto *fade = new QPropertyAnimation(effect, "opacity", this);
+        fade->setDuration(ANONYMOUS_FADE_IN_MS);
+        fade->setEasingCurve(QEasingCurve::OutCubic);
+        fade->setStartValue(0.0);
+        fade->setEndValue(1.0);
+        QObject::connect(fade, &QPropertyAnimation::finished, button,
+                         [button] {
+                             button->setGraphicsEffect(nullptr);
+                         });
+        fade->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    this->fadePlaceholder(1.0, ANONYMOUS_FADE_IN_MS);
+    // brings the ghost back if a switch didn't take
+    this->setAnonymousState(QStringList(this->anonymousPlatforms_));
+}
+
+void SplitInput::fadePlaceholder(qreal opacity, int durationMs)
+{
+    this->placeholderFade_.stop();
+    if (!this->isVisible())
+    {
+        this->placeholderOpacity_ = opacity;
+        this->updateTextEditPalette();
+        return;
+    }
+    this->placeholderFade_.setDuration(durationMs);
+    this->placeholderFade_.setStartValue(this->placeholderOpacity_);
+    this->placeholderFade_.setEndValue(opacity);
+    this->placeholderFade_.start();
+}
+
 void SplitInput::clearInput()
 {
     this->currMsg_ = "";
@@ -10215,19 +10516,28 @@ int SplitInput::replyMessageWidth() const
 void SplitInput::updateTextEditPalette()
 {
     QPalette p;
+    const auto classicDark = this->theme->themeName.getValue() == "Dark" &&
+                             !this->theme->isLightTheme();
 
-    // Placeholder text color
-    p.setColor(QPalette::PlaceholderText,
-               this->theme->messages.textColors.chatPlaceholder);
-
-    // Text color
-    p.setColor(QPalette::Text, this->theme->messages.textColors.regular);
-
-    // Selection background color
+    // Default/Dark retains the original 1.3.3 placeholder, text and selection.
+    auto placeholderColor = this->theme->splits.input.text;
+    placeholderColor.setAlpha(150);
+    if (classicDark)
+    {
+        placeholderColor = this->theme->messages.textColors.chatPlaceholder;
+    }
+    if (this->placeholderOpacity_ < 1.0)
+    {
+        placeholderColor.setAlphaF(placeholderColor.alphaF() *
+                                   this->placeholderOpacity_);
+    }
+    p.setColor(QPalette::PlaceholderText, placeholderColor);
+    p.setColor(QPalette::Text, classicDark
+                                   ? this->theme->messages.textColors.regular
+                                   : this->theme->splits.input.text);
     p.setBrush(QPalette::Highlight,
-               this->theme->isLightTheme()
-                   ? QColor(u"#68B1FF"_s)
-                   : this->theme->tabs.selected.backgrounds.regular);
+               classicDark ? this->theme->tabs.selected.backgrounds.regular
+                           : this->theme->splits.input.border);
 
     // Background color
     p.setBrush(QPalette::Base, this->backgroundColor());
@@ -10352,13 +10662,42 @@ void SplitInput::refreshSendWaitStatus()
             ? QStringLiteral("You can send a message in %1")
                   .arg(formatTime(longestWait, 2))
             : this->placeholderText_);
-    this->ui_.sendButton->setEnabled(!blocked);
-    this->ui_.sendWaitLockIcon->setToolTip(
-        showIndicator
-            ? QStringLiteral("Slow mode cooldown: %1 remaining")
-                  .arg(formatTime(longestWait, 2))
-            : QString{});
-    this->setSendWaitLockShown(showIndicator, true);
+    this->ui_.sendButton->setEnabled(!blocked && !this->isAnonymousBlocked());
+
+    // A slow-mode countdown matters more than the ghost, so it wins the slot
+    const bool ghost = !showIndicator && this->isAnonymousBlocked() &&
+                       this->anonymousExit_ == AnonymousExit::None;
+    // Only redraw for an icon that's showing, so one sliding out keeps its look
+    if ((showIndicator || ghost) && ghost != this->inputIconIsGhost_)
+    {
+        this->inputIconIsGhost_ = ghost;
+        this->updateSendWaitLockIcon();
+    }
+    QString iconTip;
+    if (showIndicator)
+    {
+        iconTip = QStringLiteral("Slow mode cooldown: %1 remaining")
+                      .arg(formatTime(longestWait, 2));
+    }
+    else if (ghost)
+    {
+        iconTip = QStringLiteral("Anonymous on %1.")
+                      .arg(listPlatformNames(this->anonymousPlatforms_));
+        if (this->anonymousSwitchable_ == this->anonymousPlatforms_)
+        {
+            iconTip += QStringLiteral(" Click to disable.");
+        }
+        else if (!this->anonymousSwitchable_.isEmpty())
+        {
+            iconTip += QStringLiteral(" Click to disable on %1.")
+                           .arg(listPlatformNames(this->anonymousSwitchable_));
+        }
+    }
+    this->ui_.sendWaitLockIcon->setToolTip(iconTip);
+    this->ui_.sendWaitLockIcon->setCursor(
+        ghost && !this->anonymousSwitchable_.isEmpty() ? Qt::PointingHandCursor
+                                                       : Qt::ArrowCursor);
+    this->setSendWaitLockShown(showIndicator || ghost, true);
 }
 
 }  // namespace chatterino

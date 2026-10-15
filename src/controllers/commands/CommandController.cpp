@@ -9,6 +9,7 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/builtin/chatterino/Debugging.hpp"
 #include "controllers/commands/builtin/kick/KickRawEvent.hpp"
+#include "controllers/commands/builtin/MassModeration.hpp"
 #include "controllers/commands/builtin/Misc.hpp"
 #include "controllers/commands/builtin/PinMessage.hpp"
 #include "controllers/commands/builtin/twitch/AddModerator.hpp"
@@ -468,6 +469,9 @@ CommandController::CommandController(const Paths &paths)
     this->registerCommand("/vip", &commands::addVIP);
 
     this->registerCommand("/unvip", &commands::removeVIP);
+
+    this->registerCommand("/massban", &commands::massBan);
+    this->registerCommand("/massunban", &commands::massUnban);
 
     this->registerCommand("/unban", &commands::unbanUser);
     this->registerCommand("/untimeout", &commands::unbanUser);

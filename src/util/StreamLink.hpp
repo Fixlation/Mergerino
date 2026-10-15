@@ -7,10 +7,28 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
 #include <stdexcept>
 #include <string>
 
+class QObject;
+class QProcess;
+
 namespace chatterino {
+
+struct StreamlinkSource {
+    QString service;
+    QString url;
+};
+
+// Parse Streamlink's machine-readable stream listing (highest quality first).
+QStringList parseStreamlinkQualities(const QByteArray &output);
+
+// The callback runs on context's thread. Destroying context cancels the query.
+QProcess *getStreamQualities(
+    const QString &channelURL, QObject *context,
+    std::function<void(QStringList, QString)> callback);
+void cancelStreamlinkQuery(QProcess *process);
 
 class Exception : public std::runtime_error
 {

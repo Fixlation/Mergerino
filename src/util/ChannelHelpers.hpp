@@ -11,6 +11,8 @@
 
 #include <QDateTime>
 
+#include <functional>
+
 namespace chatterino {
 
 /// Adds a timeout or replaces a previous one sent in the last 20 messages and in the last 5s.
@@ -19,11 +21,13 @@ namespace chatterino {
 ///                       - replace `buffer[i]` (=toReplace) with `replacement`
 /// @param addMessage A function of type `void (MessagePtr message)`
 ///                   - adds the `message`.
-/// @param disableUserMessages If set, disables all message by the timed out user.
+/// @param disableUserMessages If set, disables all messages by the timed out user.
+/// @param flagsChanged Called for each message whose moderation flags change.
 template <typename Buf, typename Replace, typename Add>
-void addOrReplaceChannelTimeout(const Buf &buffer, MessagePtr message,
-                                const QDateTime &now, Replace replaceMessage,
-                                Add addMessage, bool disableUserMessages)
+void addOrReplaceChannelTimeout(
+    const Buf &buffer, MessagePtr message, const QDateTime &now,
+    Replace replaceMessage, Add addMessage, bool disableUserMessages,
+    const std::function<void(const MessagePtr &)> &flagsChanged = {})
 {
     // NOTE: This function uses the messages PARSE time to figure out whether they should be replaced
     // This works as expected for incoming messages, but not for historic messages.
@@ -121,10 +125,13 @@ void addOrReplaceChannelTimeout(const Buf &buffer, MessagePtr message,
                 s->flags.hasNone(
                     {MessageFlag::ModerationAction, MessageFlag::Whisper}))
             {
-                // FOURTF: disabled for now
-                // PAJLADA: Shitty solution described in Message.hpp
+                const auto previousFlags = s->flags;
                 s->flags.set(MessageFlag::Disabled);
                 s->flags.set(MessageFlag::InvalidReplyTarget);
+                if (s->flags != previousFlags && flagsChanged)
+                {
+                    flagsChanged(s);
+                }
             }
         }
     }

@@ -18,6 +18,67 @@ namespace {
 using namespace chatterino;
 using namespace Qt::Literals;
 
+uint64_t kickUnsignedValue(BoostJsonValue value, uint64_t fallback = 0)
+{
+    if (value.isString())
+    {
+        bool ok = false;
+        const auto parsed = value.toQString().toULongLong(&ok);
+        return ok ? parsed : fallback;
+    }
+    return value.toUint64(fallback);
+}
+
+QString kickAssetUrl(BoostJsonValue value, int depth = 0)
+{
+    if (depth > 6)
+    {
+        return {};
+    }
+    if (value.isString())
+    {
+        auto text = value.toQString().trimmed();
+        if (text.startsWith("//"))
+        {
+            text.prepend("https:");
+        }
+        else if (text.startsWith('/'))
+        {
+            text.prepend("https://kick.com");
+        }
+        const QUrl url(text);
+        if (url.isValid() && !url.host().isEmpty() &&
+            (url.scheme() == "https" || url.scheme() == "http"))
+        {
+            return url.toString();
+        }
+        return {};
+    }
+    if (value.isArray())
+    {
+        for (auto item : value.toArray())
+        {
+            if (auto url = kickAssetUrl(item, depth + 1); !url.isEmpty())
+            {
+                return url;
+            }
+        }
+    }
+    if (value.isObject())
+    {
+        for (auto key : {"image_url", "imageUrl", "src", "url",
+                         "badge_image", "badgeImage", "image", "images",
+                         "icon", "icon_url", "thumbnail", "metadata"})
+        {
+            if (auto url = kickAssetUrl(value[key], depth + 1); !url.isEmpty())
+            {
+                return url;
+            }
+        }
+    }
+    return {};
+}
+
 std::vector<std::pair<QByteArray, QByteArray>> kickNoAuthHeaders()
 {
     return {
@@ -36,6 +97,23 @@ struct KickBrowserSession {
     QString xsrfToken;
 };
 
+QString normalizeKickCookieToken(const QString &value)
+{
+    const auto token = QUrl::fromPercentEncoding(value.trimmed().toUtf8());
+    // Accept cookie/bearer token characters only, never pasted JavaScript,
+    // cookie attributes, control characters, or HTTP header delimiters.
+    for (const auto ch : token)
+    {
+        const auto c = ch.unicode();
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || QStringView(u"|_-./+=").contains(ch)))
+        {
+            return {};
+        }
+    }
+    return token;
+}
+
 KickBrowserSession parseKickBrowserSession(const QString &credential)
 {
     QJsonParseError error;
@@ -45,15 +123,15 @@ KickBrowserSession parseKickBrowserSession(const QString &credential)
     {
         const auto object = document.object();
         return {
-            .sessionToken =
-                object.value(QStringLiteral("sessionToken")).toString().trimmed(),
-            .xsrfToken =
-                object.value(QStringLiteral("xsrfToken")).toString().trimmed(),
+            .sessionToken = normalizeKickCookieToken(
+                object.value(QStringLiteral("sessionToken")).toString()),
+            .xsrfToken = normalizeKickCookieToken(
+                object.value(QStringLiteral("xsrfToken")).toString()),
         };
     }
 
     return {
-        .sessionToken = credential.trimmed(),
+        .sessionToken = normalizeKickCookieToken(credential),
         .xsrfToken = {},
     };
 }
@@ -69,7 +147,8 @@ std::vector<std::pair<QByteArray, QByteArray>> kickBrowserSessionHeaders(
         referer += channelSlug.toUtf8();
     }
 
-    auto cookie = "session_token=" + session.sessionToken.toUtf8();
+    auto cookie =
+        "session_token=" + QUrl::toPercentEncoding(session.sessionToken);
     if (!session.xsrfToken.isEmpty())
     {
         cookie += "; XSRF-TOKEN=" +
@@ -169,15 +248,17 @@ void callDeserialize(auto &&cb, BoostJsonValue data)
 
 template <typename T>
 void getJsonNoAuth(const QString &url, std::function<void(ExpectedStr<T>)> cb,
-                   bool unwrapData = false)
+                   bool unwrapData = false,
+                   const QString &websiteCredential = {})
 {
     NetworkRequest(url)
-        .headerList(kickNoAuthHeaders())
+        .headerList(websiteCredential.isEmpty()
+                        ? kickNoAuthHeaders()
+                        : kickBrowserSessionHeaders(websiteCredential))
         .onError([cb](const NetworkResult &res) {
             cb(makeUnexpected(res.formatError()));
         })
-        .onSuccess([cb = std::move(cb), unwrapData](
-                       const NetworkResult &res) {
+        .onSuccess([cb = std::move(cb), unwrapData](const NetworkResult &res) {
             const auto &ba = res.getData();
             boost::system::error_code ec;
             auto jv =
@@ -271,8 +352,29 @@ uint64_t kickWebsiteUserID(const QJsonObject &root)
         for (const auto &key :
              {QStringLiteral("id"), QStringLiteral("user_id")})
         {
+            const auto value = object.value(key);
             bool ok = false;
-            const auto id = object.value(key).toVariant().toULongLong(&ok);
+            uint64_t id = 0;
+            if (value.isString())
+            {
+                const auto text = value.toString();
+                if (!text.isEmpty() &&
+                    std::all_of(text.begin(), text.end(), [](QChar ch) {
+                        return ch >= QLatin1Char('0') && ch <= QLatin1Char('9');
+                    }))
+                {
+                    id = text.toULongLong(&ok);
+                }
+            }
+            else if (value.isDouble())
+            {
+                const auto number = value.toInteger(-1);
+                if (number > 0)
+                {
+                    id = static_cast<uint64_t>(number);
+                    ok = true;
+                }
+            }
             if (ok && id != 0)
             {
                 return id;
@@ -452,17 +554,24 @@ QString kickIdentityAuthHelper()
 {
     return QStringLiteral(
         "(() => {"
+        "if (location.protocol !== 'https:' || "
+        "(location.hostname !== 'kick.com' && "
+        "!location.hostname.endsWith('.kick.com'))) { "
+        "console.error('Mergerino: run this helper on https://kick.com while "
+        "signed in.'); return; }"
         "const readCookie = name => {"
-        "const entry = document.cookie.split(';').map(item => item.trim()).find("
+        "const entry = document.cookie.split(';').map(item => "
+        "item.trim()).find("
         "item => item.startsWith(name + '='));"
-        "return entry ? decodeURIComponent(entry.slice(name.length + 1)) : '';"
+        "if (!entry) return '';"
+        "try { return decodeURIComponent(entry.slice(name.length + 1)); } "
+        "catch { return ''; }"
         "};"
         "const sessionToken = readCookie('session_token');"
-        "if (!sessionToken) { console.error('Mergerino: no signed-in Kick session "
+        "if (!sessionToken) { console.error('Mergerino: no signed-in Kick "
+        "session "
         "was found.'); return; }"
         "const xsrfToken = readCookie('XSRF-TOKEN');"
-        "if (!xsrfToken) { console.error('Mergerino: Kick security data was "
-        "not found. Refresh kick.com and run the helper again.'); return; }"
         "copy(JSON.stringify({sessionToken, xsrfToken}));"
         "console.log('Mergerino Kick token copied. Return to Mergerino and "
         "click Paste Token.');"
@@ -471,16 +580,21 @@ QString kickIdentityAuthHelper()
 
 QString parseKickIdentityToken(const QString &clipboardText)
 {
+    if (clipboardText.trimmed() == "null" ||
+        clipboardText.contains("document.cookie"))
+    {
+        return {};
+    }
     QJsonParseError error;
     const auto document =
         QJsonDocument::fromJson(clipboardText.toUtf8(), &error);
     if (error.error == QJsonParseError::NoError && document.isObject())
     {
         const auto object = document.object();
-        const auto sessionToken =
-            object.value(QStringLiteral("sessionToken")).toString().trimmed();
-        const auto xsrfToken =
-            object.value(QStringLiteral("xsrfToken")).toString().trimmed();
+        const auto sessionToken = normalizeKickCookieToken(
+            object.value(QStringLiteral("sessionToken")).toString());
+        const auto xsrfToken = normalizeKickCookieToken(
+            object.value(QStringLiteral("xsrfToken")).toString());
         if (sessionToken.isEmpty())
         {
             return {};
@@ -497,10 +611,30 @@ QString parseKickIdentityToken(const QString &clipboardText)
                 .toJson(QJsonDocument::Compact));
     }
 
-    if (!clipboardText.startsWith(QLatin1Char('{')) &&
-        !clipboardText.contains(QStringLiteral("document.cookie")))
+    return normalizeKickCookieToken(clipboardText);
+}
+
+ExpectedStr<void> validateKickIdentityResponse(const QByteArray &response,
+                                               uint64_t expectedUserID)
+{
+    const auto document = QJsonDocument::fromJson(response);
+    if (!document.isObject())
     {
-        return clipboardText.trimmed();
+        return makeUnexpected(
+            u"Kick did not return account data. Open kick.com, "
+            u"complete any browser verification, then copy a fresh token."_s);
+    }
+    const auto userID = kickWebsiteUserID(document.object());
+    if (userID == 0)
+    {
+        return makeUnexpected(
+            u"Kick did not recognize this website session. "
+            u"Sign in again at kick.com and copy a fresh token with Copy Helper."_s);
+    }
+    if (expectedUserID == 0 || userID != expectedUserID)
+    {
+        return makeUnexpected(
+            u"That Kick website session belongs to a different account."_s);
     }
     return {};
 }
@@ -560,10 +694,16 @@ KickPrivateChatSettings::KickPrivateChatSettings(BoostJsonObject obj)
 
 KickPrivateSubscriberBadgeInfo::KickPrivateSubscriberBadgeInfo(
     BoostJsonObject obj)
-    : months(obj["months"].toUint64())
+    : months(kickUnsignedValue(obj["months"]))
 {
-    auto badgeImage = obj["badge_image"].toObject();
-    this->imageUrl = badgeImage["src"].toQString();
+    for (auto key : {"badge_image", "image_url", "image", "src"})
+    {
+        this->imageUrl = kickAssetUrl(obj[key]);
+        if (!this->imageUrl.isEmpty())
+        {
+            break;
+        }
+    }
 }
 
 KickPrivateUserBadgeInfo::KickPrivateUserBadgeInfo(BoostJsonObject obj)
@@ -573,15 +713,37 @@ KickPrivateUserBadgeInfo::KickPrivateUserBadgeInfo(BoostJsonObject obj)
     {
         this->type = obj["badge_type"].toQString();
     }
-    this->text = obj["text"].toQString(obj["label"].toQString());
-    this->imageUrl = obj["image_url"].toQString(obj["src"].toQString());
-    this->count = obj["count"].toUint64();
-    this->sortOrder = obj["sort_order"].toUint64(1000);
+    this->text = obj["text"].toQString(
+        obj["label"].toQString(obj["title"].toQString(obj["name"].toQString())));
+    for (auto key : {"image_url", "imageUrl", "badge_image", "image", "src",
+                     "metadata"})
+    {
+        this->imageUrl = kickAssetUrl(obj[key]);
+        if (!this->imageUrl.isEmpty())
+        {
+            break;
+        }
+    }
+    this->count = kickUnsignedValue(obj["count"]);
+    this->sortOrder = kickUnsignedValue(obj["sort_order"], 1000);
     this->active = obj["active"].toBool(true);
     this->selected = obj["selected"].toBool(true);
 
+    auto normalizedType = this->type.trimmed().toLower();
+    normalizedType.replace('-', '_');
+    const auto category = obj["badge_type"]
+                              .toQString(obj["badgeType"].toQString())
+                              .trimmed()
+                              .toLower();
+    this->channelAssigned =
+        category == u"channel"_s || normalizedType == u"broadcaster"_s ||
+        normalizedType == u"moderator"_s ||
+        normalizedType == u"lead_moderator"_s || normalizedType == u"vip"_s ||
+        normalizedType == u"og"_s;
+
     auto metadata = obj["metadata"].toObject();
-    this->level = metadata["level"].toUint64(obj["level"].toUint64());
+    this->level = kickUnsignedValue(metadata["level"],
+                                    kickUnsignedValue(obj["level"]));
 }
 
 KickPrivateChannelInfo::KickPrivateChannelInfo(BoostJsonObject obj)
@@ -655,8 +817,12 @@ KickPrivateUserInChannelInfo::KickPrivateUserInChannelInfo(BoostJsonObject obj)
     }
 
     std::stable_sort(this->badges.begin(), this->badges.end(),
-                     [](const auto &lhs, const auto &rhs) {
-                         return lhs.sortOrder < rhs.sortOrder;
+                      [](const auto &lhs, const auto &rhs) {
+                          if (lhs.channelAssigned != rhs.channelAssigned)
+                          {
+                              return lhs.channelAssigned;
+                          }
+                          return lhs.sortOrder < rhs.sortOrder;
                      });
 
     auto followingSinceStr = obj["following_since"].toQString();
@@ -702,13 +868,22 @@ KickChannelInfo::KickChannelInfo(BoostJsonObject obj)
 }
 
 KickPrivateEmoteInfo::KickPrivateEmoteInfo(BoostJsonObject obj)
-    : emoteID(obj["id"].toUint64())
+    : emoteID(kickUnsignedValue(obj["id"]))
     , name(obj["name"].toQString())
     , subscribersOnly(obj["subscribers_only"].toBool())
 {
+    for (auto key : {"image_url", "imageUrl", "image", "images", "src"})
+    {
+        this->imageUrl = kickAssetUrl(obj[key]);
+        if (!this->imageUrl.isEmpty())
+        {
+            break;
+        }
+    }
 }
 
 KickPrivateEmoteSetInfo::KickPrivateEmoteSetInfo(BoostJsonObject obj)
+    : name(obj["name"].toQString())
 {
     auto userIDVal = obj["user_id"];
     if (userIDVal.isString())
@@ -826,10 +1001,11 @@ void KickApi::privateUserInChannelInfo(
 }
 
 void KickApi::privateEmotesInChannel(
-    const QString &username, Callback<std::vector<KickPrivateEmoteSetInfo>> cb)
+    const QString &username, Callback<std::vector<KickPrivateEmoteSetInfo>> cb,
+    const QString &websiteCredential)
 {
     getJsonNoAuth(u"https://kick.com/emotes/" % slugify(username),
-                  std::move(cb));
+                  std::move(cb), false, websiteCredential);
 }
 
 void KickApi::privateRecentMessages(
@@ -1352,7 +1528,7 @@ void KickApi::validateChatIdentityToken(const QString &chatIdentityToken,
                                         uint64_t expectedUserID,
                                         Callback<void> cb)
 {
-    const auto token = chatIdentityToken.trimmed();
+    const auto token = parseKickIdentityToken(chatIdentityToken);
     if (token.isEmpty() || expectedUserID == 0)
     {
         cb(makeUnexpected(
@@ -1367,23 +1543,9 @@ void KickApi::validateChatIdentityToken(const QString &chatIdentityToken,
         .onError([cb](const NetworkResult &result) {
             cb(makeUnexpected(kickIdentityError(result)));
         })
-        .onSuccess([expectedUserID, cb = std::move(cb)](
-                       const NetworkResult &result) {
-            const auto userID = kickWebsiteUserID(result.parseJson());
-            if (userID == 0)
-            {
-                cb(makeUnexpected(
-                    u"Kick returned an invalid signed-in account response."_s));
-                return;
-            }
-            if (userID != expectedUserID)
-            {
-                cb(makeUnexpected(
-                    u"That Kick website session belongs to a different "
-                    u"account."_s));
-                return;
-            }
-            cb(ExpectedStr<void>{});
+        .onSuccess([expectedUserID,
+                    cb = std::move(cb)](const NetworkResult &result) {
+            cb(validateKickIdentityResponse(result.getData(), expectedUserID));
         })
         .execute();
 }

@@ -52,6 +52,7 @@ class LabelButton;
 class ResizingTextEdit;
 class ChannelView;
 class EmoteBar;
+class MassModerationPreview;
 class PlatformSwitchButton;
 class SvgButton;
 class SpellCheckHighlighter;
@@ -82,6 +83,15 @@ public:
 
     void setReply(MessagePtr target);
     void setPlaceholderText(const QString &text);
+    /// anonymousOn lists the platforms a message here would have to go to
+    /// that the user isn't logged in on. While it's non-empty the box is
+    /// read-only and shows the ghost. Clicking either switches to the saved
+    /// account on each of those platforms that has exactly one.
+    void setAnonymousState(const QStringList &anonymousOn);
+    bool isAnonymousBlocked() const;
+    /// The anonymous platforms a click switches back to a saved account
+    const QStringList &switchableAnonymousPlatforms() const;
+    void disableAnonymousMode();
     void updatePlatformSelector(bool animate = false);
     void applyActiveAccountProviderDefault();
     SendPlatformSelection sendPlatformSelection() const;
@@ -276,6 +286,8 @@ protected:
         QLabel *resubCalloutLabel = nullptr;
         QPushButton *resubCalloutButton = nullptr;
 
+        MassModerationPreview *massModerationPreview = nullptr;
+
         // Recent and most-used emotes
         EmoteBar *emoteBar = nullptr;
 
@@ -320,6 +332,21 @@ protected:
     std::vector<MessagePlatform> enabledSendPlatforms_;
     QHash<MessagePlatform, int> sendWaitStatuses_;
     QString placeholderText_;
+    QStringList anonymousPlatforms_;
+    QStringList anonymousSwitchable_;
+    enum class AnonymousExit : uint8_t {
+        None,
+        FadingOut,
+        // accounts are switching; what they bring along stays hidden
+        Switching,
+    };
+    AnonymousExit anonymousExit_ = AnonymousExit::None;
+    qreal placeholderOpacity_ = 1.0;
+    void finishAnonymousExit();
+    void fadePlaceholder(qreal opacity, int durationMs);
+    // the icon slot left of the text shows a ghost instead of the slow-mode
+    // lock while the user is anonymous somewhere in this chat
+    bool inputIconIsGhost_ = false;
 
     // Hidden denotes whether this split input should be hidden or not
     // This is used instead of the regular QWidget::hide/show because
@@ -347,6 +374,7 @@ protected:
     bool badgeButtonShown_ = true;
     QVariantAnimation sendWaitLockVisibilityAnimation_;
     bool sendWaitLockShown_ = false;
+    QVariantAnimation placeholderFade_;
 
     std::optional<bool> checkSpellingOverride_;
     bool shouldCheckSpelling() const;

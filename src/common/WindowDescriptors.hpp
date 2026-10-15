@@ -57,6 +57,7 @@ struct SplitDescriptor {
     std::optional<bool> filterActivityExplicit_;
     qreal activityMessageScale_{0.9};
     bool collapseGiftedSubscriptions_{true};
+    bool showRaidsAndWatchStreaks_{true};
     std::optional<ActivityTimeDisplayMode> activityTimeDisplayMode_;
     bool slowerChatEnabled_{false};
     qreal slowerChatMessagesPerSecond_{5.0};

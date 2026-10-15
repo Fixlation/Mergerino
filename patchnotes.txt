@@ -1,5 +1,16 @@
 Patch Notes
 
+15/10/2026
+- Added guess the emote and wheel spin to giveaway feature
+- Added mass ban/unban command
+- Added support for native Twitch gifs
+- Added themes (including animated)
+- Fixed a bug causing Kick chat to disconnect
+- Fixed a bug causing Kick usercards to open Twitch profiles
+- Fixed a bug causing open in streamlink option to be missing
+- Fixed a bug causing TikTok streams to appear live while offline
+- Improved general app performance, QoL and memory usage
+
 06/08/2026
 - Added 7TV account integration
 - Added channel-specific 7TV cosmetics feature

@@ -1464,6 +1464,8 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
                 menu->installEventFilter(new ClickableSubmenuActionFilter(
                     menu.get(), streamAction, std::move(openDefault)));
             }
+            menu->addAction(OPEN_IN_STREAMLINK, this->split_,
+                            &Split::openInStreamlink);
             menu->addSeparator();
         }
     }
@@ -1489,10 +1491,13 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
     {
         menu->addAction("Settings", this->split_, &Split::changeChannel);
     }
-    menu->addAction(
-        "Filters",
-        h->getDisplaySequence(HotkeyCategory::Split, "pickFilters"),
-        this->split_, &Split::setFiltersDialog);
+    if (!this->split_->isActivityPane())
+    {
+        menu->addAction(
+            "Filters",
+            h->getDisplaySequence(HotkeyCategory::Split, "pickFilters"),
+            this->split_, &Split::setFiltersDialog);
+    }
     auto *unhidePinnedMessageAction =
         menu->addAction("Unhide pinned message", this->split_,
                         &Split::unhidePinnedMessages);

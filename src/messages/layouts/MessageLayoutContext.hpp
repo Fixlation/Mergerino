@@ -29,6 +29,9 @@ struct MessageColors {
 
     // true if any of the background colors have transparency
     bool hasTransparency = false;
+    // Dim disabled and faded-history messages by lowering their opacity
+    // instead of covering them, so a backdrop behind them stays visible
+    bool fadeWithOpacity = false;
 
     QColor regularBg;
     QColor alternateBg;

@@ -7,6 +7,10 @@
 #include "controllers/commands/CommandContext.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/commands/common/ChannelAction.hpp"
+#include "controllers/completion/sources/CommandSource.hpp"
+#include "controllers/completion/strategies/CommandStrategy.hpp"
+#include "MergedChannelTestAccess.hpp"
+#include "messages/Message.hpp"
 #include "mocks/BaseApplication.hpp"
 #include "mocks/EmoteController.hpp"
 #include "mocks/Helix.hpp"
@@ -1053,6 +1057,118 @@ TEST(Commands, E2E)
     getApp()->getCommands()->execCommand(
         "/unban --channel id:11148817 --channel testaccount_420 forsen",
         channel, false);
+}
+
+namespace {
+class MassCommandChannel : public Channel
+{
+public:
+    explicit MassCommandChannel(Type type)
+        : Channel("test", type)
+    {
+    }
+    bool isMod() const override
+    {
+        return mod;
+    }
+    bool isBroadcaster() const override
+    {
+        return broadcaster;
+    }
+    bool mod = false;
+    bool broadcaster = false;
+};
+
+void checkMassCompletion(const Channel &channel,
+                         std::vector<MessagePlatform> filter,
+                         const std::vector<MessagePlatform> &expected)
+{
+    completion::CommandSource source(
+        std::make_unique<completion::CommandStrategy>(true), nullptr, &channel,
+        true, std::move(filter));
+    source.update("/mass");
+    if (expected.empty())
+    {
+        EXPECT_TRUE(source.output().empty());
+        return;
+    }
+    ASSERT_EQ(source.output().size(), 2);
+    EXPECT_EQ(source.output()[0].name, "massban");
+    EXPECT_EQ(source.output()[1].name, "massunban");
+    for (const auto &item : source.output())
+    {
+        EXPECT_EQ(item.prefix, "/");
+        EXPECT_EQ(item.platforms, expected);
+    }
+    QStringList tabCompletion;
+    source.addToStringList(tabCompletion);
+    EXPECT_EQ(tabCompletion, (QStringList{"/massban ", "/massunban "}));
+}
+}  // namespace
+
+TEST(Commands,
+     MassModerationCompletionRequiresModOrBroadcasterAndRefreshesRights)
+{
+    MockApplication app;
+    for (const auto type : {Channel::Type::Twitch, Channel::Type::Kick})
+    {
+        MassCommandChannel channel(type);
+        completion::CommandSource source(
+            std::make_unique<completion::CommandStrategy>(true), nullptr,
+            &channel, true);
+        source.update("/mass");
+        EXPECT_TRUE(source.output().empty());
+        channel.mod = true;
+        source.update("/mass");
+        EXPECT_EQ(source.output().size(), 2);
+        channel.mod = false;
+        source.update("/mass");
+        EXPECT_TRUE(source.output().empty());
+        channel.broadcaster = true;
+        source.update("/mass");
+        EXPECT_EQ(source.output().size(), 2);
+    }
+}
+
+TEST(Commands, MassModerationCompletionChecksEachMergedPlatform)
+{
+    MockApplication app;
+    auto twitch = std::make_shared<MassCommandChannel>(Channel::Type::Twitch);
+    auto kick = std::make_shared<MassCommandChannel>(Channel::Type::Kick);
+    MergedChannelConfig config;
+    config.twitchEnabled = false;
+    config.kickEnabled = false;
+    MergedChannel merged(config);
+    MergedChannelTestAccess::setSources(merged, twitch, kick);
+    checkMassCompletion(merged, {}, {});
+    twitch->mod = true;
+    checkMassCompletion(*twitch, {}, {MessagePlatform::AnyOrTwitch});
+    checkMassCompletion(merged, {}, {MessagePlatform::AnyOrTwitch});
+    checkMassCompletion(merged, {MessagePlatform::Kick}, {});
+    checkMassCompletion(merged, {MessagePlatform::AnyOrTwitch},
+                        {MessagePlatform::AnyOrTwitch});
+    twitch->mod = false;
+    kick->mod = true;
+    checkMassCompletion(*kick, {}, {MessagePlatform::Kick});
+    checkMassCompletion(merged, {MessagePlatform::AnyOrTwitch}, {});
+    checkMassCompletion(merged, {MessagePlatform::Kick},
+                        {MessagePlatform::Kick});
+    twitch->broadcaster = true;
+    checkMassCompletion(merged, {},
+                        {MessagePlatform::AnyOrTwitch, MessagePlatform::Kick});
+    checkMassCompletion(merged, {MessagePlatform::Kick},
+                        {MessagePlatform::Kick});
+}
+
+TEST(Commands, MassModerationCompletionRequiresASupportedTarget)
+{
+    MockApplication app;
+    Channel other("test", Channel::Type::Misc);
+    completion::CommandSource source(
+        std::make_unique<completion::CommandStrategy>(true), nullptr, &other,
+        true);
+    source.update("/mass");
+    EXPECT_TRUE(source.output().empty());
 }
 
 }  // namespace chatterino

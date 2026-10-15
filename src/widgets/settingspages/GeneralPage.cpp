@@ -16,14 +16,12 @@
 #include "singletons/NativeMessaging.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Settings.hpp"
-#include "singletons/Theme.hpp"
-#include "util/FuzzyConvert.hpp"
 #include "util/ChatterinoImport.hpp"
+#include "util/FuzzyConvert.hpp"
 #include "util/Helpers.hpp"
 #include "util/IncognitoBrowser.hpp"
 #include "widgets/BaseWindow.hpp"
 #include "widgets/dialogs/UpdateDialog.hpp"
-#include "widgets/helper/FontSettingWidget.hpp"
 #include "widgets/settingspages/GeneralPageView.hpp"
 #include "widgets/settingspages/SettingWidget.hpp"
 
@@ -132,9 +130,8 @@ void importChatterinoFromSettings(QWidget *parent)
     options.platformAlertHighlightCustomColor =
         platformAlertHighlightCustomColorSetting().getValue();
 
-    auto stage =
-        chatterino_import::stageImportFromDefaultSource(getApp()->getPaths(),
-                                                        options);
+    auto stage = chatterino_import::stageImportFromDefaultSource(
+        getApp()->getPaths(), options);
     if (!stage)
     {
         QMessageBox::critical(parent, "Chatterino import failed",
@@ -194,31 +191,6 @@ void GeneralPage::initLayout(GeneralPageView &layout)
     auto &s = *getSettings();
 
     layout.addTitle("Interface");
-
-    {
-        auto *themes = getApp()->getThemes();
-        auto available = themes->availableThemes();
-        available.emplace_back("System", "System");
-
-        SettingWidget::dropdown("Theme", themes->themeName, available)
-            ->addTo(layout);
-
-        SettingWidget::dropdown("Dark system theme",
-                                themes->darkSystemThemeName,
-                                themes->availableThemes())
-            ->setTooltip("This theme is selected if your system is in a dark "
-                         "theme and you enabled the adaptive 'System' theme.")
-            ->conditionallyEnabledBy(themes->themeName, "System")
-            ->addTo(layout);
-
-        SettingWidget::dropdown("Light system theme",
-                                themes->lightSystemThemeName,
-                                themes->availableThemes())
-            ->setTooltip("This theme is selected if your system is in a light "
-                         "theme and you enabled the adaptive 'System' theme.")
-            ->conditionallyEnabledBy(themes->themeName, "System")
-            ->addTo(layout);
-    }
 
     layout.addDropdown<float>(
         "Zoom", ZOOM_LEVELS, s.uiScale,
@@ -301,10 +273,6 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         false, "Choose which tabs are visible in the notebook");
 
     SettingWidget::dropdown("Tab style", s.tabStyle)->addTo(layout);
-
-    layout.addWidget(new FontSettingWidget(s.chatFontFamily, s.chatFontSize,
-                                           s.chatFontWeight),
-                     {"font", "weight", "size"});
 
     SettingWidget::inverseCheckbox("Show message reply context",
                                    s.hideReplyContext)
@@ -574,8 +542,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
                             s.mergedPlatformIndicatorMode)
         ->setTooltip("Use platform-colored merged rows, platform logo badges, "
                      "both together, or neither.")
-        ->addKeywords({"merged", "platform", "badge", "line color",
-                       "logo", "both", "none", "twitch", "kick", "youtube"})
+        ->addKeywords({"merged", "platform", "badge", "line color", "logo",
+                       "both", "none", "twitch", "kick", "youtube"})
         ->addTo(layout);
 
     SettingWidget::dropdown("Platform event highlight style",
@@ -585,8 +553,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
                      "messages, watch streaks, and paid chat events.")
         ->addKeywords({"highlight", "gradient", "platform", "event",
                        "subscription", "redeem", "first message",
-                       "watch streak", "hype chat", "membership",
-                       "twitch", "kick", "youtube", "custom color"})
+                       "watch streak", "hype chat", "membership", "twitch",
+                       "kick", "youtube", "custom color"})
         ->addTo(layout);
 
     SettingWidget::colorButton("Platform event custom color",
@@ -603,9 +571,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         ->setTooltip("Controls highlights for automatic moderation alerts "
                      "such as bans and timeouts. Select None to leave these "
                      "messages unhighlighted.")
-        ->addKeywords({"highlight", "platform", "alert", "moderation",
-                       "ban", "timeout", "gradient", "none",
-                       "custom color"})
+        ->addKeywords({"highlight", "platform", "alert", "moderation", "ban",
+                       "timeout", "gradient", "none", "custom color"})
         ->addTo(layout);
 
     SettingWidget::colorButton("Platform alert custom color",
@@ -614,8 +581,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
                      "\"Custom color\".")
         ->conditionallyEnabledBy(platformAlertHighlightStyleSetting(),
                                  "customcolor")
-        ->addKeywords({"highlight", "platform", "alert", "moderation",
-                       "ban", "timeout", "custom color"})
+        ->addKeywords({"highlight", "platform", "alert", "moderation", "ban",
+                       "timeout", "custom color"})
         ->addTo(layout);
 
     SettingWidget::checkbox("Reduce opacity of message history",
@@ -632,8 +599,7 @@ void GeneralPage::initLayout(GeneralPageView &layout)
 
     SettingWidget::checkbox("Disable pinned messages",
                             disablePinnedMessagesSetting())
-        ->setTooltip(
-            "Hide pinned-message banners in every chat tab.")
+        ->setTooltip("Hide pinned-message banners in every chat tab.")
         ->addKeywords({"pin", "pinned", "message", "banner", "disable"})
         ->addTo(layout);
 
@@ -723,8 +689,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
             "Sets the maximum number of emotes shown in each emote-bar row.")
         ->addTo(layout);
 
-    auto *clearEmoteBarHistory = layout.addButton(
-        "Clear emote bar history", [this] {
+    auto *clearEmoteBarHistory =
+        layout.addButton("Clear emote bar history", [this] {
             const auto reply = QMessageBox::question(
                 this, "Clear emote bar history?",
                 "Clear all recent and most-used emote history for every "
@@ -732,8 +698,7 @@ void GeneralPage::initLayout(GeneralPageView &layout)
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (reply == QMessageBox::Yes)
             {
-                emoteBarHistoryJsonSetting() =
-                    R"({"version":1,"channels":[]})";
+                emoteBarHistoryJsonSetting() = R"({"version":1,"channels":[]})";
             }
         });
     clearEmoteBarHistory->setToolTip(
@@ -747,6 +712,13 @@ void GeneralPage::initLayout(GeneralPageView &layout)
 
     SettingWidget::checkbox("Animate only when Mergerino is focused",
                             s.animationsWhenFocused)
+        ->addTo(layout);
+
+    SettingWidget::checkbox("Show Twitch subscriber GIFs", s.enableTwitchGifs)
+        ->setTooltip(
+            "Display incoming GIFs sent by Twitch subscribers. When disabled, "
+            "Twitch's text description is shown instead.")
+        ->addKeywords({"twitch", "gif", "tier 2", "tier 3", "subscriber"})
         ->addTo(layout);
 
     SettingWidget::checkbox("Enable zero-width emotes", s.enableZeroWidthEmotes)
@@ -1083,9 +1055,9 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         "the field below is only for other compatible extensions.");
 
     layout.addButton("Open Chrome Web Store", [] {
-        QDesktopServices::openUrl(QUrl(
-            "https://chromewebstore.google.com/detail/"
-            "chatterino-native-host/glknmaideaikkmemifbfkhnomoknepka"));
+        QDesktopServices::openUrl(
+            QUrl("https://chromewebstore.google.com/detail/"
+                 "chatterino-native-host/glknmaideaikkmemifbfkhnomoknepka"));
     });
 
 #ifdef Q_OS_WIN
@@ -1114,7 +1086,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         auto *form = new QFormLayout();
         layout.addLayout(form);
 
-        SettingWidget::lineEdit("Allowed extension IDs", s.additionalExtensionIDs,
+        SettingWidget::lineEdit("Allowed extension IDs",
+                                s.additionalExtensionIDs,
                                 "Extension;IDs;separated;by;semicolons")
             ->addTo(layout, form);
     }
@@ -1252,7 +1225,8 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         ->setTooltip(
             "Show a compact viewer count with an icon in the split header")
         ->addTo(layout);
-    SettingWidget::dropdown("Viewer count source", headerViewerCountModeSetting())
+    SettingWidget::dropdown("Viewer count source",
+                            headerViewerCountModeSetting())
         ->setTooltip("Choose which platform viewer count is shown")
         ->conditionallyEnabledBy(s.headerViewerCount)
         ->addTo(layout);

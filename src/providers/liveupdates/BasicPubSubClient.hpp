@@ -145,6 +145,13 @@ protected:
         return this->open_;
     }
 
+    /// The server refused this connection. When it closes, the manager
+    /// retries with backoff instead of reconnecting straight away.
+    void markFailed()
+    {
+        this->open_ = false;
+    }
+
 private:
     WebSocketHandle ws_;
     std::unordered_set<Subscription> subscriptions_;

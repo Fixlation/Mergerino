@@ -21,7 +21,9 @@
 #include "util/IpcQueue.hpp"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QCommandLineParser>
+#include <QEvent>
 #include <QMessageBox>
 #include <QSslSocket>
 #include <QStringList>
@@ -39,6 +41,30 @@ Q_IMPORT_PLUGIN(QAVIFPlugin)
 #endif
 
 using namespace chatterino;
+
+namespace {
+
+// Closed dropdowns must never change selection from the mouse wheel.
+class DropdownWheelGuard final : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *receiver, QEvent *event) override
+    {
+        if (event->type() == QEvent::Wheel &&
+            qobject_cast<QComboBox *>(receiver) != nullptr)
+        {
+            // Qt can continue delivering the wheel to a parent scroll area.
+            event->ignore();
+            return true;
+        }
+        return false;
+    }
+};
+
+}  // namespace
 
 #ifdef Q_OS_WIN
 #    pragma comment(lib, "Dbghelp.lib")
@@ -100,6 +126,8 @@ int main(int argc, char **argv)
 #endif
 
     QApplication a(argc, argv);
+    DropdownWheelGuard dropdownWheelGuard;
+    a.installEventFilter(&dropdownWheelGuard);
 
     QCoreApplication::setApplicationName("mergerino");
     QCoreApplication::setApplicationVersion(CHATTERINO_VERSION);

@@ -44,7 +44,10 @@ constexpr int TIKTOK_RECONNECT_DELAY_MS = 5000;
 constexpr int TIKTOK_WAIT_FOR_LIVE_DELAY_MS = 15000;
 constexpr int TIKTOK_BROWSER_TARGET_POLL_DELAY_MS = 750;
 constexpr int TIKTOK_BROWSER_SNAPSHOT_DELAY_MS = 1500;
+constexpr int TIKTOK_ROOM_STATUS_POLL_DELAY_MS = 15000;
 constexpr int TIKTOK_BROWSER_TARGET_POLL_LIMIT = 40;
+constexpr int TIKTOK_LIVE_CONFIRMATION_SNAPSHOTS = 2;
+constexpr int TIKTOK_UNCONFIRMED_STATUS_LIMIT = 3;
 
 struct BrowserChatMessage {
     QString owner;
@@ -1083,6 +1086,9 @@ void TikTokLiveChat::start()
     this->running_ = true;
     this->browserSnapshotReceived_ = false;
     this->failureReported_ = false;
+    this->apiLiveConfirmed_ = false;
+    this->consecutiveLiveSnapshots_ = 0;
+    this->consecutiveUnconfirmedStatusChecks_ = 0;
     this->roomId_.clear();
     this->statusText_.clear();
     this->liveTitle_.clear();
@@ -1208,8 +1214,9 @@ void TikTokLiveChat::resolveRoom()
             }
 
             this->applyResolvedRoomInfo(roomId, uniqueId, nickname, liveTitle);
-            if (roomStatus == 4)
+            if (roomStatus == 4 || (roomStatus > 0 && roomStatus != 2))
             {
+                this->apiLiveConfirmed_ = false;
                 this->waitForNextLive(
                     QString("TikTok room API reports %1 is currently not live. "
                             "Rechecking.")
@@ -1217,6 +1224,9 @@ void TikTokLiveChat::resolveRoom()
                     TIKTOK_WAIT_FOR_LIVE_DELAY_MS);
                 return;
             }
+
+            this->apiLiveConfirmed_ = roomStatus == 2;
+            this->consecutiveUnconfirmedStatusChecks_ = 0;
 
             if (this->roomId_.isEmpty())
             {
@@ -1276,6 +1286,7 @@ void TikTokLiveChat::resolveRoomFromHtml()
             }
 
             this->applyResolvedRoomInfo(roomId, uniqueId, nickname, title);
+            this->apiLiveConfirmed_ = false;
             if (this->roomId_.isEmpty())
             {
                 this->waitForNextLive(
@@ -1334,6 +1345,7 @@ void TikTokLiveChat::startBrowserSession()
 
     this->stopBrowserSession();
     this->browserSnapshotReceived_ = false;
+    this->consecutiveLiveSnapshots_ = 0;
 
     auto browser = std::make_unique<BrowserSession>();
     browser->executable = findChromiumBrowserExecutable();
@@ -1418,10 +1430,12 @@ void TikTokLiveChat::startBrowserSession()
         QString("Launching local browser reader for TikTok LIVE on %1.")
             .arg(this->sourceLabel()));
     this->scheduleBrowserTargetCheck(TIKTOK_BROWSER_TARGET_POLL_DELAY_MS);
+    this->scheduleRoomStatusCheck(TIKTOK_ROOM_STATUS_POLL_DELAY_MS);
 }
 
 void TikTokLiveChat::stopBrowserSession()
 {
+    ++this->roomStatusGeneration_;
     if (!this->browser_)
     {
         return;
@@ -1669,16 +1683,48 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
     const auto showLiveChat = root.value("showLiveChat").toBool();
     const auto enableChat = root.value("enableChat").toBool();
 
-    this->applyResolvedRoomInfo(roomId, ownerUniqueId, ownerNickname, liveTitle);
+    this->applyResolvedRoomInfo(
+        roomId.isEmpty() ? this->roomId_ : roomId, ownerUniqueId,
+        ownerNickname, liveTitle);
 
-    if (liveRoomStatus == 4)
+    if (liveRoomStatus == 4 ||
+        (liveRoomStatus > 0 && liveRoomStatus != 2))
     {
-        this->stopBrowserSession();
         this->waitForNextLive(
             QString("TikTok page reports %1 is currently not live. "
                     "Rechecking.")
                 .arg(this->sourceLabel()),
             TIKTOK_WAIT_FOR_LIVE_DELAY_MS);
+        return;
+    }
+
+    const auto pageLiveEvidence =
+        liveRoomStatus == 2 && (showLiveChat || enableChat);
+    const auto liveCandidate = !this->roomId_.isEmpty() &&
+                               (this->apiLiveConfirmed_ || pageLiveEvidence);
+    if (!liveCandidate)
+    {
+        this->consecutiveLiveSnapshots_ = 0;
+        if (!this->live_)
+        {
+            this->setStatusText(
+                QString("Waiting for TikTok to confirm %1 is live.")
+                    .arg(this->sourceLabel()));
+        }
+        this->scheduleBrowserSnapshot(TIKTOK_BROWSER_SNAPSHOT_DELAY_MS);
+        return;
+    }
+
+    this->consecutiveLiveSnapshots_ = std::min(
+        this->consecutiveLiveSnapshots_ + 1,
+        TIKTOK_LIVE_CONFIRMATION_SNAPSHOTS);
+    if (!this->live_ && this->consecutiveLiveSnapshots_ <
+                            TIKTOK_LIVE_CONFIRMATION_SNAPSHOTS)
+    {
+        this->setStatusText(
+            QString("Confirming TikTok LIVE status for %1.")
+                .arg(this->sourceLabel()));
+        this->scheduleBrowserSnapshot(TIKTOK_BROWSER_SNAPSHOT_DELAY_MS);
         return;
     }
 
@@ -1762,7 +1808,7 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
     const bool firstSnapshot = !this->browserSnapshotReceived_;
     this->browserSnapshotReceived_ = true;
     this->failureReported_ = false;
-    this->setLive(!this->roomId_.isEmpty());
+    this->setLive(true);
 
     if (!this->roomId_.isEmpty() && this->joinedRoomId_ != this->roomId_)
     {
@@ -1878,6 +1924,127 @@ void TikTokLiveChat::scheduleBrowserSnapshot(int delayMs)
     });
 }
 
+void TikTokLiveChat::scheduleRoomStatusCheck(int delayMs)
+{
+    const auto generation = this->roomStatusGeneration_;
+    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    QTimer::singleShot(delayMs, [this, weak, generation] {
+        if (!weak.lock() || !this->running_ || !this->browser_ ||
+            generation != this->roomStatusGeneration_)
+        {
+            return;
+        }
+
+        this->checkRoomStatus(generation);
+    });
+}
+
+void TikTokLiveChat::checkRoomStatus(std::uint64_t generation)
+{
+    if (!this->running_ || !this->browser_ ||
+        generation != this->roomStatusGeneration_ ||
+        this->resolvedSource_.isEmpty())
+    {
+        return;
+    }
+
+    const auto uniqueId = this->resolvedSource_.mid(1);
+    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    const auto stillCurrent = [this, weak, generation] {
+        return weak.lock() && this->running_ && this->browser_ &&
+               generation == this->roomStatusGeneration_;
+    };
+
+    NetworkRequest(makeRoomInfoUrl(uniqueId))
+        .headerList(tiktokHeaders())
+        .followRedirects(true)
+        .onSuccess([this, stillCurrent](const NetworkResult &result) {
+            if (!stillCurrent())
+            {
+                return;
+            }
+
+            const auto json = result.parseJson();
+            if (json.value("statusCode").toInt(-1) != 0)
+            {
+                if (++this->consecutiveUnconfirmedStatusChecks_ >=
+                    TIKTOK_UNCONFIRMED_STATUS_LIMIT)
+                {
+                    this->apiLiveConfirmed_ = false;
+                    this->waitForNextLive(
+                        QString("TikTok could no longer confirm %1 is live. "
+                                "Rechecking.")
+                            .arg(this->sourceLabel()),
+                        TIKTOK_WAIT_FOR_LIVE_DELAY_MS);
+                    return;
+                }
+
+                this->scheduleRoomStatusCheck(
+                    TIKTOK_ROOM_STATUS_POLL_DELAY_MS);
+                return;
+            }
+
+            const auto liveRoom =
+                json.value("data").toObject().value("liveRoom").toObject();
+            const auto roomStatus =
+                static_cast<int>(parseJsonLongLong(liveRoom.value("status")));
+            if (roomStatus == 2)
+            {
+                this->apiLiveConfirmed_ = true;
+                this->consecutiveUnconfirmedStatusChecks_ = 0;
+                this->scheduleRoomStatusCheck(
+                    TIKTOK_ROOM_STATUS_POLL_DELAY_MS);
+                return;
+            }
+
+            if (roomStatus == 4 || (roomStatus > 0 && roomStatus != 2))
+            {
+                this->apiLiveConfirmed_ = false;
+                this->waitForNextLive(
+                    QString("TikTok room API reports %1 has ended or is "
+                            "offline. Rechecking.")
+                        .arg(this->sourceLabel()),
+                    TIKTOK_WAIT_FOR_LIVE_DELAY_MS);
+                return;
+            }
+
+            if (++this->consecutiveUnconfirmedStatusChecks_ >=
+                TIKTOK_UNCONFIRMED_STATUS_LIMIT)
+            {
+                this->apiLiveConfirmed_ = false;
+                this->waitForNextLive(
+                    QString("TikTok could no longer confirm %1 is live. "
+                            "Rechecking.")
+                        .arg(this->sourceLabel()),
+                    TIKTOK_WAIT_FOR_LIVE_DELAY_MS);
+                return;
+            }
+
+            this->scheduleRoomStatusCheck(TIKTOK_ROOM_STATUS_POLL_DELAY_MS);
+        })
+        .onError([this, stillCurrent](NetworkResult) {
+            if (!stillCurrent())
+            {
+                return;
+            }
+
+            if (++this->consecutiveUnconfirmedStatusChecks_ >=
+                TIKTOK_UNCONFIRMED_STATUS_LIMIT)
+            {
+                this->apiLiveConfirmed_ = false;
+                this->waitForNextLive(
+                    QString("TikTok could no longer confirm %1 is live. "
+                            "Rechecking.")
+                        .arg(this->sourceLabel()),
+                    TIKTOK_WAIT_FOR_LIVE_DELAY_MS);
+                return;
+            }
+
+            this->scheduleRoomStatusCheck(TIKTOK_ROOM_STATUS_POLL_DELAY_MS);
+        })
+        .execute();
+}
+
 void TikTokLiveChat::scheduleResolve(int delayMs)
 {
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
@@ -1897,6 +2064,9 @@ void TikTokLiveChat::waitForNextLive(QString text, int retryDelayMs)
     this->roomId_.clear();
     this->liveTitle_.clear();
     this->browserSnapshotReceived_ = false;
+    this->apiLiveConfirmed_ = false;
+    this->consecutiveLiveSnapshots_ = 0;
+    this->consecutiveUnconfirmedStatusChecks_ = 0;
     this->stopBrowserSession();
     this->setStatusText(std::move(text));
     this->scheduleResolve(retryDelayMs);

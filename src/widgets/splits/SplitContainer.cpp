@@ -55,12 +55,16 @@ QStringList normalizedFilterIds(const QList<QUuid> &ids)
 std::optional<QUuid> findAlertsFilterId()
 {
     static const auto filterText = QStringLiteral(
+        "flags.sub_message || flags.elevated_message || flags.cheer_message || "
+        "flags.watch_streak || flags.raid_message");
+    static const auto legacyFilterText = QStringLiteral(
         "flags.sub_message || flags.elevated_message || flags.cheer_message");
 
     const auto filters = getSettings()->filterRecords.readOnly();
     for (const auto &filter : *filters)
     {
-        if (filter && filter->getFilter() == filterText)
+        if (filter && (filter->getFilter() == filterText ||
+                       filter->getFilter() == legacyFilterText))
         {
             return filter->getId();
         }
@@ -295,6 +299,7 @@ Split *SplitContainer::cloneSplit(Split *source, const QList<QUuid> &filters,
     clone->setActivityMessageScale(source->activityMessageScale());
     clone->setCollapseGiftedSubscriptions(
         source->collapseGiftedSubscriptions());
+    clone->setShowRaidsAndWatchStreaks(source->showRaidsAndWatchStreaks());
     clone->setActivityTimeDisplayMode(source->activityTimeDisplayMode());
     clone->setSlowerChatEnabled(source->slowerChatEnabled());
     clone->setSlowerChatMessagesPerSecond(
@@ -1114,6 +1119,8 @@ NodeDescriptor SplitContainer::buildDescriptorRecursively(
             currentNode->split_->activityMessageScale();
         result.collapseGiftedSubscriptions_ =
             currentNode->split_->collapseGiftedSubscriptions();
+        result.showRaidsAndWatchStreaks_ =
+            currentNode->split_->showRaidsAndWatchStreaks();
         result.activityTimeDisplayMode_ =
             currentNode->split_->activityTimeDisplayMode();
         result.slowerChatEnabled_ = currentNode->split_->slowerChatEnabled();
@@ -1209,6 +1216,7 @@ void SplitContainer::applyFromDescriptorRecursively(
         split->setActivityMessageScale(splitNode.activityMessageScale_);
         split->setCollapseGiftedSubscriptions(
             splitNode.collapseGiftedSubscriptions_);
+        split->setShowRaidsAndWatchStreaks(splitNode.showRaidsAndWatchStreaks_);
         split->setActivityTimeDisplayMode(
             splitNode.activityTimeDisplayMode_.value_or(
                 ActivityTimeDisplayMode::Relative));
@@ -1340,6 +1348,8 @@ void SplitContainer::applyFromDescriptorRecursively(
                 split->setActivityMessageScale(splitNode.activityMessageScale_);
                 split->setCollapseGiftedSubscriptions(
                     splitNode.collapseGiftedSubscriptions_);
+                split->setShowRaidsAndWatchStreaks(
+                    splitNode.showRaidsAndWatchStreaks_);
                 split->setActivityTimeDisplayMode(
                     splitNode.activityTimeDisplayMode_.value_or(
                         ActivityTimeDisplayMode::Relative));

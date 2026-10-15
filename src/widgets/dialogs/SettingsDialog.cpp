@@ -5,12 +5,13 @@
 #include "widgets/dialogs/SettingsDialog.hpp"
 
 #include "Application.hpp"
-#include "common/Common.hpp"
 #include "common/Args.hpp"
+#include "common/Common.hpp"
 #include "common/QLogging.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
 #include "singletons/Settings.hpp"
+#include "singletons/Theme.hpp"
 #include "util/LayoutCreator.hpp"
 #include "widgets/BaseWindow.hpp"
 #include "widgets/helper/SettingsDialogTab.hpp"
@@ -26,9 +27,11 @@
 #include "widgets/settingspages/NicknamesPage.hpp"
 #include "widgets/settingspages/NotificationPage.hpp"
 #include "widgets/settingspages/PluginsPage.hpp"
+#include "widgets/settingspages/ThemesPage.hpp"
 
-#include <QDialogButtonBox>
+#include <QApplication>
 #include <QDesktopServices>
+#include <QDialogButtonBox>
 #include <QEasingCurve>
 #include <QEnterEvent>
 #include <QFile>
@@ -61,19 +64,7 @@ public:
         this->setToolTip(QStringLiteral("Join the Mergerino Discord"));
         this->setText(this->normalText_);
         this->setAccessibleName(this->hoverText_);
-        this->setStyleSheet(QStringLiteral(R"(
-            QPushButton {
-                background-color: rgba(255, 255, 255, 18);
-                border: none;
-                border-radius: 6px;
-                color: white;
-                padding: 4px 10px;
-                text-align: left;
-            }
-            QPushButton:hover {
-                background-color: rgba(88, 101, 242, 48);
-            }
-        )"));
+        this->setAppearance(true);
         this->animation_.setDuration(160);
         this->animation_.setEasingCurve(QEasingCurve::InOutCubic);
         QObject::connect(&this->animation_, &QVariantAnimation::valueChanged,
@@ -88,6 +79,31 @@ public:
         });
 
         this->updateAnimatedWidth();
+    }
+
+    void setAppearance(bool classicDark)
+    {
+        this->setStyleSheet(
+            QStringLiteral(R"(
+            QPushButton {
+                background-color: %1;
+                border: none;
+                border-radius: 6px;
+                color: %2;
+                padding: 4px 10px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: %3;
+                color: %4;
+            }
+        )")
+                .arg(
+                    classicDark ? "rgba(255, 255, 255, 18)" : "palette(button)",
+                    classicDark ? "white" : "palette(button-text)",
+                    classicDark ? "rgba(88, 101, 242, 48)"
+                                : "palette(highlight)",
+                    classicDark ? "white" : "palette(highlighted-text)"));
     }
 
 protected:
@@ -135,9 +151,8 @@ protected:
         this->icon_.paint(&painter, iconRect, Qt::AlignCenter,
                           this->isEnabled() ? QIcon::Normal : QIcon::Disabled);
 
-        const QRect textRect =
-            this->rect().adjusted(leftPadding + iconSize + textSpacing, 0,
-                                  -8, 0);
+        const QRect textRect = this->rect().adjusted(
+            leftPadding + iconSize + textSpacing, 0, -8, 0);
         const auto textColor = option.palette.color(QPalette::ButtonText);
         const auto drawText = [&](const QString &text, qreal opacity) {
             if (opacity <= 0.0)
@@ -147,10 +162,9 @@ protected:
 
             painter.setOpacity(opacity);
             painter.setPen(textColor);
-            painter.drawText(
-                textRect, Qt::AlignLeft | Qt::AlignVCenter,
-                this->fontMetrics().elidedText(text, Qt::ElideRight,
-                                               textRect.width()));
+            painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter,
+                             this->fontMetrics().elidedText(
+                                 text, Qt::ElideRight, textRect.width()));
         };
 
         drawText(this->normalText_, 1.0 - this->hoverProgress_);
@@ -216,19 +230,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
                          ~Qt::WindowContextHelpButtonHint);
 
     this->resize(915, 600);
-    this->themeChangedEvent();
-    QFile styleFile(":/qss/settings.qss");
-    if (!styleFile.open(QFile::ReadOnly))
-    {
-        assert(false && "Resources not loaded");
-        qCWarning(chatterinoWidget) << "Resources not loaded";
-    }
-    QString stylesheet = QString::fromUtf8(styleFile.readAll());
-    this->setStyleSheet(stylesheet);
-
     this->initUi();
     this->addTabs();
-    this->overrideBackgroundColor_ = QColor("#111111");
+    this->themeChangedEvent();
 
     this->addShortcuts();
     this->signalHolder_.managedConnect(getApp()->getHotkeys()->onItemsUpdated,
@@ -299,10 +303,9 @@ void SettingsDialog::initUi()
 
     this->searchFilterTimer_.setSingleShot(true);
     this->searchFilterTimer_.setInterval(75);
-    QObject::connect(&this->searchFilterTimer_, &QTimer::timeout, this,
-                     [this] {
-                         this->filterElements(this->pendingFilterText_);
-                     });
+    QObject::connect(&this->searchFilterTimer_, &QTimer::timeout, this, [this] {
+        this->filterElements(this->pendingFilterText_);
+    });
 
     QObject::connect(edit.getElement(), &QLineEdit::textChanged, this,
                      &SettingsDialog::scheduleFilterElements);
@@ -357,8 +360,7 @@ void SettingsDialog::filterElements(const QString &text)
         const auto tabMatched = tab->matchesSearch(text);
 
         // filterElements returns true if anything on the page matches the search query
-        const auto pageMatched =
-            page != nullptr && page->filterElements(text);
+        const auto pageMatched = page != nullptr && page->filterElements(text);
 
         tab->setVisible(tabMatched || pageMatched);
     }
@@ -434,6 +436,8 @@ void SettingsDialog::addTabs()
     // clang-format off
     this->addTab([]{return new GeneralPage;},          "General",        ":/settings/about.svg", SettingsTabId::General,
                  {"interface", "chat", "messages", "emotes", "streamer mode", "link previews", "browser integration", "appdata", "cache", "sound", "advanced", "search"});
+    this->addTab([]{return new ThemesPage;},           "Themes",         ":/settings/themes.svg",
+                 SettingsTabId::None, {"appearance", "theme", "preset", "color", "font", "share code", "custom"});
     this->ui_.tabContainer->addSpacing(16);
     this->addTab([]{return new AccountsPage;},         "Accounts",       ":/settings/accounts.svg", SettingsTabId::Accounts,
                  {"twitch", "kick", "login", "account", "oauth", "7tv", "cosmetics", "paint", "badge", "emotes"});
@@ -473,9 +477,8 @@ void SettingsDialog::addTab(std::function<SettingsPage *()> page,
                             SettingsTabId id, QStringList searchKeywords,
                             Qt::Alignment alignment)
 {
-    auto *tab =
-        new SettingsDialogTab(this, std::move(page), name, iconPath, id,
-                              std::move(searchKeywords));
+    auto *tab = new SettingsDialogTab(this, std::move(page), name, iconPath, id,
+                                      std::move(searchKeywords));
     tab->setFixedHeight(static_cast<int>(30 * this->dpi_));
 
     this->ui_.tabContainer->addWidget(tab, 0, alignment);
@@ -507,14 +510,11 @@ void SettingsDialog::selectTab(SettingsDialogTab *tab, bool byUser)
     if (this->selectedTab_ != nullptr)
     {
         this->selectedTab_->setSelected(false);
-        this->selectedTab_->setStyleSheet("color: #FFF");
     }
 
     tab->setSelected(true);
-    tab->setStyleSheet(
-        "background: #222; color: #4FC3F7;"  // Should this be same as accent color?
-        "/*border: 1px solid #555; border-right: none;*/");
     this->selectedTab_ = tab;
+    this->themeChangedEvent();
     if (byUser)
     {
         this->lastSelectedByUser_ = tab;
@@ -630,9 +630,122 @@ void SettingsDialog::themeChangedEvent()
 {
     BaseWindow::themeChangedEvent();
 
-    QPalette palette;
-    palette.setColor(QPalette::Window, QColor("#111"));
+    const auto classicDark = this->theme->themeName.getValue() == "Dark" &&
+                             !this->theme->isLightTheme();
+    const auto background = this->theme->window.background;
+    const auto text = this->theme->window.text;
+    // Keep the original Fusion control palette for Default/Dark. Chat-input
+    // colours are not a suitable replacement for native button/bevel roles.
+    auto palette = classicDark ? QApplication::palette() : this->theme->palette;
+    const auto panel = classicDark ? palette.color(QPalette::Window)
+                                   : this->theme->messages.backgrounds.regular;
+    const auto accent = this->theme->accent;
+    const auto secondary = this->theme->messages.textColors.system;
+    if (!classicDark)
+    {
+        const auto button = this->theme->splits.header.focusedBackground;
+        palette.setColor(QPalette::Button, button);
+        palette.setColor(QPalette::Light, button.lighter(130));
+        palette.setColor(QPalette::Midlight, button.lighter(110));
+        palette.setColor(QPalette::Mid, button.darker(130));
+        palette.setColor(QPalette::Dark, button.darker(160));
+        palette.setColor(QPalette::Shadow, button.darker(200));
+    }
+    palette.setColor(QPalette::Window, background);
+    if (!classicDark)
+    {
+        palette.setColor(QPalette::WindowText, text);
+    }
+    const auto selectionText = palette.color(QPalette::HighlightedText);
+    this->overrideBackgroundColor_ = background;
+
+    QFile styleFile(":/qss/settings.qss");
+    if (!styleFile.open(QFile::ReadOnly))
+    {
+        qCWarning(chatterinoWidget) << "Settings stylesheet not available";
+        return;
+    }
+
+    auto stylesheet = QString::fromUtf8(styleFile.readAll());
+    if (!classicDark)
+    {
+        stylesheet +=
+            QStringLiteral(R"(
+        chatterino--SettingsDialog {
+            background-color: %1;
+            color: %2;
+        }
+        chatterino--SettingsPage, QWidget#tabWidget {
+            background-color: %1;
+            color: %2;
+        }
+        chatterino--SettingsPage #generalSettingsScrollContent {
+            background-color: %3;
+            color: %2;
+        }
+        QScrollArea {
+            background-color: %3;
+            color: %2;
+        }
+        QLabel, QCheckBox, QRadioButton, QGroupBox {
+            color: %2;
+        }
+        chatterino--SettingsPage QToolTip, QToolTip {
+            background-color: %1;
+            color: %2;
+            border: 1px solid %7;
+        }
+        QComboBox QFrame, QComboBox QAbstractItemView {
+            background-color: %1;
+            color: %2;
+            border: none;
+            selection-background-color: %4;
+            selection-color: %6;
+        }
+        chatterino--TitleLabel, chatterino--SubtitleLabel {
+            color: %4;
+        }
+        chatterino--DescriptionLabel, QLabel#description {
+            color: %5;
+        }
+        chatterino--NavigationLabel {
+            color: %4;
+        }
+    )")
+                .arg(background.name(QColor::HexArgb),
+                     text.name(QColor::HexArgb), panel.name(QColor::HexArgb),
+                     accent.name(QColor::HexArgb),
+                     secondary.name(QColor::HexArgb),
+                     selectionText.name(QColor::HexArgb),
+                     palette.color(QPalette::Dark).name(QColor::HexArgb));
+    }
+    this->setStyleSheet(stylesheet);
+    // Reapply after stylesheet repolishing, which may restore cached roles.
     this->setPalette(palette);
+    for (auto *button : this->findChildren<QPushButton *>())
+    {
+        if (auto *discord = dynamic_cast<SettingsDiscordButton *>(button))
+        {
+            discord->setAppearance(classicDark);
+        }
+    }
+
+    for (auto *tab : this->tabs_)
+    {
+        const auto selected = tab == this->selectedTab_;
+        if (classicDark)
+        {
+            tab->setStyleSheet(selected
+                                   ? "background: #222; color: #4FC3F7;"
+                                   : "background: transparent; color: #FFF;");
+            continue;
+        }
+        tab->setStyleSheet(QStringLiteral("background-color: %1; color: %2;")
+                               .arg(selected ? panel.name(QColor::HexArgb)
+                                             : QStringLiteral("transparent"),
+                                    selected ? accent.name(QColor::HexArgb)
+                                             : text.name(QColor::HexArgb)));
+    }
 }
 
 void SettingsDialog::showEvent(QShowEvent *e)

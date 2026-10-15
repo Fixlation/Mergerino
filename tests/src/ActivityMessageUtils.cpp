@@ -4,10 +4,15 @@
 
 #include "Test.hpp"
 
+#include "common/WindowDescriptors.hpp"
+
 #include "messages/Message.hpp"
 #include "messages/MessageFlag.hpp"
 #include "providers/twitch/TwitchBadge.hpp"
 #include "widgets/helper/ActivityMessageUtils.hpp"
+
+#include <QJsonDocument>
+#include <QJsonObject>
 
 using namespace chatterino;
 
@@ -18,6 +23,65 @@ TEST(ActivityMessageUtils, AllowsNativeAlertMessages)
 
     EXPECT_TRUE(isActivityAlertMessage(message));
     EXPECT_TRUE(shouldShowMessageInActivityPane(message));
+}
+
+TEST(ActivityMessageUtils, RaidsAndWatchStreaksShareDefaultEnabledSetting)
+{
+    for (const auto flag : {MessageFlag::Raid, MessageFlag::WatchStreak})
+    {
+        Message message;
+        message.flags.set(MessageFlag::System);
+        message.flags.set(flag);
+
+        EXPECT_TRUE(isActivityAlertMessage(message));
+        EXPECT_TRUE(shouldShowMessageInActivityPane(message));
+        EXPECT_FALSE(shouldShowMessageInActivityPane(message, 100, 100, 0, false));
+        EXPECT_TRUE(shouldShowMessageInActivityPane(message, 100, 100, 0, true));
+    }
+
+    Message kickHost;
+    kickHost.platform = MessagePlatform::Kick;
+    kickHost.flags.set(MessageFlag::System);
+    kickHost.flags.set(MessageFlag::Raid);
+    EXPECT_TRUE(shouldShowMessageInActivityPane(kickHost));
+    EXPECT_FALSE(shouldShowMessageInActivityPane(kickHost, 100, 100, 0, false));
+
+    Message subscription;
+    subscription.flags.set(MessageFlag::Subscription);
+    EXPECT_TRUE(shouldShowMessageInActivityPane(subscription, 100, 100, 0, false));
+}
+
+TEST(ActivityMessageUtils, RaidsAndWatchStreaksStillRespectHistoryAndBotExclusions)
+{
+    for (const auto flag : {MessageFlag::Raid, MessageFlag::WatchStreak})
+    {
+        Message message;
+        message.flags.set(flag);
+        message.flags.set(MessageFlag::RecentMessage);
+        EXPECT_FALSE(shouldShowMessageInActivityPane(message));
+
+        message.flags.unset(MessageFlag::RecentMessage);
+        message.twitchBadges.emplace_back("bot", "1");
+        EXPECT_FALSE(shouldShowMessageInActivityPane(message));
+    }
+}
+
+TEST(ActivityMessageUtils, ActivityEventSettingDefaultsOnAndRestoresSavedValue)
+{
+    const QJsonObject data{{"type", "twitch"}, {"name", "pajlada"}};
+    SplitDescriptor legacy;
+    SplitDescriptor::loadFromJSON(legacy, {}, data);
+    EXPECT_TRUE(legacy.showRaidsAndWatchStreaks_);
+
+    for (const bool enabled : {false, true})
+    {
+        const QJsonObject saved{{"showRaidsAndWatchStreaks", enabled}};
+        const auto restored =
+            QJsonDocument::fromJson(QJsonDocument(saved).toJson()).object();
+        SplitDescriptor descriptor;
+        SplitDescriptor::loadFromJSON(descriptor, restored, data);
+        EXPECT_EQ(descriptor.showRaidsAndWatchStreaks_, enabled);
+    }
 }
 
 TEST(ActivityMessageUtils, RejectsBotBadgedMessages)

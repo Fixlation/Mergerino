@@ -12,6 +12,7 @@
 #include "util/ThreadGuard.hpp"
 #include "widgets/BaseWidget.hpp"
 #include "widgets/helper/ScrollbarHighlight.hpp"
+#include "widgets/helper/ThemeBackdrop.hpp"
 #include "widgets/TooltipWidget.hpp"
 
 #include <pajlada/signals/signal.hpp>
@@ -344,6 +345,8 @@ private:
 
     void updateID();
     void refreshMessageColors();
+    /// Whether this view paints the animated theme backdrop behind messages
+    bool hasThemeBackdrop() const;
     bool isActivityPaneView() const;
     bool shouldRefreshActivityTime() const;
     void updateActivityTimeRefreshTimer();
@@ -534,6 +537,7 @@ private:
     MessageColors messageColors_;
     MessageColors activityMessageColors_;
     MessagePreferences messagePreferences_;
+    ThemeBackdrop themeBackdrop_;
 
     void scrollUpdateRequested();
 

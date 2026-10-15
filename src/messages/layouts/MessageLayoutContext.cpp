@@ -45,6 +45,7 @@ void MessageColors::applyTheme(Theme *theme, bool isOverlay,
 
     this->hasTransparency =
         this->regularBg.alpha() != 255 || this->alternateBg.alpha() != 255;
+    this->fadeWithOpacity = false;
 }
 
 void MessagePreferences::connectSettings(Settings *settings,

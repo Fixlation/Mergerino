@@ -6,7 +6,7 @@
 #include "messages/MessageElement.hpp"
 
 #include <pajlada/signals/signal.hpp>
-
+#include <pajlada/signals/signalholder.hpp>
 #include <QDateTime>
 
 #include <atomic>
@@ -40,6 +40,7 @@ struct KickChannelInfo;
 struct KickPrivateChannelInfo;
 struct KickPrivateSubscriberBadgeInfo;
 struct KickPrivateUserInChannelInfo;
+struct KickPrivateEmoteSetInfo;
 
 struct KickPredictionOutcome {
     QString id;
@@ -190,7 +191,7 @@ public:
         QColor usernameColor;
         std::vector<std::unique_ptr<MessageElement>> badges;
     };
-    const CachedOwnIdentity *ownIdentity() const;
+    const CachedOwnIdentity *ownIdentity(uint64_t userID) const;
 
     void deleteMessage(const QString &messageID);
 
@@ -244,6 +245,8 @@ protected:
     void messageRemovedFromStart(const MessagePtr &msg) override;
 
 private:
+    friend class KickAssetTestAccess;
+
     /// Message ID -> thread
     std::unordered_map<QString, std::weak_ptr<MessageThread>> threads_;
 
@@ -253,6 +256,9 @@ private:
 
     void resolveChannelInfo();
     void reloadKickChannelEmotes();
+    void updateKickEmoteAccount();
+    void applyKickEmoteSets(const std::vector<KickPrivateEmoteSetInfo> &sets,
+                            uint64_t generation, bool includePersonal);
     void refreshOwnIdentity();
     void cacheOwnIdentityFromUserInfo(const KickPrivateUserInChannelInfo &info);
     void setUserInfo(UserInit init);
@@ -291,6 +297,9 @@ private:
     QString slug_;
 
     Atomic<std::shared_ptr<const EmoteMap>> kickChannelEmotes_;
+    pajlada::Signals::SignalHolder kickAccountConnections_;
+    pajlada::Signals::SignalHolder kickSessionConnections_;
+    uint64_t kickEmoteGeneration_ = 0;
     Atomic<std::shared_ptr<const EmoteMap>> seventvEmotes_;
 
     struct SubscriberBadge {
@@ -316,6 +325,7 @@ private:
 
     struct PendingSentMessage {
         QString localID;
+        QString userID;
         QString messageText;
         QDateTime createdAt;
         SentMessageCallback confirmedCallback;

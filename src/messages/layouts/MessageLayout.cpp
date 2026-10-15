@@ -38,13 +38,25 @@ namespace chatterino {
 
 namespace {
 
+/// Composites `apply` over `base` (source-over). Opaque bases stay opaque;
+/// translucent ones, like rows over an animated theme, stay translucent.
 QColor blendColors(const QColor &base, const QColor &apply)
 {
-    const qreal &alpha = apply.alphaF();
+    const qreal alpha = apply.alphaF();
+    const qreal baseAlpha = base.alphaF() * (1 - alpha);
+    const qreal resultAlpha = alpha + baseAlpha;
+    if (resultAlpha <= 0)
+    {
+        return Qt::transparent;
+    }
+    const auto channel = [&](qreal top, qreal bottom) {
+        return (top * alpha + bottom * baseAlpha) / resultAlpha;
+    };
     QColor result;
-    result.setRgbF(base.redF() * (1 - alpha) + apply.redF() * alpha,
-                   base.greenF() * (1 - alpha) + apply.greenF() * alpha,
-                   base.blueF() * (1 - alpha) + apply.blueF() * alpha);
+    result.setRgbF(static_cast<float>(channel(apply.redF(), base.redF())),
+                   static_cast<float>(channel(apply.greenF(), base.greenF())),
+                   static_cast<float>(channel(apply.blueF(), base.blueF())),
+                   static_cast<float>(resultAlpha));
     return result;
 }
 
@@ -904,6 +916,11 @@ bool MessageLayout::layout(const MessageLayoutContext &ctx,
     layoutRequired |= this->currentWordFlags_ != ctx.flags;
     this->currentWordFlags_ = ctx.flags;  // getSettings()->getWordTypeMask();
 
+    // Moderation can change flags without replacing the message or advancing
+    // the global layout generation. Rebuild cached rows when that happens.
+    layoutRequired |= this->currentMessageFlags_ != this->message_->flags;
+    this->currentMessageFlags_ = this->message_->flags;
+
     // check if layout was requested manually
     layoutRequired |= this->flags.has(MessageLayoutFlag::RequiresLayout);
     this->flags.unset(MessageLayoutFlag::RequiresLayout);
@@ -1105,6 +1122,17 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
         this->updateBuffer(pixmap, ctx);
     }
 
+    const bool dimmed =
+        this->message_->flags.has(MessageFlag::Disabled) ||
+        (this->message_->flags.has(MessageFlag::RecentMessage) &&
+         ctx.preferences.fadeMessageHistory);
+    const bool fadeWithOpacity = dimmed && ctx.messageColors.fadeWithOpacity;
+    if (fadeWithOpacity)
+    {
+        ctx.painter.save();
+        ctx.painter.setOpacity(1.0 - ctx.messageColors.disabled.alphaF());
+    }
+
     // draw on buffer
     ctx.painter.drawPixmap(QPoint{0, ctx.y}, *pixmap);
 
@@ -1112,8 +1140,14 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
     result.hasAnimatedElements =
         this->container_.paintAnimatedElements(ctx.painter, ctx.y);
 
+    if (fadeWithOpacity)
+    {
+        ctx.painter.restore();
+    }
+
     // draw disabled
-    if (this->message_->flags.has(MessageFlag::Disabled))
+    if (this->message_->flags.has(MessageFlag::Disabled) &&
+        !ctx.messageColors.fadeWithOpacity)
     {
         ctx.painter.fillRect(
             QRect{
@@ -1126,7 +1160,8 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
     }
 
     if (this->message_->flags.has(MessageFlag::RecentMessage) &&
-        ctx.preferences.fadeMessageHistory)
+        ctx.preferences.fadeMessageHistory &&
+        !ctx.messageColors.fadeWithOpacity)
     {
         ctx.painter.fillRect(
             QRect{

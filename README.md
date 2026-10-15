@@ -4,7 +4,7 @@ Mergerino is a desktop chat client that combines a fast multi-channel workflow w
 
 This repository keeps the source here and ships installable Windows builds through GitHub Releases.
 
-Current version: Mergerino 1.3.3
+Current version: Mergerino 1.3.4
 
 [![Download Windows Build](https://img.shields.io/badge/Download-Windows%20Build-2ea44f?style=for-the-badge)](https://github.com/Fixlation/Mergerino/releases/latest/download/Mergerino.zip)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tAjdrbvxwT)

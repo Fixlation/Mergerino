@@ -4,6 +4,7 @@
 
 #include "providers/twitch/TwitchIrc.hpp"
 
+#include "messages/Image.hpp"
 #include "mocks/BaseApplication.hpp"
 #include "mocks/EmoteController.hpp"
 #include "providers/twitch/TwitchBadge.hpp"
@@ -337,5 +338,55 @@ TEST_F(TestTwitchIrc, ParseTwitchEmotes)
             << "Input for twitch emotes " << test.input << " failed";
 
         delete privmsg;
+    }
+}
+
+TEST_F(TestTwitchIrc, ParseTwitchGifs)
+{
+    const QByteArray input =
+        R"(@badge-info=subscriber/12;badges=subscriber/12;color=#9147FF;display-name=twitchdev;emotes=;gifs=0-33|joSNxeswxuc74Juo8X|https://media4.giphy.com/media/joSNxeswxuc74Juo8X/giphy.gif?cid=twitch;id=1;mod=0;room-id=1;subscriber=1;tmi-sent-ts=1788292800000;user-id=1;user-type= :twitchdev!twitchdev@twitchdev.tmi.twitch.tv PRIVMSG #twitch :[Y A Y Yes GIF by Djemilah Birnie])";
+    auto *privmsg = dynamic_cast<Communi::IrcPrivateMessage *>(
+        Communi::IrcPrivateMessage::fromData(input, nullptr));
+    ASSERT_NE(privmsg, nullptr);
+
+    const auto gifs = parseTwitchGifs(privmsg->tags(), privmsg->content(), 0);
+    ASSERT_EQ(gifs.size(), 1);
+
+    const auto &gif = gifs.front();
+    EXPECT_EQ(gif.start, 0);
+    EXPECT_EQ(gif.end, 33);
+    EXPECT_EQ(gif.name.string,
+              QStringLiteral("[Y A Y Yes GIF by Djemilah Birnie]"));
+    ASSERT_NE(gif.ptr, nullptr);
+    EXPECT_EQ(gif.ptr->id.string,
+              QStringLiteral("giphy:joSNxeswxuc74Juo8X"));
+    EXPECT_EQ(gif.ptr->images.getImage1()->url().string,
+              QStringLiteral("https://media4.giphy.com/media/"
+                             "joSNxeswxuc74Juo8X/100w.gif?cid=twitch"));
+    EXPECT_EQ(gif.ptr->homePage.string,
+              QStringLiteral("https://giphy.com/gifs/joSNxeswxuc74Juo8X"));
+
+    delete privmsg;
+}
+
+TEST_F(TestTwitchIrc, RejectsInvalidTwitchGifs)
+{
+    const auto content =
+        QStringLiteral("[Y A Y Yes GIF by Djemilah Birnie]");
+
+    const std::vector<QString> invalidTags{
+        QStringLiteral("0-99|joSNxeswxuc74Juo8X|https://media4.giphy.com/"
+                       "media/joSNxeswxuc74Juo8X/giphy.gif"),
+        QStringLiteral("0-33|joSNxeswxuc74Juo8X|http://media4.giphy.com/"
+                       "media/joSNxeswxuc74Juo8X/giphy.gif"),
+        QStringLiteral("0-33|joSNxeswxuc74Juo8X|https://example.com/"
+                       "media/joSNxeswxuc74Juo8X/giphy.gif"),
+        QStringLiteral("0-33|joSNxeswxuc74Juo8X"),
+    };
+
+    for (const auto &tag : invalidTags)
+    {
+        const QVariantMap tags{{QStringLiteral("gifs"), tag}};
+        EXPECT_TRUE(parseTwitchGifs(tags, content, 0).empty()) << tag;
     }
 }

@@ -79,6 +79,8 @@ enum class MessageFlag : std::int64_t {
     WatchStreak = (1LL << 43),
     FirstMessageSession = (1LL << 44),
     TikTokJoinMessage = (1LL << 45),
+    /// A Twitch raid or Kick stream host announcement.
+    Raid = (1LL << 46),
 };
 using MessageFlags = FlagsEnum<MessageFlag>;
 

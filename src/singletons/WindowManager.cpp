@@ -866,6 +866,8 @@ void WindowManager::encodeNodeRecursively(SplitNode *node, QJsonObject &obj)
                        node->getSplit()->activityMessageScale());
             obj.insert("collapseGiftedSubscriptions",
                        node->getSplit()->collapseGiftedSubscriptions());
+            obj.insert("showRaidsAndWatchStreaks",
+                       node->getSplit()->showRaidsAndWatchStreaks());
             obj.insert("activityTimeDisplayMode",
                        qmagicenum::enumNameString(
                            node->getSplit()->activityTimeDisplayMode())

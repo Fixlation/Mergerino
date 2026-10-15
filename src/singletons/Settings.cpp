@@ -44,26 +44,6 @@ void initializeSignalVector(pajlada::Signals::SignalHolder &signalHolder,
     });
 }
 
-void migrateTimeoutButtons(Settings &settings)
-{
-    auto timeouts = settings.timeoutButtons.getValue();
-    bool changed = false;
-
-    for (auto &timeout : timeouts)
-    {
-        if (timeout.first == "m" && timeout.second == 5)
-        {
-            timeout.second = 10;
-            changed = true;
-        }
-    }
-
-    if (changed)
-    {
-        settings.timeoutButtons.setValue(timeouts);
-    }
-}
-
 }  // namespace
 
 namespace chatterino {
@@ -416,8 +396,6 @@ Settings::Settings(const Args &args, const QString &settingsDirectory,
         static_cast<uint64_t>(
             pajlada::Settings::SettingManager::SaveMethod::OnlySaveIfChanged));
 
-    migrateTimeoutButtons(*this);
-
     initializeSignalVector(this->signalHolder, this->highlightedMessagesSetting,
                            this->highlightedMessages);
     initializeSignalVector(this->signalHolder, this->highlightedUsersSetting,
@@ -444,12 +422,15 @@ Settings::Settings(const Args &args, const QString &settingsDirectory,
     instance_ = this;
 
 #ifdef USEWINSDK
-    this->autorun = isRegisteredForStartup();
-    this->autorun.connect(
-        [](bool autorun) {
-            setRegisteredForStartup(autorun);
-        },
-        false);
+    if (!isTest)
+    {
+        this->autorun = isRegisteredForStartup();
+        this->autorun.connect(
+            [](bool autorun) {
+                setRegisteredForStartup(autorun);
+            },
+            false);
+    }
 #endif
 
     // migration for `/emotes/showUnlistedEmotes` -> `/emotes/showUnlistedSevenTVEmotes`

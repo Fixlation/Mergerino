@@ -133,7 +133,7 @@ std::optional<UINT> hiddenTaskbarEdge(LPRECT rcMon = nullptr)
 /// Each side of the returned RECT has the correct sign, so they can be added
 /// to a window rect.
 /// Shrinking by 1px would return {left: 1, top: 1, right: -1, left: -1}.
-RECT windowBordersFor(HWND hwnd, bool isMaximized)
+RECT windowBordersFor(HWND hwnd, bool isMaximized, const RECT &proposedRect)
 {
     RECT margins{0, 0, 0, 0};
 
@@ -167,7 +167,10 @@ RECT windowBordersFor(HWND hwnd, bool isMaximized)
 
     if (isMaximized)
     {
-        auto *hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        // Use the target rect during restore, before the native window has
+        // reached its new position.
+        auto *hMonitor =
+            MonitorFromRect(&proposedRect, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi;
         mi.cbSize = sizeof(mi);
         auto *monitor = [&]() -> LPRECT {
@@ -433,7 +436,11 @@ BaseWindow::BaseWindow(FlagsEnum<Flags> _flags, QWidget *parent)
 #ifdef USEWINSDK
     this->useNextBounds_.setSingleShot(true);
     QObject::connect(&this->useNextBounds_, &QTimer::timeout, this, [this]() {
-        this->currentBounds_ = this->geometry();
+        if (this->isNotMinimizedOrMaximized_ && !this->isMinimized() &&
+            !this->isMaximized())
+        {
+            this->currentBounds_ = this->geometry();
+        }
     });
 #endif
 
@@ -989,6 +996,13 @@ void BaseWindow::resizeEvent(QResizeEvent *)
 
 void BaseWindow::moveEvent(QMoveEvent *event)
 {
+#ifdef USEWINSDK
+    if (auto hwnd = this->safeHWND())
+    {
+        this->updateLastVisibleBounds(*hwnd);
+    }
+#endif
+
     // Queue up save because: Window position changed
 #ifdef CHATTERINO
     if (!this->flags_.has(DisableLayoutSave))
@@ -1050,6 +1064,12 @@ bool BaseWindow::nativeEvent(const QByteArray &eventType, void *message,
 
         case WM_SIZE:
             returnValue = this->handleSIZE(msg);
+            break;
+
+        case WM_WINDOWPOSCHANGING:
+            this->handleWINDOWPOSCHANGING(
+                reinterpret_cast<WINDOWPOS *>(msg->lParam));
+            // Let Windows validate the corrected size and position normally.
             break;
 
         case WM_MOVE:
@@ -1343,6 +1363,7 @@ bool BaseWindow::handleSHOWWINDOW(MSG *msg)
 
         this->calcButtonsSizes();
         this->updateRealSize();
+        this->updateLastVisibleBounds(msg->hwnd);
     }
 
     return true;
@@ -1382,7 +1403,7 @@ bool BaseWindow::handleNCCALCSIZE(MSG *msg, qintptr *result)
     this->isMaximized_ = GetWindowPlacement(msg->hwnd, &wp) != 0 &&
                          (wp.showCmd == SW_SHOWMAXIMIZED);
 
-    auto borders = windowBordersFor(msg->hwnd, this->isMaximized_);
+    auto borders = windowBordersFor(msg->hwnd, this->isMaximized_, *r);
     r->left += borders.left;
     r->top += borders.top;
     r->right += borders.right;
@@ -1419,45 +1440,130 @@ bool BaseWindow::handleNCCALCSIZE(MSG *msg, qintptr *result)
 bool BaseWindow::handleSIZE(MSG *msg)
 {
 #ifdef USEWINSDK
-    if (this->ui_.windowLayout)
+    if (this->hasCustomWindowFrame() && this->ui_.windowLayout &&
+        !this->frameless_)
     {
-        if (this->frameless_)
+        this->isNotMinimizedOrMaximized_ = msg->wParam == SIZE_RESTORED;
+        this->useNextBounds_.stop();
+
+        if (this->isNotMinimizedOrMaximized_)
         {
-            //
+            // Qt hasn't processed WM_SIZE yet. Keep only normal bounds for
+            // layout saving, and cancel this update if the state changes again.
+            QMetaObject::invokeMethod(
+                this,
+                [this] {
+                    if (this->isNotMinimizedOrMaximized_ &&
+                        !this->isMinimized() && !this->isMaximized())
+                    {
+                        this->currentBounds_ = this->geometry();
+                    }
+                },
+                Qt::QueuedConnection);
         }
-        else if (this->hasCustomWindowFrame())
+
+        if (msg->wParam == SIZE_MINIMIZED)
         {
-            this->isNotMinimizedOrMaximized_ = msg->wParam == SIZE_RESTORED;
-
-            if (this->isNotMinimizedOrMaximized_)
+            if (this->ui_.titlebarButtons)
             {
-                // Wait for WM_SIZE to be processed by Qt and update the current
-                // bounds afterwards.
-                postToThread([this] {
-                    this->currentBounds_ = this->geometry();
-                });
-            }
-            this->useNextBounds_.stop();
-
-            if (msg->wParam == SIZE_MINIMIZED && this->ui_.titlebarButtons)
-            {
-                // Windows doesn't send a WM_NCMOUSELEAVE event when clicking
-                // the minimize button, so we have to emulate it.
+                // Windows doesn't send WM_NCMOUSELEAVE on minimize.
                 this->ui_.titlebarButtons->leave();
             }
+            this->savePreMinimizeBounds();
+        }
+        else
+        {
+            this->wasMinimized_ = false;
+            this->preMinimizeBounds_.reset();
+            this->updateLastVisibleBounds(msg->hwnd);
+        }
 
-            RECT real;
-            ::GetWindowRect(msg->hwnd, &real);
+        RECT real;
+        if (::GetWindowRect(msg->hwnd, &real))
+        {
             this->realBounds_ =
                 QRect(real.left, real.top, real.right - real.left,
                       real.bottom - real.top);
         }
     }
-    return false;
-#else
-    return false;
 #endif
+    return false;
 }
+
+#ifdef USEWINSDK
+void BaseWindow::updateLastVisibleBounds(HWND hwnd)
+{
+    if (!this->hasCustomWindowFrame() || ::IsIconic(hwnd))
+    {
+        return;
+    }
+
+    RECT r;
+    if (!::GetWindowRect(hwnd, &r) || r.right <= r.left || r.bottom <= r.top ||
+        ::MonitorFromRect(&r, MONITOR_DEFAULTTONULL) == nullptr)
+    {
+        return;
+    }
+
+    // Physical desktop coordinates include the native frame and DPI scaling.
+    // A maximized window's normal restore rect can belong to another monitor.
+    this->lastVisibleBounds_ =
+        QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+}
+
+void BaseWindow::savePreMinimizeBounds()
+{
+    if (this->wasMinimized_)
+    {
+        return;
+    }
+
+    // GetWindowRect is already at the minimized parking position here.
+    this->preMinimizeBounds_ = this->lastVisibleBounds_.isEmpty()
+                                   ? std::nullopt
+                                   : std::optional{this->lastVisibleBounds_};
+    this->wasMinimized_ = true;
+}
+
+bool BaseWindow::handleWINDOWPOSCHANGING(WINDOWPOS *pos)
+{
+    if (!this->wasMinimized_ || !this->preMinimizeBounds_ ||
+        (pos->flags & (SWP_NOMOVE | SWP_HIDEWINDOW)) != 0)
+    {
+        return false;
+    }
+
+    const auto previous = *this->preMinimizeBounds_;
+    const bool resize = (pos->flags & SWP_NOSIZE) == 0;
+    const auto proposed =
+        RECT{pos->x, pos->y, pos->x + (resize ? pos->cx : previous.width()),
+             pos->y + (resize ? pos->cy : previous.height())};
+    const auto previousRect =
+        RECT{previous.x(), previous.y(), previous.x() + previous.width(),
+             previous.y() + previous.height()};
+
+    auto *proposedMonitor = ::MonitorFromRect(&proposed, MONITOR_DEFAULTTONULL);
+    auto *previousMonitor =
+        ::MonitorFromRect(&previousRect, MONITOR_DEFAULTTONULL);
+    if (previousMonitor == nullptr || proposedMonitor == nullptr ||
+        proposedMonitor == previousMonitor)
+    {
+        // Ignore minimized parking moves and allow Windows' fallback when
+        // the original monitor is no longer connected.
+        return false;
+    }
+
+    // Correct before drawing so restoration doesn't flash on another screen.
+    pos->x = previous.x();
+    pos->y = previous.y();
+    if (resize)
+    {
+        pos->cx = previous.width();
+        pos->cy = previous.height();
+    }
+    return true;
+}
+#endif
 
 bool BaseWindow::handleMOVE(MSG *msg)
 {

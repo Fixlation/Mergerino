@@ -77,6 +77,8 @@ private:
     void updateTargetRoleStateFromMessages();
     void refreshChannelModerationPermissions();
     void openModComments();
+    void openPlatformUsercard() const;
+    void updateUsercardButton();
     void prepareForClose();
     bool canModerateTargetUser() const;
     bool isCurrentPlatformUser() const;

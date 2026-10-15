@@ -563,6 +563,7 @@ void makeModerateMessage(EventSubMessageBuilder &builder,
                          const lib::payload::channel_moderate::v2::Event &event,
                          const lib::payload::channel_moderate::v2::Raid &action)
 {
+    builder->flags.set(MessageFlag::Raid);
     QString text;
 
     builder.appendUser(event.moderatorUserName, event.moderatorUserLogin, text);

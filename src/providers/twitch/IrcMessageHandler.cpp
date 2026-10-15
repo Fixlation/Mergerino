@@ -32,6 +32,7 @@
 #include "util/Helpers.hpp"
 #include "util/IrcHelpers.hpp"
 
+#include <IrcConnection>
 #include <IrcMessage>
 #include <QLocale>
 #include <QStringBuilder>
@@ -240,32 +241,51 @@ MessagePtr parseNoticeMessage(Communi::IrcNoticeMessage *message)
     {
         const auto linkColor = MessageColor(MessageColor::Link);
         const auto accountsLink = Link(Link::OpenAccountsPage, QString());
-        const auto curUser = getApp()->getAccounts()->twitch.getCurrent();
-        const auto expiredUserName = curUser->getUserName();
-        if (!curUser->isAnon())
+        auto &twitchAccounts = getApp()->getAccounts()->twitch;
+        const auto *connection = message->connection();
+        const auto expiredUserName =
+            connection != nullptr ? connection->userName()
+                                  : twitchAccounts.getCurrent()->getUserName();
+        const auto expiredAccount =
+            twitchAccounts.findUserByUsername(expiredUserName);
+        auto rejectedToken =
+            connection != nullptr
+                ? connection->password()
+                : (expiredAccount != nullptr ? expiredAccount->getOAuthToken()
+                                             : QString{});
+        if (rejectedToken.startsWith("oauth:", Qt::CaseInsensitive))
         {
-            QTimer::singleShot(0, [expiredUserName] {
+            rejectedToken.remove(0, 6);
+        }
+        if (expiredAccount != nullptr && !expiredAccount->isAnon() &&
+            !rejectedToken.isEmpty())
+        {
+            // Defer removal until after the NOTICE has been delivered. The
+            // normal account-removal signals clear saved credentials, refresh
+            // the account menu and reconnect anonymously when necessary.
+            QTimer::singleShot(0, [expiredAccount, rejectedToken] {
                 auto *app = tryGetApp();
                 if (!app)
                 {
                     return;
                 }
 
-                auto &twitchAccounts = app->getAccounts()->twitch;
-                const auto current = twitchAccounts.getCurrent();
-                if (current->isAnon() ||
-                    current->getUserName().compare(expiredUserName,
-                                                   Qt::CaseInsensitive) != 0)
+                auto &accounts = app->getAccounts()->twitch.accounts;
+                const auto removed =
+                    accounts.removeFirstMatching([&](const auto &account) {
+                        // A refreshed token or a re-added account must not be
+                        // removed by a failure queued for the previous login.
+                        return account == expiredAccount &&
+                               account->getOAuthToken() == rejectedToken;
+                    });
+                if (removed)
                 {
-                    return;
+                    getSettings()->requestSave();
                 }
-
-                twitchAccounts.currentUsername = QString{};
-                getSettings()->requestSave();
             });
         }
-        const auto expirationText = QString("Login expired for user \"%1\"!")
-                                        .arg(expiredUserName);
+        const auto expirationText =
+            QString("Login expired for user \"%1\"!").arg(expiredUserName);
         const auto loginPromptText = QString("Try adding your account again.");
 
         MessageBuilder builder;
@@ -958,6 +978,10 @@ void IrcMessageHandler::parseUserNoticeMessageInto(Communi::IrcMessage *message,
         {
             msg->flags.set(MessageFlag::WatchStreak);
         }
+        else if (msgType == u"raid")
+        {
+            msg->flags.set(MessageFlag::Raid);
+        }
         else
         {
             msg->flags.set(MessageFlag::Subscription);
@@ -1283,6 +1307,10 @@ void IrcMessageHandler::addMessage(Communi::IrcMessage *message,
             if (msgType == "viewermilestone")
             {
                 msg->flags.set(MessageFlag::WatchStreak);
+            }
+            else if (msgType == u"raid")
+            {
+                msg->flags.set(MessageFlag::Raid);
             }
             else
             {

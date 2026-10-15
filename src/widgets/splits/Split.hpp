@@ -69,6 +69,7 @@ public:
     QString activityPaneTitle() const;
     qreal activityMessageScale() const;
     bool collapseGiftedSubscriptions() const;
+    bool showRaidsAndWatchStreaks() const;
     ActivityTimeDisplayMode activityTimeDisplayMode() const;
     bool slowerChatEnabled() const;
     qreal slowerChatMessagesPerSecond() const;
@@ -99,6 +100,7 @@ public:
     void unhidePinnedMessages();
     void setActivityMessageScale(qreal value);
     void setCollapseGiftedSubscriptions(bool value);
+    void setShowRaidsAndWatchStreaks(bool value);
     void setActivityTimeDisplayMode(ActivityTimeDisplayMode value);
     void setSlowerChatEnabled(bool value);
     void setSlowerChatMessagesPerSecond(qreal value);
@@ -217,6 +219,7 @@ private:
     bool filterActivityExplicit_{false};
     qreal activityMessageScale_{0.9};
     bool collapseGiftedSubscriptions_{true};
+    bool showRaidsAndWatchStreaks_{true};
     ActivityTimeDisplayMode activityTimeDisplayMode_;
     bool slowerChatEnabled_{false};
     qreal slowerChatMessagesPerSecond_{5.0};

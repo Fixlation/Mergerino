@@ -84,6 +84,10 @@ set(SOURCE_FILES
 
         controllers/commands/builtin/chatterino/Debugging.cpp
         controllers/commands/builtin/chatterino/Debugging.hpp
+        controllers/commands/builtin/MassModeration.cpp
+        controllers/commands/builtin/MassModeration.hpp
+        controllers/moderation/MassModerationQueue.cpp
+        controllers/moderation/MassModerationQueue.hpp
         controllers/commands/builtin/Misc.cpp
         controllers/commands/builtin/Misc.hpp
         controllers/commands/builtin/PinMessage.cpp
@@ -590,6 +594,8 @@ set(SOURCE_FILES
         singletons/StreamerMode.hpp
         singletons/Theme.cpp
         singletons/Theme.hpp
+        singletons/ThemeEffect.cpp
+        singletons/ThemeEffect.hpp
         singletons/Toasts.cpp
         singletons/Toasts.hpp
         singletons/Updates.cpp
@@ -755,10 +761,14 @@ set(SOURCE_FILES
         widgets/dialogs/CreatePollDialog.hpp
         widgets/dialogs/CreatePredictionDialog.cpp
         widgets/dialogs/CreatePredictionDialog.hpp
+        widgets/dialogs/GiveawayDraws.cpp
+        widgets/dialogs/GiveawayDraws.hpp
         widgets/dialogs/GiveawayPopup.cpp
         widgets/dialogs/GiveawayPopup.hpp
         widgets/dialogs/KickPredictionDialog.cpp
         widgets/dialogs/KickPredictionDialog.hpp
+        widgets/dialogs/MassModerationDialog.cpp
+        widgets/dialogs/MassModerationDialog.hpp
         widgets/dialogs/ManagePredictionDialog.cpp
         widgets/dialogs/ManagePredictionDialog.hpp
         widgets/dialogs/EditHotkeyDialog.cpp
@@ -887,6 +897,10 @@ set(SOURCE_FILES
         widgets/helper/LiveIndicator.hpp
         widgets/helper/TableStyles.cpp
         widgets/helper/TableStyles.hpp
+        widgets/helper/ThemeBackdrop.cpp
+        widgets/helper/ThemeBackdrop.hpp
+        widgets/helper/ThemePreview.cpp
+        widgets/helper/ThemePreview.hpp
         widgets/helper/TrimRegExpValidator.cpp
         widgets/helper/TrimRegExpValidator.hpp
 
@@ -937,6 +951,8 @@ set(SOURCE_FILES
         widgets/settingspages/SettingsPage.hpp
         widgets/settingspages/SettingWidget.cpp
         widgets/settingspages/SettingWidget.hpp
+        widgets/settingspages/ThemesPage.cpp
+        widgets/settingspages/ThemesPage.hpp
 
         widgets/splits/ClosedSplits.cpp
         widgets/splits/ClosedSplits.hpp

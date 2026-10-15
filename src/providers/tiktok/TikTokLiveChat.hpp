@@ -10,6 +10,7 @@
 #include <QString>
 #include <QUrl>
 
+#include <cstdint>
 #include <memory>
 
 namespace chatterino {
@@ -58,6 +59,8 @@ private:
     void handleBrowserSnapshot(const QByteArray &payload);
     void scheduleBrowserTargetCheck(int delayMs);
     void scheduleBrowserSnapshot(int delayMs);
+    void scheduleRoomStatusCheck(int delayMs);
+    void checkRoomStatus(std::uint64_t generation);
 
     void scheduleResolve(int delayMs);
     void waitForNextLive(QString text, int retryDelayMs);
@@ -79,6 +82,10 @@ private:
     bool failureReported_{false};
     bool browserSnapshotReceived_{false};
     bool showJoinMessages_{true};
+    bool apiLiveConfirmed_{false};
+    int consecutiveLiveSnapshots_{0};
+    int consecutiveUnconfirmedStatusChecks_{0};
+    std::uint64_t roomStatusGeneration_{0};
 
     std::shared_ptr<bool> lifetimeGuard_;
     std::unique_ptr<BrowserSession> browser_;

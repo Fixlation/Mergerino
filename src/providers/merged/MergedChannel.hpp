@@ -8,6 +8,8 @@
 #include "common/ChannelChatters.hpp"
 #include "messages/Emote.hpp"
 #include "messages/Message.hpp"
+#include "messages/WeakMessageIndex.hpp"
+#include "util/BoundedUniqueSet.hpp"
 #include "util/QStringHash.hpp"
 
 #include <pajlada/signals/signal.hpp>
@@ -90,6 +92,7 @@ protected:
     QString getCurrentStreamIDForMessage(const Message &message) const override;
 
 private:
+    friend class MergedChannelTestAccess;
     void initializeSources();
     void createYouTubeLiveChat();
     void restartYouTubeLiveChat();
@@ -140,7 +143,8 @@ private:
     pajlada::Signals::SignalHolder youtubeConnections_;
     pajlada::Signals::SignalHolder tiktokConnections_;
 
-    std::unordered_map<QString, MessagePtr> mirroredMessages_;
+    WeakMessageIndex mirroredMessages_;
+    BoundedUniqueSet<QString> recentMessageKeys_{16384};
 
     bool twitchLive_{false};
     bool kickLive_{false};

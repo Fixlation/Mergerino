@@ -271,6 +271,8 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
         root.value("activityMessageScale").toDouble(0.9);
     descriptor.collapseGiftedSubscriptions_ =
         root.value("collapseGiftedSubscriptions").toBool(true);
+    descriptor.showRaidsAndWatchStreaks_ =
+        root.value("showRaidsAndWatchStreaks").toBool(true);
     if (auto activityTimeDisplayMode = root["activityTimeDisplayMode"];
         activityTimeDisplayMode.isString())
     {

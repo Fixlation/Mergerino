@@ -66,6 +66,7 @@ private:
 };
 
 QList<Frame> readFrames(QImageReader &reader, const Url &url);
+QList<Frame> readFrames(QImageReader &reader, const Url &url, QSize decodeBounds);
 void assignFrames(std::weak_ptr<Image> weak, QList<Frame> parsed);
 
 }  // namespace chatterino::detail
@@ -96,6 +97,10 @@ public:
     static ImagePtr getEmpty();
 
     static ImagePtr fromAutoscaledUrl(const Url &url, uint16_t autoScale);
+    static ImagePtr fromBadgeUrl(const Url &url, uint16_t logicalSize);
+    static ImagePtr fromBoundedAutoscaledUrl(const Url &url,
+                                             QSize autoScaleBounds,
+                                             QSize expectedSize);
     static ImagePtr fromAutoscaledUrl(const Url &url, QSize autoScaleBounds,
                                       QSize expectedSize);
 
@@ -133,6 +138,7 @@ private:
     std::atomic_bool empty_{false};
 
     bool shouldLoad_{false};
+    bool boundedDecode_{false};
 
     /// Bounds this image should fit within when loaded.
     ///

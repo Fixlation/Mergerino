@@ -13,12 +13,19 @@
 #include "widgets/splits/Split.hpp"
 #include "widgets/Window.hpp"
 
+#include <QCollator>
 #include <QErrorMessage>
-#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPointer>
 #include <QProcess>
 #include <QStringBuilder>
+#include <QTimer>
 
+#include <algorithm>
 #include <functional>
+#include <memory>
+#include <utility>
 
 namespace {
 
@@ -54,106 +61,145 @@ void showStreamlinkNotFoundError()
     }
 }
 
-QProcess *createStreamlinkProcess()
-{
-    auto *p = new QProcess;
-
-    const auto path = getStreamlinkPath();
-
-    p->setProgram(path);
-
-    QObject::connect(p, &QProcess::errorOccurred, [=](auto err) {
-        if (err == QProcess::FailedToStart)
-        {
-            showStreamlinkNotFoundError();
-        }
-        else
-        {
-            qCWarning(chatterinoStreamlink) << "Error occurred" << err;
-        }
-
-        p->deleteLater();
-    });
-
-    QObject::connect(
-        p,
-        static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(
-            &QProcess::finished),
-        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/) {
-            p->deleteLater();
-        });
-
-    return p;
-}
-
 }  // namespace
 
 namespace chatterino {
 
-void getStreamQualities(const QString &channelURL,
-                        std::function<void(QStringList)> cb)
+QStringList parseStreamlinkQualities(const QByteArray &output)
 {
-    auto *p = createStreamlinkProcess();
+    const auto streams =
+        QJsonDocument::fromJson(output).object().value("streams").toObject();
+    QStringList qualities;
+    for (auto it = streams.begin(); it != streams.end(); ++it)
+    {
+        if (it.value().isObject() && it.key() != "best" && it.key() != "worst")
+        {
+            qualities.append(it.key());
+        }
+    }
+    QCollator collator;
+    collator.setNumericMode(true);
+    std::sort(qualities.begin(), qualities.end(),
+              [&collator](const auto &left, const auto &right) {
+                  return collator.compare(left, right) > 0;
+              });
+    // Prefer video over audio and preserve Streamlink's exact quality names.
+    for (const auto &audio :
+         {QStringLiteral("audio"), QStringLiteral("audio_only")})
+    {
+        if (qualities.removeAll(audio))
+        {
+            qualities.append(audio);
+        }
+    }
+    if (qualities.isEmpty() && streams.value("best").isObject())
+    {
+        qualities.append("best");
+    }
+    return qualities;
+}
 
+void cancelStreamlinkQuery(QProcess *process)
+{
+    process->setProperty("streamlinkQueryCancelled", true);
+    if (process->state() == QProcess::NotRunning)
+    {
+        process->deleteLater();
+    }
+    else
+    {
+        process->kill();
+    }
+}
+
+QProcess *getStreamQualities(const QString &channelURL, QObject *context,
+                             std::function<void(QStringList, QString)> callback)
+{
+    auto *process = new QProcess;
+    process->setProgram(getStreamlinkPath());
+    auto arguments =
+        QProcess::splitCommand(getSettings()->streamlinkOpts.getValue());
+    arguments << "--json" << channelURL;
+    process->setArguments(arguments);
+    // Processes own their timeout and clean themselves up even after the popup
+    // disconnects an obsolete query. No callback can outlive the popup.
+    auto *timer = new QTimer(process);
+    timer->setSingleShot(true);
+    auto completed = std::make_shared<bool>(false);
+    auto finish = [completed, callback = std::move(callback), timer, process](
+                      QStringList qualities, QString error) {
+        if (std::exchange(*completed, true) ||
+            process->property("streamlinkQueryCancelled").toBool())
+        {
+            return;
+        }
+        timer->stop();
+        callback(std::move(qualities), std::move(error));
+    };
+    QObject::connect(context, &QObject::destroyed, process, [process] {
+        cancelStreamlinkQuery(process);
+    });
+    QObject::connect(timer, &QTimer::timeout, context, [process, finish] {
+        finish({}, "Streamlink timed out. Check the connection and refresh "
+                   "qualities.");
+        process->kill();
+    });
     QObject::connect(
-        p,
-        static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(
-            &QProcess::finished),
-        [=](int exitCode, QProcess::ExitStatus /*exitStatus*/) {
-            if (exitCode != 0)
-            {
-                qCWarning(chatterinoStreamlink) << "Got error code" << exitCode;
-                // return;
-            }
-            QString lastLine = QString(p->readAllStandardOutput());
-            lastLine = lastLine.trimmed().split('\n').last().trimmed();
-            if (lastLine.startsWith("Available streams: "))
-            {
-                QStringList options;
-                QStringList split =
-                    lastLine.right(lastLine.length() - 19).split(", ");
-
-                for (auto i = split.length() - 1; i >= 0; i--)
-                {
-                    QString option = split.at(i);
-                    if (option == "best)")
-                    {
-                        // As it turns out, sometimes, one quality option can
-                        // be the best and worst quality at the same time.
-                        // Since we start loop from the end, we can check
-                        // that and act accordingly
-                        option = split.at(--i);
-                        // "900p60 (worst"
-                        options << option.left(option.length() - 7);
-                    }
-                    else if (option.endsWith(" (worst)"))
-                    {
-                        options << option.left(option.length() - 8);
-                    }
-                    else if (option.endsWith(" (best)"))
-                    {
-                        options << option.left(option.length() - 7);
-                    }
-                    else
-                    {
-                        options << option;
-                    }
-                }
-
-                cb(options);
-            }
+        process, &QProcess::errorOccurred, context,
+        [finish](QProcess::ProcessError error) {
+            finish(
+                {},
+                error == QProcess::FailedToStart
+                    ? "Streamlink could not start. Check its installation and "
+                      "path in Settings."
+                    : "Streamlink could not load qualities. Try refreshing.");
         });
-
-    p->setArguments(p->arguments() +
-                    QStringList{channelURL, "--default-stream=KKona"});
-
-    p->start();
+    QObject::connect(
+        process, &QProcess::finished, context,
+        [process, finish](int exitCode, QProcess::ExitStatus status) {
+            auto qualities =
+                parseStreamlinkQualities(process->readAllStandardOutput());
+            if (status != QProcess::NormalExit || exitCode != 0 ||
+                qualities.isEmpty())
+            {
+                finish({}, "No playable qualities were returned. The stream "
+                           "may be offline or unsupported. Check Streamlink is "
+                           "up to date, then refresh.");
+                return;
+            }
+            finish(std::move(qualities), {});
+        });
+    QObject::connect(process, &QProcess::finished, process,
+                     &QObject::deleteLater);
+    QObject::connect(process, &QProcess::errorOccurred, process,
+                     [process](QProcess::ProcessError error) {
+                         if (error == QProcess::FailedToStart)
+                         {
+                             process->deleteLater();
+                         }
+                     });
+    // Defer even a synchronous FailedToStart until the caller has stored the
+    // returned process. A consumer may also disappear before this runs.
+    QTimer::singleShot(
+        0, process, [process, timer, guard = QPointer<QObject>(context)] {
+            if (!guard ||
+                process->property("streamlinkQueryCancelled").toBool())
+            {
+                process->deleteLater();
+                return;
+            }
+            timer->start(30000);
+            process->start();
+        });
+    return process;
 }
 
 void openStreamlink(const QString &channelURL, const QString &quality,
                     QStringList extraArguments)
 {
-    auto *proc = createStreamlinkProcess();
+    QProcess process;
+    auto *proc = &process;
+    proc->setProgram(getStreamlinkPath());
     auto arguments = proc->arguments()
                      << std::move(extraArguments) << channelURL << quality;
 
@@ -198,9 +244,9 @@ void openStreamlinkForChannel(const QString &channel, QStringView prefixURL)
 
     if (preferredQuality == StreamLinkPreferredQuality::Choose)
     {
-        getStreamQualities(channelURL, [=](QStringList qualityOptions) {
-            QualityPopup::showDialog(channelURL, qualityOptions);
-        });
+        QualityPopup::showDialog(
+            {{prefixURL.contains(u"kick.com") ? "Kick" : "Twitch",
+              channelURL}});
 
         return;
     }

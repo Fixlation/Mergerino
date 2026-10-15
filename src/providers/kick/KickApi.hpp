@@ -67,6 +67,7 @@ struct KickPrivateUserBadgeInfo {
     uint64_t sortOrder = 1000;
     bool active = true;
     bool selected = true;
+    bool channelAssigned = false;
 };
 
 struct KickChatIdentityBadge {
@@ -88,6 +89,8 @@ struct KickChatIdentity {
 
 QString kickIdentityAuthHelper();
 QString parseKickIdentityToken(const QString &clipboardText);
+ExpectedStr<void> validateKickIdentityResponse(const QByteArray &response,
+                                               uint64_t expectedUserID);
 
 struct KickPrivateChannelInfo {
     KickPrivateChannelInfo(BoostJsonObject obj);
@@ -125,12 +128,14 @@ struct KickPrivateEmoteInfo {
     uint64_t emoteID = 0;
     QString name;
     bool subscribersOnly = false;
+    QString imageUrl;
 };
 
 struct KickPrivateEmoteSetInfo {
     KickPrivateEmoteSetInfo(BoostJsonObject obj);
 
-    // if this is set, it's a user set - otherwise it's global
+    // Collectibles are account-owned even though they have no user_id.
+    QString name;
     std::optional<uint64_t> userID;
     std::vector<KickPrivateEmoteInfo> emotes;
 };
@@ -186,7 +191,8 @@ public:
 
     static void privateEmotesInChannel(
         const QString &username,
-        Callback<std::vector<KickPrivateEmoteSetInfo>> cb);
+        Callback<std::vector<KickPrivateEmoteSetInfo>> cb,
+        const QString &websiteCredential = {});
 
     static void privateRecentMessages(
         uint64_t chatroomID, int limit,

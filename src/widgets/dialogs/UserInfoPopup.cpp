@@ -528,9 +528,7 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
         user->addStretch(1);
 
         QObject::connect(usercard.getElement(), &Button::leftClicked, [this] {
-            QDesktopServices::openUrl("https://www.twitch.tv/popout/" +
-                                      this->underlyingChannel_->getName() +
-                                      "/viewercard/" + this->userName_);
+            this->openPlatformUsercard();
         });
 
         QObject::connect(this->ui_.logUser, &QCheckBox::clicked, this,
@@ -884,6 +882,39 @@ void UserInfoPopup::themeChangedEvent()
 {
     BaseWindow::themeChangedEvent();
 
+    const auto &colors = this->theme->usercard;
+    const auto classicDark = this->theme->themeName.getValue() == "Dark" &&
+                             !this->theme->isLightTheme();
+    auto palette = this->palette();
+    if (classicDark)
+    {
+        this->overrideBackgroundColor_.reset();
+    }
+    else
+    {
+        this->overrideBackgroundColor_ = colors.background;
+        palette.setColor(QPalette::Window, colors.background);
+        palette.setColor(QPalette::Base, colors.background);
+        palette.setColor(QPalette::WindowText, colors.text);
+        palette.setColor(QPalette::Text, colors.text);
+        palette.setColor(QPalette::ButtonText, colors.text);
+        palette.setColor(QPalette::PlaceholderText, colors.secondaryText);
+        palette.setColor(QPalette::Link, colors.accent);
+        palette.setColor(QPalette::Highlight, colors.accent);
+        palette.setColor(QPalette::HighlightedText, colors.text);
+    }
+    this->setPalette(palette);
+    this->getLayoutContainer()->setPalette(palette);
+    if (this->ui_.userIDLabel != nullptr)
+    {
+        auto secondaryPalette = palette;
+        secondaryPalette.setColor(
+            QPalette::WindowText,
+            classicDark ? QColor("#aaa") : colors.secondaryText);
+        this->ui_.userIDLabel->setPalette(secondaryPalette);
+    }
+    this->update();
+
     for (auto &&child : this->findChildren<QCheckBox *>())
     {
         child->setFont(
@@ -1215,14 +1246,7 @@ void UserInfoPopup::setData(const QString &name,
     }
     // If we're opening by ID, this will be called as soon as we get the information from twitch
 
-    auto type = this->channel_->getType();
-    if (this->isGenericPlatform_ || type == Channel::Type::TwitchLive ||
-        type == Channel::Type::TwitchWhispers || type == Channel::Type::Misc ||
-        type == Channel::Type::Kick)
-    {
-        // not a normal twitch channel, the url opened by the button will be invalid, so hide the button
-        this->ui_.usercardLabel->hide();
-    }
+    this->updateUsercardButton();
 }
 
 void UserInfoPopup::updateGenericPlatformUserData(
@@ -1330,7 +1354,6 @@ void UserInfoPopup::updateGenericPlatformUserData(
         isRegexIgnored ? "Name matched by regex" : QString());
 
     this->ui_.notesAdd->setEnabled(true);
-    this->ui_.usercardLabel->hide();
 }
 
 void UserInfoPopup::updateLatestMessages()
@@ -1572,6 +1595,7 @@ void UserInfoPopup::updateUserData()
             // Ensure recent messages are shown
             this->updateLatestMessages();
         }
+        this->updateUsercardButton();
 
         this->userId_ = user.id;
         this->updateTargetRoleStateFromMessages();
@@ -2015,6 +2039,71 @@ void UserInfoPopup::updateLogUserButton()
     this->ui_.logUser->setChecked(logging::isLoggedUser(this->userName_));
 }
 
+void UserInfoPopup::openPlatformUsercard() const
+{
+    QUrl url;
+    if (this->isKick_)
+    {
+        if (!this->kickUserSlug_.isEmpty())
+        {
+            url = QUrl(u"https://kick.com/" % this->kickUserSlug_);
+        }
+    }
+    else if (this->isGenericPlatform_)
+    {
+        url = QUrl(this->genericProfileUrl_);
+    }
+    else if (this->underlyingChannel_ &&
+             !this->underlyingChannel_->isEmpty() &&
+             !this->userName_.isEmpty())
+    {
+        url = QUrl(u"https://www.twitch.tv/popout/" %
+                   this->underlyingChannel_->getName() % u"/viewercard/" %
+                   this->userName_);
+    }
+
+    if (!url.isEmpty() && url.isValid())
+    {
+        QDesktopServices::openUrl(url);
+    }
+}
+
+void UserInfoPopup::updateUsercardButton()
+{
+    if (this->ui_.usercardLabel == nullptr)
+    {
+        return;
+    }
+
+    if (this->isKick_)
+    {
+        this->ui_.usercardLabel->setText(QStringLiteral("Profile"));
+        this->ui_.usercardLabel->setVisible(!this->kickUserSlug_.isEmpty());
+        return;
+    }
+
+    if (this->isGenericPlatform_)
+    {
+        this->ui_.usercardLabel->setText(QStringLiteral("Profile"));
+        this->ui_.usercardLabel->setVisible(
+            !this->genericProfileUrl_.isEmpty());
+        return;
+    }
+
+    this->ui_.usercardLabel->setText(QStringLiteral("Usercard"));
+    const auto type = this->channel_ ? this->channel_->getType()
+                                     : Channel::Type::None;
+    const bool supportsTwitchUsercard =
+        type != Channel::Type::TwitchLive &&
+        type != Channel::Type::TwitchWhispers && type != Channel::Type::Misc &&
+        type != Channel::Type::Kick;
+    const bool hasTarget =
+        this->underlyingChannel_ && !this->underlyingChannel_->isEmpty() &&
+        !this->underlyingChannel_->getName().isEmpty() &&
+        !this->userName_.isEmpty();
+    this->ui_.usercardLabel->setVisible(supportsTwitchUsercard && hasTarget);
+}
+
 void UserInfoPopup::updateKickUserData()
 {
     assert(this->isKick_);
@@ -2033,17 +2122,19 @@ void UserInfoPopup::updateKickUserData()
     };
     auto onChannelFetched = [](UserInfoPopup *self,
                                const KickPrivateChannelInfo &channel) {
+        self->kickUserSlug_ = channel.slug;
+
         // Correct for when being opened with ID
         if (self->userName_.isEmpty())
         {
             self->userName_ = channel.user.username;
-            self->kickUserSlug_ = channel.slug;
             self->ui_.nameLabel->setText(channel.user.username);
             self->updateLogUserButton();
 
             // Ensure recent messages are shown
             self->updateLatestMessages();
         }
+        self->updateUsercardButton();
 
         self->kickUserID_ = channel.user.userID;
         auto userIDStr = QString::number(self->kickUserID_);

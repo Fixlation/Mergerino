@@ -140,6 +140,7 @@ private:
     float scale_ = -1;
     float imageScale_ = -1.F;
     MessageElementFlags currentWordFlags_;
+    MessageFlags currentMessageFlags_;
 
 #ifdef FOURTF
     // Debug counters

@@ -109,6 +109,10 @@ public:
     /// Returns a map of emotes the account has access to
     SharedAccessGuard<std::shared_ptr<const EmoteMap>> accessEmotes() const;
 
+    /// Returns Twitch's global emotes, the ones every Twitch user can use
+    SharedAccessGuard<std::shared_ptr<const EmoteMap>> accessGlobalEmotes()
+        const;
+
     /// Sets the emotes this account has access to
     ///
     /// This should only be used in tests.
@@ -140,6 +144,7 @@ private:
     ScopedCancellationToken emoteToken_;
     UniqueAccess<std::shared_ptr<const TwitchEmoteSetMap>> emoteSets_;
     UniqueAccess<std::shared_ptr<const EmoteMap>> emotes_;
+    UniqueAccess<std::shared_ptr<const EmoteMap>> globalEmotes_;
 
     QString seventvUserID_;
 

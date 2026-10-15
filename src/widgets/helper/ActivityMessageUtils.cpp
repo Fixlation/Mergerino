@@ -131,7 +131,8 @@ bool isActivityAlertMessage(const Message &message)
 {
     return message.flags.hasAny({MessageFlag::Subscription,
                                  MessageFlag::ElevatedMessage,
-                                 MessageFlag::CheerMessage});
+                                 MessageFlag::CheerMessage,
+                                 MessageFlag::Raid, MessageFlag::WatchStreak});
 }
 
 bool isActivityBotMessage(const Message &message)
@@ -276,7 +277,8 @@ QString compactActivityGiftBombText(const Message &message)
 bool shouldShowMessageInActivityPane(const Message &message,
                                      uint32_t twitchMinimumBits,
                                      uint32_t kickMinimumKicks,
-                                     uint32_t tiktokGiftMinimumDiamonds)
+                                     uint32_t tiktokGiftMinimumDiamonds,
+                                     bool showRaidsAndWatchStreaks)
 {
     if (isActivityBotMessage(message))
     {
@@ -300,6 +302,11 @@ bool shouldShowMessageInActivityPane(const Message &message,
         !getActivityGiftBombRecipientCount(message))
     {
         return false;
+    }
+
+    if (message.flags.hasAny({MessageFlag::Raid, MessageFlag::WatchStreak}))
+    {
+        return showRaidsAndWatchStreaks;
     }
 
     if (isActivityTwitchBitsMessage(message))

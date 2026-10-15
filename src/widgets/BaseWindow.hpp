@@ -16,6 +16,8 @@
 class QHBoxLayout;
 struct tagMSG;
 typedef struct tagMSG MSG;
+struct tagWINDOWPOS;
+typedef struct tagWINDOWPOS WINDOWPOS;
 
 namespace chatterino {
 
@@ -217,6 +219,9 @@ private:
 
 #ifdef USEWINSDK
     void updateRealSize();
+    void updateLastVisibleBounds(HWND hwnd);
+    void savePreMinimizeBounds();
+    bool handleWINDOWPOSCHANGING(WINDOWPOS *pos);
     /// @brief Returns the HWND of this window if it has one
     ///
     /// A QWidget only has an HWND if it has been created. Before that,
@@ -245,11 +250,16 @@ private:
     /// GetWindowRect. Used for drawing.
     QRect realBounds_;
     bool isMaximized_ = false;
+    /// Native bounds immediately before minimizing, separate from normal bounds.
+    std::optional<QRect> preMinimizeBounds_;
+    QRect lastVisibleBounds_;
+    bool wasMinimized_ = false;
 #endif
 
     pajlada::Signals::SignalHolder connections_;
 
     friend class BaseWidget;
+    friend class BaseWindowTestAccess;
 };
 
 }  // namespace chatterino

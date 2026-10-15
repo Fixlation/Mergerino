@@ -434,6 +434,35 @@
           "$comment": "Determines which built-in Chatterino theme to use as a fallback in case a color isn't configured.",
           "enum": ["White", "Light", "Dark", "Black"],
           "default": "Dark"
+        },
+        "mergerinoEffect": {
+          "$comment": "Mergerino: turns the theme into an animated theme that paints a backdrop behind chat messages in splits.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": ["aurora", "drift", "starfield", "embers", "rain"]
+            },
+            "colors": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": { "$ref": "#/definitions/qt-color" }
+            },
+            "speed": {
+              "type": "number",
+              "minimum": 0.25,
+              "maximum": 2,
+              "default": 1
+            },
+            "intensity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.6
+            }
+          },
+          "required": ["type", "colors"]
         }
       },
       "required": ["iconTheme"]

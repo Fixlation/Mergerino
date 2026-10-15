@@ -29,10 +29,47 @@ void AccountModel::getRowFromItem(const std::shared_ptr<Account> &item,
     row[0]->setData(QFont("Segoe UI", 10), Qt::FontRole);
 }
 
+int AccountModel::getSortedModelIndex(
+    const std::shared_ptr<Account> &item) const
+{
+    int modelIndex = 0;
+    for (const auto &existingRow : this->rows())
+    {
+        if (existingRow.isCustomRow)
+        {
+            const auto category =
+                existingRow.items[0]->data(Qt::EditRole).toString();
+            if (item->getCategory() < category)
+            {
+                return modelIndex;
+            }
+        }
+        else
+        {
+            assert(existingRow.original.has_value());
+            if (!existingRow.original.value()->operator<(*item))
+            {
+                return modelIndex;
+            }
+        }
+
+        modelIndex++;
+    }
+
+    return modelIndex;
+}
+
 int AccountModel::beforeInsert(const std::shared_ptr<Account> &item,
                                std::vector<QStandardItem *> &row,
                                int proposedIndex)
 {
+    (void)row;
+    (void)proposedIndex;
+
+    // The generic proposed index can include a later category header. Derive
+    // the row from the same ordering used by AccountController instead.
+    const int sortedIndex = this->getSortedModelIndex(item);
+
     if (this->categoryCount_[item->getCategory()]++ == 0)
     {
         auto newRow = this->createRow();
@@ -40,12 +77,12 @@ int AccountModel::beforeInsert(const std::shared_ptr<Account> &item,
         setStringItem(newRow[0], item->getCategory(), false, false);
         newRow[0]->setData(QFont("Segoe UI Light", 16), Qt::FontRole);
 
-        this->insertCustomRow(std::move(newRow), proposedIndex);
+        this->insertCustomRow(std::move(newRow), sortedIndex);
 
-        return proposedIndex + 1;
+        return sortedIndex + 1;
     }
 
-    return proposedIndex;
+    return sortedIndex;
 }
 
 void AccountModel::afterRemoved(const std::shared_ptr<Account> &item,

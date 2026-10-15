@@ -17,6 +17,9 @@
 #include <QNetworkReply>
 #include <QtConcurrent>
 
+#include <algorithm>
+#include <chrono>
+
 #ifndef signals
 #    define signals public  // the file uses signals: but we build without that
 #endif
@@ -24,6 +27,8 @@
 #undef signals
 
 namespace {
+
+constexpr auto MIN_SEND_WAIT_TIMEOUT = std::chrono::milliseconds{30'000};
 
 /// For DELETE requests, Qt remaps the operation to `DeleteOperation`:
 /// https://github.com/qt/qtbase/blob/bc60fa052b6163bcf444dab027bd6c1e717c9845/src/network/access/qnetworkreplyhttpimpl.cpp#L141-L161
@@ -67,22 +72,33 @@ void NetworkTask::run()
         return;
     }
 
+    QObject::connect(this->reply_, &QNetworkReply::finished, this,
+                     &NetworkTask::finished);
+
     const auto &timeout = this->data_->timeout;
     if (timeout.has_value())
     {
+        this->timer_ = new QTimer(this);
+        this->timer_->setSingleShot(true);
+        this->timer_->setTimerType(Qt::PreciseTimer);
+        QObject::connect(this->timer_, &QTimer::timeout, this,
+                         &NetworkTask::timeout);
         QObject::connect(this->reply_, &QNetworkReply::requestSent, this,
                          [this]() {
-                             const auto &timeout = this->data_->timeout;
-                             this->timer_ = new QTimer(this);
-                             this->timer_->setSingleShot(true);
-                             this->timer_->start(timeout.value());
-                             QObject::connect(this->timer_, &QTimer::timeout,
-                                              this, &NetworkTask::timeout);
-                         });
-    }
+                             if (this->state_ == State::Finished)
+                             {
+                                 return;
+                             }
 
-    QObject::connect(this->reply_, &QNetworkReply::finished, this,
-                     &NetworkTask::finished);
+                             this->state_ = State::WaitingForReply;
+                             // Reset the same timer for redirects or resends.
+                             this->timer_->start(this->data_->timeout.value());
+                         });
+
+        // Qt can stall before requestSent(). Allow normal queuing without
+        // consuming the response timeout, but never wait indefinitely.
+        this->timer_->start(std::max(timeout.value(), MIN_SEND_WAIT_TIMEOUT));
+    }
 
 #ifndef NDEBUG
     if (this->data_->ignoreSslErrors)
@@ -234,6 +250,14 @@ void NetworkTask::writeToCache(const QByteArray &bytes) const
 
 void NetworkTask::timeout()
 {
+    if (this->state_ == State::Finished)
+    {
+        return;
+    }
+
+    const bool waitingForSend = this->state_ == State::WaitingForSend;
+    this->state_ = State::Finished;
+    this->timer_->stop();
     AbandonObject guard(this);
 
     // prevent abort() from calling finished()
@@ -241,9 +265,19 @@ void NetworkTask::timeout()
                         &NetworkTask::finished);
     this->reply_->abort();
 
-    qCDebug(chatterinoHTTP).noquote()
-        << this->data_->typeString() << "[timed out]"
-        << this->data_->request.url().toString();
+    if (waitingForSend)
+    {
+        const auto url = this->data_->request.url().toString(
+            QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::RemoveFragment);
+        qCWarning(chatterinoHTTP).noquote()
+            << this->data_->typeString() << "[timed out before sending]" << url;
+    }
+    else
+    {
+        qCDebug(chatterinoHTTP).noquote()
+            << this->data_->typeString() << "[timed out]"
+            << this->data_->request.url().toString();
+    }
 
     this->data_->emitError({NetworkResult::NetworkError::TimeoutError, {}, {}});
     this->data_->emitFinally();
@@ -251,6 +285,12 @@ void NetworkTask::timeout()
 
 void NetworkTask::finished()
 {
+    if (this->state_ == State::Finished)
+    {
+        return;
+    }
+
+    this->state_ = State::Finished;
     AbandonObject guard(this);
 
     if (this->timer_)

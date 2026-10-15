@@ -55,6 +55,7 @@ TwitchAccount::TwitchAccount(const QString &username, const QString &oauthToken,
     , isAnon_(username == ANONYMOUS_USERNAME)
     , emoteSets_(std::make_shared<TwitchEmoteSetMap>())
     , emotes_(std::make_shared<EmoteMap>())
+    , globalEmotes_(std::make_shared<EmoteMap>())
 {
 }
 
@@ -458,6 +459,12 @@ SharedAccessGuard<std::shared_ptr<const EmoteMap>> TwitchAccount::accessEmotes()
     return this->emotes_.accessConst();
 }
 
+SharedAccessGuard<std::shared_ptr<const EmoteMap>>
+    TwitchAccount::accessGlobalEmotes() const
+{
+    return this->globalEmotes_.accessConst();
+}
+
 void TwitchAccount::setEmotes(std::shared_ptr<const EmoteMap> emotes)
 {
     assert(getApp()->isTest());
@@ -487,12 +494,13 @@ void TwitchAccount::reloadEmotes(void *caller)
 
     auto sets = std::make_shared<TwitchEmoteSetMap>();
     auto emoteMap = std::make_shared<EmoteMap>();
+    auto globalMap = std::make_shared<EmoteMap>();
     auto nCalls = std::make_shared<size_t>();
 
     auto *twitchEmotes = getApp()->getEmotes()->getTwitchEmotes();
     auto *twitchUsers = getApp()->getTwitchUsers();
 
-    auto addEmote = [sets, emoteMap, twitchEmotes,
+    auto addEmote = [sets, emoteMap, globalMap, twitchEmotes,
                      twitchUsers](const HelixChannelEmote &emote) {
         EmoteId id{emote.id};
         EmoteName name{emote.name};
@@ -504,6 +512,10 @@ void TwitchAccount::reloadEmotes(void *caller)
             // if the emote already exists, we don't want to add it to a set as
             // those are assumed to be disjoint
             return;
+        }
+        if (emote.type == u"globals")
+        {
+            globalMap->try_emplace(emotePtr->name, emotePtr);
         }
 
         auto set = sets->find(EmoteSetId{meta.setID});
@@ -540,7 +552,7 @@ void TwitchAccount::reloadEmotes(void *caller)
 
     getHelix()->getUserEmotes(
         this->getUserId(), {},
-        [this, caller, emoteMap, sets, addEmote, nCalls](
+        [this, caller, emoteMap, globalMap, sets, addEmote, nCalls](
             const auto &emotes, const auto &state) mutable {
             assert(emoteMap && sets);
             (*nCalls)++;
@@ -568,6 +580,7 @@ void TwitchAccount::reloadEmotes(void *caller)
                 }
 
                 *this->emotes_.access() = std::move(emoteMap);
+                *this->globalEmotes_.access() = std::move(globalMap);
                 *this->emoteSets_.access() = std::move(sets);
                 getApp()->getAccounts()->twitch.emotesReloaded.invoke(caller,
                                                                       {});

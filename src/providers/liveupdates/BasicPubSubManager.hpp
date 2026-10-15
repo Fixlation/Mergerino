@@ -137,6 +137,13 @@ protected:
         return this->clients_;
     }
 
+    /// New connections go to this address. Open ones keep theirs until they
+    /// reconnect.
+    void setHost(QString host)
+    {
+        this->host_ = std::move(host);
+    }
+
 private:
     Derived *derived()
     {
@@ -316,7 +323,7 @@ private:
     std::optional<WebSocketPool> pool_;
     std::unordered_map<size_t, std::shared_ptr<Client>> clients_;
 
-    const QString host_;
+    QString host_;
 
     size_t nextId_ = 0;
 

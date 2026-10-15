@@ -70,7 +70,9 @@ bool isRegisteredForStartup()
 void setRegisteredForStartup(bool isRegistered)
 {
     auto *app = tryGetApp();
-    if (app && app->isTest())
+    // Settings can be constructed before any application exists, including
+    // by the test runner. Only a real application may change Windows startup.
+    if (!app || app->isTest())
     {
         return;
     }

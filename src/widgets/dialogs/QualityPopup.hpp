@@ -4,19 +4,26 @@
 
 #pragma once
 
+#include "util/StreamLink.hpp"
 #include "widgets/BasePopup.hpp"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QPointer>
 #include <QVBoxLayout>
+
+class QLabel;
+class QPushButton;
+class QProcess;
 
 namespace chatterino {
 
 class QualityPopup : public BasePopup
 {
 public:
-    QualityPopup(const QString &channelURL, QStringList options);
-    static void showDialog(const QString &channelURL, QStringList options);
+    explicit QualityPopup(const QList<StreamlinkSource> &sources);
+    ~QualityPopup() override;
+    static void showDialog(const QList<StreamlinkSource> &sources);
 
 protected:
     void keyPressEvent(QKeyEvent *e) override;
@@ -24,14 +31,20 @@ protected:
 private:
     void okButtonClicked();
     void cancelButtonClicked();
+    void refreshQualities();
+    void cancelQuery();
 
     struct {
         QVBoxLayout *vbox;
         QComboBox *selector;
+        QComboBox *service;
+        QLabel *status;
+        QPushButton *retry;
         QDialogButtonBox *buttonBox;
     } ui_{};
 
-    QString channelURL_;
+    QPointer<QProcess> query_;
+    uint64_t queryGeneration_ = 0;
 };
 
 }  // namespace chatterino

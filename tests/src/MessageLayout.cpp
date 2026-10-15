@@ -8,6 +8,7 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "messages/layouts/MessageLayoutContext.hpp"
 #include "messages/layouts/MessageLayoutElement.hpp"
+#include "messages/Message.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "messages/MessageElement.hpp"
 #include "mocks/BaseApplication.hpp"
@@ -94,4 +95,54 @@ TEST(TextElement, BasicCase)
 
     EXPECT_EQ(wordStart, 0);
     EXPECT_EQ(wordEnd, 3);
+}
+
+TEST(MessageModerationLayout, MutableFlagsInvalidateCachedLayout)
+{
+    auto test = MessageLayoutTest("message to moderate");
+    test.mockApplication.settings.hideModerated = true;
+    MessageColors colors;
+    const MessageLayoutContext ctx{
+        .messageColors = colors,
+        .flags = MessageElementFlag::Text,
+        .width = WIDTH,
+        .scale = 1,
+        .imageScale = 1,
+    };
+    test.layout->layout(ctx, false);
+    const auto originalHeight = test.layout->getHeight();
+    ASSERT_GT(originalHeight, 0);
+    EXPECT_FALSE(test.layout->layout(ctx, false));
+
+    // No new message, resize, or global layout generation change is needed.
+    test.layout->getMessagePtr()->flags.set(MessageFlag::Disabled);
+    EXPECT_TRUE(test.layout->layout(ctx, false));
+    EXPECT_EQ(test.layout->getHeight(), 0);
+    EXPECT_FALSE(test.layout->layout(ctx, false));
+
+    test.layout->getMessagePtr()->flags.unset(MessageFlag::Disabled);
+    EXPECT_TRUE(test.layout->layout(ctx, false));
+    EXPECT_EQ(test.layout->getHeight(), originalHeight);
+    EXPECT_FALSE(test.layout->layout(ctx, false));
+}
+
+TEST(MessageModerationLayout, DimmedMessagesRefreshWithoutChangingHeight)
+{
+    auto test = MessageLayoutTest("message to dim");
+    test.mockApplication.settings.hideModerated = false;
+    MessageColors colors;
+    const MessageLayoutContext ctx{
+        .messageColors = colors,
+        .flags = MessageElementFlag::Text,
+        .width = WIDTH,
+        .scale = 1,
+        .imageScale = 1,
+    };
+    test.layout->layout(ctx, false);
+    const auto originalHeight = test.layout->getHeight();
+    test.layout->getMessagePtr()->flags.set(MessageFlag::Disabled);
+    EXPECT_TRUE(test.layout->layout(ctx, false));
+    EXPECT_EQ(test.layout->getHeight(), originalHeight);
+    EXPECT_TRUE(test.layout->getMessagePtr()->flags.has(MessageFlag::Disabled));
+    EXPECT_FALSE(test.layout->layout(ctx, false));
 }

@@ -87,7 +87,7 @@
             ],
             "externalBadges": [
             ],
-            "flags": "System|DoNotTriggerNotification|Subscription",
+            "flags": "System|DoNotTriggerNotification|Raid",
             "frozen": false,
             "id": "",
             "localizedName": "",

@@ -1416,6 +1416,13 @@ void ChannelView::initializeSignals()
             }
         });
 
+    this->signalHolder_.managedConnect(getTheme()->effectFrame, [this] {
+        if (this->isVisible() && this->hasThemeBackdrop())
+        {
+            this->update();
+        }
+    });
+
     this->signalHolder_.managedConnect(
         getApp()->getWindows()->layoutRequested, [&](Channel *channel) {
             if (this->isVisible() &&
@@ -2007,10 +2014,28 @@ void ChannelView::refreshMessageColors()
 {
     this->messageColors_.applyTheme(getTheme(), this->isOverlay_,
                                     getSettings()->overlayBackgroundOpacity);
+    if (this->hasThemeBackdrop())
+    {
+        // Let the animated backdrop show through; alternate rows become a
+        // light wash of the text colour instead of an opaque fill
+        auto &colors = this->messageColors_;
+        colors.regularBg = Qt::transparent;
+        colors.alternateBg = colors.regularText;
+        colors.alternateBg.setAlpha(12);
+        colors.hasTransparency = true;
+        colors.fadeWithOpacity = true;
+    }
     this->activityMessageColors_ = this->messageColors_;
     this->activityMessageColors_.systemText =
         blendColorTowards(this->activityMessageColors_.regularText,
                           this->activityMessageColors_.channelBackground, 0.10);
+}
+
+bool ChannelView::hasThemeBackdrop() const
+{
+    // Only chat splits animate; popups and overlays keep a plain background
+    return this->split_ != nullptr && !this->isOverlay_ &&
+           getTheme()->effect().isAnimated();
 }
 
 bool ChannelView::isActivityPaneView() const
@@ -2126,7 +2151,8 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
                 this->split_ ? this->split_->twitchActivityMinimumBits() : 100,
                 this->split_ ? this->split_->kickActivityMinimumKicks() : 100,
                 this->split_ ? this->split_->tiktokActivityMinimumDiamonds()
-                             : 0))
+                             : 0,
+                !this->split_ || this->split_->showRaidsAndWatchStreaks()))
         {
             return std::nullopt;
         }
@@ -2170,7 +2196,8 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
             *message,
             this->split_ ? this->split_->twitchActivityMinimumBits() : 100,
             this->split_ ? this->split_->kickActivityMinimumKicks() : 100,
-            this->split_ ? this->split_->tiktokActivityMinimumDiamonds() : 0))
+            this->split_ ? this->split_->tiktokActivityMinimumDiamonds() : 0,
+            !this->split_ || this->split_->showRaidsAndWatchStreaks()))
     {
         return std::nullopt;
     }
@@ -2370,6 +2397,18 @@ void ChannelView::enqueueOrAddProxyMessage(
         return;
     }
 
+    // Catch up through the oldest pending item when the display-rate backlog
+    // reaches its budget. Nothing is silently dropped, and the normal history
+    // limit still applies to messages delivered early by this overflow path.
+    const auto backlogLimit =
+        std::clamp(this->messages_.limit(), size_t{1}, size_t{1000});
+    while (this->pendingSlowChatMessages_.size() >= backlogLimit)
+    {
+        auto oldest = std::move(this->pendingSlowChatMessages_.front());
+        this->pendingSlowChatMessages_.pop_front();
+        this->appendProxyMessage(oldest.message, oldest.overridingFlags,
+                                 oldest.emitAddedToChannel);
+    }
     PendingSlowChatMessage pending{message, overridingFlags, emitAddedToChannel};
     if (priority == SlowChatQueuePriority::Vip)
     {
@@ -2780,6 +2819,47 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
         });
 
     this->channelConnections_.managedConnect(
+        Channel::messageFlagsChanged,
+        [this](Channel *source, const MessagePtr &message) {
+            if (source != this->underlyingChannel_.get())
+            {
+                return;
+            }
+            runOnChannelViewThread(this, [source, message](ChannelView &view) {
+                if (source != view.underlyingChannel_.get())
+                {
+                    return;
+                }
+                // Most views share the original message. Decorated views
+                // keep a clone, so copy moderation flags into that clone.
+                if (view.shouldDecorateStreamDatabaseMessage() &&
+                    !message->id.isEmpty())
+                {
+                    if (auto proxy =
+                            view.channel_->findMessageByID(message->id))
+                    {
+                        proxy->flags.set(
+                            MessageFlag::Disabled,
+                            message->flags.has(MessageFlag::Disabled));
+                        proxy->flags.set(MessageFlag::InvalidReplyTarget,
+                                         message->flags.has(
+                                             MessageFlag::InvalidReplyTarget));
+                    }
+                }
+                // Coalesce bulk moderation into one layout/paint pass.
+                // Hidden views perform the queued layout when shown.
+                if (!view.layoutQueued_)
+                {
+                    view.layoutQueued_ = true;
+                    QTimer::singleShot(0, &view, [&view] {
+                        view.queueLayout();
+                        view.queueUpdate();
+                    });
+                }
+            });
+        });
+
+    this->channelConnections_.managedConnect(
         Channel::messageRemoved,
         [this](Channel *source, size_t, const MessagePtr &message) {
             if (source != this->underlyingChannel_.get())
@@ -3029,7 +3109,14 @@ bool ChannelView::shouldIncludeMessage(const MessagePtr &m) const
     if (this->split_ && this->split_->filterActivity() &&
         !this->split_->isActivityPane())
     {
-        if (isActivityTikTokGiftMessage(*m))
+        if (m->flags.hasAny({MessageFlag::Raid, MessageFlag::WatchStreak}))
+        {
+            if (this->split_->showRaidsAndWatchStreaks())
+            {
+                return false;
+            }
+        }
+        else if (isActivityTikTokGiftMessage(*m))
         {
             if (shouldShowTikTokGiftInActivityPane(
                     *m, this->split_->tiktokActivityMinimumDiamonds()))
@@ -3590,7 +3677,19 @@ void ChannelView::paintEvent(QPaintEvent *event)
 
     QPainter painter(this);
 
-    painter.fillRect(this->rect(), this->messageColors_.channelBackground);
+    if (this->hasThemeBackdrop())
+    {
+        const auto *theme = getTheme();
+        const auto *topLevel = this->window();
+        this->themeBackdrop_.paint(
+            painter, this->rect(), this->mapTo(topLevel, QPoint(0, 0)),
+            topLevel->size(), theme->effect(),
+            this->messageColors_.channelBackground, theme->effectSeconds());
+    }
+    else
+    {
+        painter.fillRect(this->rect(), this->messageColors_.channelBackground);
+    }
 
     // draw messages
     this->drawMessages(painter, event->rect());

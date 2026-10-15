@@ -5,6 +5,7 @@
 #pragma once
 
 #include "messages/Message.hpp"
+#include "util/BoundedUniqueSet.hpp"
 #include "util/QStringHash.hpp"
 
 #include <pajlada/signals/signal.hpp>
@@ -61,10 +62,17 @@ public:
     pajlada::Signals::Signal<int> sendWaitUpdate;
 
 private:
+    friend struct YouTubeLiveChatTestAccess;
+
     using ActiveLiveChatIdCallback =
         std::function<void(std::shared_ptr<YouTubeAccount>, QString)>;
+    using LiveVideoProbe = std::function<void(std::function<void(QString)>)>;
 
     void resolveVideoId();
+    std::function<bool()> discoveryGuard() const;
+    static void probeLiveVideoIdInParallel(
+        LiveVideoProbe first, LiveVideoProbe second,
+        std::function<void(QString)> onResolved);
     void resolveChannelIdFromSource(const QString &source,
                                     std::function<void(QString)> onResolved);
     void resolveChannelIdFromHandle(const QString &handle,
@@ -120,6 +128,7 @@ private:
     void scheduleResolve(int delayMs);
     int liveDiscoveryRetryDelayMs() const;
     QStringList innertubeBootstrapUrls() const;
+    void cacheInnertubeContextFromHtml(const QString &html);
     bool updateInnertubeContextFromHtml(const QString &html);
     void finishInnertubeBootstrapFailure(QString failureText,
                                          QString blockedText);
@@ -151,6 +160,8 @@ private:
                                      const QStringList &patterns);
     static QString extractLiveChatContinuation(
         const QJsonObject &liveChatRenderer);
+    static QString extractLiveChatViewContinuation(
+        const QJsonObject &liveChatRenderer, bool onlyIfUnselected = false);
     static QString extractVideoChannelId(const QString &html);
     static QString extractEmbedLiveVideoId(const QString &html);
     static QString extractLiveVideoId(const QString &html,
@@ -200,7 +211,7 @@ private:
     std::optional<std::chrono::steady_clock::time_point> sendWaitEnd_;
 
     std::shared_ptr<bool> lifetimeGuard_;
-    std::unordered_set<QString> seenMessageIds_;
+    BoundedUniqueSet<QString> seenMessageIds_{32768};
     std::unordered_map<QString, QString> liveChatBanIds_;
     QString joinedLiveVideoId_;
 };

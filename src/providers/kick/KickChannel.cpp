@@ -36,6 +36,8 @@
 
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRegularExpression>
+#include <QSet>
 
 #include <algorithm>
 #include <atomic>
@@ -178,12 +180,15 @@ QString makeLocalKickMessageID()
 
 bool isKickLevelBadge(const KickPrivateUserBadgeInfo &badge)
 {
+    static const QRegularExpression levelImagePattern(
+        R"(/chat/badges/(\d+)_)",
+        QRegularExpression::CaseInsensitiveOption);
     auto type = badge.type.toLower();
     return type == u"level"_s || type == u"kick_level"_s ||
            type == u"kick-level"_s || type == u"level_badge"_s ||
            type == u"level-badge"_s || type.contains(u"level"_s) ||
            badge.level > 0 ||
-           badge.imageUrl.contains(u"/chat/badges/"_s, Qt::CaseInsensitive);
+           levelImagePattern.match(badge.imageUrl).hasMatch();
 }
 
 std::unique_ptr<MessageElement> makeKickLevelBadgeElement(
@@ -203,7 +208,7 @@ std::unique_ptr<MessageElement> makeKickLevelBadgeElement(
 
     auto emote = std::make_shared<const Emote>(Emote{
         .name = {name},
-        .images = ImageSet(Image::fromAutoscaledUrl(
+        .images = ImageSet(Image::fromBadgeUrl(
             {badge.imageUrl}, KICK_LEVEL_BADGE_IMAGE_SIZE)),
         .tooltip = Tooltip{name},
         .homePage = {u"https://kick.com/" % slug},
@@ -338,6 +343,16 @@ KickChannel::~KickChannel()
 
 void KickChannel::initialize(const UserInit &init)
 {
+    this->kickAccountConnections_.managedConnect(
+        getApp()->getAccounts()->kick.currentUserChanged,
+        [weak = this->weakFromThis()] {
+            if (auto self = weak.lock())
+            {
+                self->updateKickEmoteAccount();
+                self->reloadKickChannelEmotes();
+            }
+        });
+    this->updateKickEmoteAccount();
     this->setUserInfo(init);
     this->resolveChannelInfo();
 }
@@ -609,6 +624,7 @@ void KickChannel::sendReply(const QString &message, const QString &replyToId,
         localID = pending->id;
         this->pendingSentMessages_.push_back(PendingSentMessage{
             .localID = localID,
+            .userID = pending->userID,
             .messageText = pending->messageText,
             .createdAt = pending->serverReceivedTime,
             .confirmedCallback = std::move(callback),
@@ -710,9 +726,11 @@ void KickChannel::updateOwnIdentityFromMessage(const Message &message)
     }
 }
 
-const KickChannel::CachedOwnIdentity *KickChannel::ownIdentity() const
+const KickChannel::CachedOwnIdentity *KickChannel::ownIdentity(
+    uint64_t userID) const
 {
-    if (!this->ownIdentity_)
+    if (!this->ownIdentity_ ||
+        this->ownIdentity_->userID != QString::number(userID))
     {
         return nullptr;
     }
@@ -721,19 +739,13 @@ const KickChannel::CachedOwnIdentity *KickChannel::ownIdentity() const
 
 bool KickChannel::tryReplacePendingSentMessage(const MessagePtr &message)
 {
-    auto account = getApp()->getAccounts()->kick.current();
-    if (!account || account->isAnonymous() ||
-        message->userID != QString::number(account->userID()))
-    {
-        return false;
-    }
-
     this->prunePendingSentMessages(QDateTime::currentDateTime());
 
     for (auto it = this->pendingSentMessages_.begin();
          it != this->pendingSentMessages_.end(); ++it)
     {
-        if (it->messageText != message->messageText)
+        if (it->userID != message->userID ||
+            it->messageText != message->messageText)
         {
             continue;
         }
@@ -861,7 +873,7 @@ bool KickChannel::isBroadcaster() const
     }
 
     auto currentUser = accounts->kick.current();
-    if (!currentUser)
+    if (!currentUser || currentUser->isAnonymous() || this->userID() == 0)
     {
         return false;
     }
@@ -1277,53 +1289,113 @@ void KickChannel::resolveChannelInfo()
         });
 }
 
+void KickChannel::updateKickEmoteAccount()
+{
+    this->kickSessionConnections_.clear();
+    ++this->kickEmoteGeneration_;
+    this->kickChannelEmotes_.set(std::make_shared<const EmoteMap>());
+    const auto account = getApp()->getAccounts()->kick.current();
+    if (account && !account->isAnonymous())
+    {
+        this->kickSessionConnections_.managedConnect(
+            account->chatIdentityAuthUpdated, [weak = this->weakFromThis()] {
+                if (auto self = weak.lock())
+                {
+                    ++self->kickEmoteGeneration_;
+                    self->kickChannelEmotes_.set(
+                        std::make_shared<const EmoteMap>());
+                    self->reloadKickChannelEmotes();
+                }
+            });
+    }
+}
+
+void KickChannel::applyKickEmoteSets(
+    const std::vector<KickPrivateEmoteSetInfo> &sets, uint64_t generation,
+    bool includePersonal)
+{
+    if (generation != this->kickEmoteGeneration_)
+    {
+        return;
+    }
+    auto emotes = std::make_shared<EmoteMap>();
+    for (const auto &set : sets)
+    {
+        const auto collectibleSet =
+            set.name.compare(u"Collectibles", Qt::CaseInsensitive) == 0;
+        if ((!set.userID || *set.userID == 0) &&
+            !(includePersonal && collectibleSet))
+        {
+            continue;  // public globals are kept by KickChatServer
+        }
+        for (const auto &info : set.emotes)
+        {
+            if (info.emoteID == 0 || info.name.isEmpty())
+            {
+                continue;
+            }
+            auto emote = KickEmotes::emoteForID(QString::number(info.emoteID),
+                                                info.name, info.imageUrl);
+            (*emotes)[emote->name] = emote;
+        }
+    }
+    this->kickChannelEmotes_.set(std::move(emotes));
+}
+
 void KickChannel::reloadKickChannelEmotes()
 {
+    const auto account = getApp()->getAccounts()->kick.current();
+    const auto credential = account && !account->isAnonymous()
+                                ? account->chatIdentityToken()
+                                : QString{};
+    const auto generation = ++this->kickEmoteGeneration_;
     auto weak = this->weakFromThis();
+    auto receive =
+        [weak, generation](
+            const ExpectedStr<std::vector<KickPrivateEmoteSetInfo>> &res,
+            bool includePersonal) {
+            auto self = weak.lock();
+            if (!self || self->kickEmoteGeneration_ != generation)
+            {
+                return;
+            }
+            if (res)
+            {
+                self->applyKickEmoteSets(*res, generation, includePersonal);
+                return;
+            }
+            qCWarning(chatterinoKick)
+                << *self << "Failed to fetch channel emotes:" << res.error();
+            QTimer::singleShot(std::chrono::seconds(30), [weak, generation] {
+                if (auto channel = weak.lock();
+                    channel && channel->kickEmoteGeneration_ == generation)
+                {
+                    channel->reloadKickChannelEmotes();
+                }
+            });
+        };
     KickApi::privateEmotesInChannel(
         this->slug_,
-        [weak](const ExpectedStr<std::vector<KickPrivateEmoteSetInfo>> &res) {
+        [weak, generation, credential, receive](const auto &res) {
             auto self = weak.lock();
-            if (!self)
+            if (!self || self->kickEmoteGeneration_ != generation)
             {
                 return;
             }
-
-            if (!res)
+            if (!res && !credential.isEmpty())
             {
-                qCWarning(chatterinoKick)
-                    << *self << "Failed to fetch channel emotes:"
-                    << res.error();
-                self->kickChannelEmotes_.set(EMPTY_EMOTE_MAP);
+                // An expired website session must not break public emotes.
+                self->kickChannelEmotes_.set(
+                    std::make_shared<const EmoteMap>());
+                KickApi::privateEmotesInChannel(
+                    self->slug_, [receive](const auto &publicResult) {
+                        receive(publicResult, false);
+                    });
                 return;
             }
-
-            auto emotes = std::make_shared<EmoteMap>();
-            for (const auto &set : *res)
-            {
-                if (!set.userID)
-                {
-                    continue;  // global set
-                }
-
-                for (const auto &emoteInfo : set.emotes)
-                {
-                    if (emoteInfo.emoteID == 0 || emoteInfo.name.isEmpty())
-                    {
-                        continue;
-                    }
-
-                    auto id = QString::number(emoteInfo.emoteID);
-                    auto emote = KickEmotes::emoteForID(id, emoteInfo.name);
-                    (*emotes)[emote->name] = emote;
-                }
-            }
-
-            self->kickChannelEmotes_.set(std::move(emotes));
-            qCDebug(chatterinoKick)
-                << "Loaded" << self->kickChannelEmotes_.get()->size()
-                << "channel emotes for" << *self;
-        });
+            receive(res, !credential.isEmpty());
+        },
+        credential);
 }
 
 void KickChannel::refreshOwnIdentity()
@@ -1375,6 +1447,7 @@ void KickChannel::cacheOwnIdentityFromUserInfo(
     bool hasVip = false;
     bool hasSubscriberBadge = false;
     std::vector<std::unique_ptr<MessageElement>> levelBadges;
+    QSet<QString> emittedBadges;
     for (const auto &badge : info.badges)
     {
         if (!badge.active || !badge.selected)
@@ -1413,10 +1486,26 @@ void KickChannel::cacheOwnIdentityFromUserInfo(
                                      MessageElementFlag::BadgeSubscription};
                 }
             }
-            return KickBadges::lookup(type.toStdString());
+            return KickBadges::lookup(type.toStdString(), badge.imageUrl,
+                                       badge.text);
         }();
         if (emote)
         {
+            auto badgeKey = type;
+            badgeKey.replace('-', '_');
+            if (badgeKey == "lead_moderator")
+            {
+                badgeKey = "moderator";
+            }
+            if (!KickBadges::lookup(type.toStdString()).first)
+            {
+                badgeKey += ':' + badge.imageUrl;
+            }
+            if (emittedBadges.contains(badgeKey))
+            {
+                continue;
+            }
+            emittedBadges.insert(badgeKey);
             identity.badges.emplace_back(
                 std::make_unique<BadgeElement>(emote, flag));
         }
@@ -1465,7 +1554,7 @@ void KickChannel::setSubscriberBadges(
         auto emote = std::make_shared<const Emote>(Emote{
             .name = {u"Subscriber"_s},
             .images = ImageSet(
-                Image::fromAutoscaledUrl({badge.imageUrl}, 18)),
+                Image::fromBadgeUrl({badge.imageUrl}, 18)),
             .tooltip = Tooltip{std::move(tooltip)},
             .homePage = {u"https://kick.com/" % this->slug_},
         });

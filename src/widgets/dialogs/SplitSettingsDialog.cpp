@@ -542,6 +542,15 @@ SplitSettingsDialog::SplitSettingsDialog(bool isActivityPane,
         appearanceLayout->addRow(createCheckboxRow(
             this->ui_.collapseGiftedSubscriptions,
             collapseGiftedSubscriptionsTooltip, this));
+
+        this->ui_.showRaidsAndWatchStreaks =
+            new QCheckBox("Raids and watch streaks");
+        this->ui_.showRaidsAndWatchStreaks->setChecked(true);
+        const auto raidsAndWatchStreaksTooltip = QStringLiteral(
+            "Show Twitch raids, Kick hosts, and Twitch watch streaks in this "
+            "Activity tab. Turn this off to keep these events in the main chat.");
+        appearanceLayout->addRow(createCheckboxRow(
+            this->ui_.showRaidsAndWatchStreaks, raidsAndWatchStreaksTooltip, this));
     }
 
     rootLayout->addWidget(appearanceGroup);
@@ -632,6 +641,20 @@ bool SplitSettingsDialog::collapseGiftedSubscriptions() const
 {
     return this->ui_.collapseGiftedSubscriptions == nullptr ||
            this->ui_.collapseGiftedSubscriptions->isChecked();
+}
+
+void SplitSettingsDialog::setShowRaidsAndWatchStreaks(bool enabled)
+{
+    if (this->ui_.showRaidsAndWatchStreaks)
+    {
+        this->ui_.showRaidsAndWatchStreaks->setChecked(enabled);
+    }
+}
+
+bool SplitSettingsDialog::showRaidsAndWatchStreaks() const
+{
+    return this->ui_.showRaidsAndWatchStreaks == nullptr ||
+           this->ui_.showRaidsAndWatchStreaks->isChecked();
 }
 
 void SplitSettingsDialog::setActivityTimeDisplayMode(
@@ -775,6 +798,10 @@ void SplitSettingsDialog::scaleChangedEvent(float newScale)
     if (this->ui_.collapseGiftedSubscriptions)
     {
         this->ui_.collapseGiftedSubscriptions->setFont(uiFont);
+    }
+    if (this->ui_.showRaidsAndWatchStreaks)
+    {
+        this->ui_.showRaidsAndWatchStreaks->setFont(uiFont);
     }
     if (this->ui_.slowerChat)
     {
