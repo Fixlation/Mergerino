@@ -1,5 +1,6 @@
 #include "providers/kick/KickAccountManager.hpp"
 
+#include "common/AccountAccess.hpp"
 #include "common/QLogging.hpp"
 #include "KickApi.hpp"
 #include "providers/kick/KickAccount.hpp"
@@ -54,6 +55,11 @@ std::vector<QString> KickAccountManager::usernames() const
 std::shared_ptr<KickAccount> KickAccountManager::findUserByUsername(
     const QString &username) const
 {
+    if (!accountAccessError(ProviderId::Kick, username).isEmpty())
+    {
+        return nullptr;
+    }
+
     for (const auto &acc : this->accounts.raw())
     {
         if (QString::compare(acc->username(), username, Qt::CaseInsensitive) ==
@@ -92,6 +98,14 @@ void KickAccountManager::reloadUsers()
         auto data = KickAccountData::loadRaw(uid);
         if (!data)
         {
+            continue;
+        }
+
+        if (const auto error =
+                accountAccessError(ProviderId::Kick, data->username);
+            !error.isEmpty())
+        {
+            qCWarning(chatterinoKick) << error;
             continue;
         }
 
@@ -141,6 +155,7 @@ void KickAccountManager::load()
         else
         {
             qCDebug(chatterinoKick) << "Kick user updated to anonymous";
+            getKickApi()->setAuth({});
             this->currentUser_ = this->anonymousUser_;
         }
 

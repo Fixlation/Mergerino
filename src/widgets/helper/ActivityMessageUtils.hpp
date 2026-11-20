@@ -33,6 +33,7 @@ bool shouldShowMessageInActivityPane(const Message &message,
                                      uint32_t twitchMinimumBits = 100,
                                      uint32_t kickMinimumKicks = 100,
                                      uint32_t tiktokGiftMinimumDiamonds = 0,
-                                     bool showRaidsAndWatchStreaks = true);
+                                     bool showRaids = true,
+                                     bool showWatchStreaks = false);
 
 }  // namespace chatterino

@@ -23,6 +23,7 @@ int ThemeEffect::frameInterval() const
     {
         case ThemeEffectKind::Embers:
         case ThemeEffectKind::Rain:
+        case ThemeEffectKind::Scene:
             return 33;
         case ThemeEffectKind::Aurora:
         case ThemeEffectKind::Drift:
@@ -60,6 +61,8 @@ QString themeEffectKindKey(ThemeEffectKind kind)
             return "embers";
         case ThemeEffectKind::Rain:
             return "rain";
+        case ThemeEffectKind::Scene:
+            return "scene";
         case ThemeEffectKind::None:
             break;
     }
@@ -71,7 +74,7 @@ ThemeEffectKind themeEffectKindFromKey(const QString &key)
     for (const auto kind :
          {ThemeEffectKind::Aurora, ThemeEffectKind::Drift,
           ThemeEffectKind::Starfield, ThemeEffectKind::Embers,
-          ThemeEffectKind::Rain})
+          ThemeEffectKind::Rain, ThemeEffectKind::Scene})
     {
         if (key.compare(themeEffectKindKey(kind), Qt::CaseInsensitive) == 0)
         {
@@ -83,6 +86,10 @@ ThemeEffectKind themeEffectKindFromKey(const QString &key)
 
 QString themeEffectKindName(ThemeEffectKind kind)
 {
+    if (kind == ThemeEffectKind::Scene)
+    {
+        return "Interactive scene";
+    }
     for (const auto &[name, value] : themeEffectKinds())
     {
         if (value == kind)
@@ -104,6 +111,14 @@ ThemeEffect themeEffectFromTheme(const QJsonObject &theme)
     if (!effect.isAnimated())
     {
         return {};
+    }
+    if (effect.isScene())
+    {
+        effect.scene = stored.value("scene").toString();
+        if (effect.scene.isEmpty())
+        {
+            return {};
+        }
     }
 
     const auto colors = stored.value("colors").toArray();
@@ -137,12 +152,17 @@ QJsonObject withThemeEffect(QJsonObject theme, const ThemeEffect &effect)
         {
             colors.append(storedColor(color));
         }
-        metadata["mergerinoEffect"] = QJsonObject{
+        QJsonObject stored{
             {"type", themeEffectKindKey(effect.kind)},
             {"colors", colors},
             {"speed", effect.speed},
             {"intensity", effect.intensity},
         };
+        if (effect.isScene())
+        {
+            stored["scene"] = effect.scene;
+        }
+        metadata["mergerinoEffect"] = stored;
     }
     else
     {

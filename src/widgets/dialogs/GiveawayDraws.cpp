@@ -40,6 +40,17 @@ constexpr int WHEEL_RESULT_MS = 4000;
 constexpr double WHEEL_MIN_WEDGE = 2.5;
 constexpr int WHEEL_READOUT_HEIGHT = 22;
 
+// The widget's font already follows the UI scale, so text drawn under a scaled
+// painter has to be brought back down or it would be scaled twice.
+QFont fontUnderScale(QFont font, qreal scale)
+{
+    if (font.pointSizeF() > 0)
+    {
+        font.setPointSizeF(font.pointSizeF() / scale);
+    }
+    return font;
+}
+
 const QColor MARKER_GOLD(0xe4, 0xae, 0x39);
 
 QColor mixColors(const QColor &from, const QColor &to, double amount)
@@ -156,7 +167,7 @@ GiveawayReel::GiveawayReel(QWidget *parent)
     , settle_(new QVariantAnimation(this))
 {
     this->setObjectName(QStringLiteral("GiveawayReel"));
-    this->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    this->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
 
     this->spin_->setDuration(REEL_SPIN_MS);
     this->spin_->setStartValue(0.0);
@@ -273,9 +284,16 @@ void GiveawayReel::stop()
     this->update();
 }
 
+void GiveawayReel::setContentScale(qreal scale)
+{
+    this->contentScale_ = scale;
+    this->update();
+}
+
 const QPixmap &GiveawayReel::platformIcon(MessagePlatform platform)
 {
-    const auto ratio = this->devicePixelRatioF();
+    // Drawn under the scaled painter, so the pixmap carries that scale as well
+    const auto ratio = this->devicePixelRatioF() * this->contentScale_;
     if (!qFuzzyCompare(this->platformIconRatio_, ratio))
     {
         this->platformIcons_ = {};
@@ -319,22 +337,29 @@ void GiveawayReel::paintEvent(QPaintEvent * /*event*/)
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
 
-    const QRectF track = QRectF(this->rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    const auto scale = this->contentScale_;
+    const double width = this->width() / scale;
+    const double height = this->height() / scale;
+    painter.scale(scale, scale);
+
+    const double inset = 0.5 / scale;
+    const QRectF track =
+        QRectF(0, 0, width, height).adjusted(inset, inset, -inset, -inset);
     QPainterPath trackPath;
     trackPath.addRoundedRect(track, 6, 6);
     painter.fillPath(trackPath, this->colors_.background);
     painter.save();
     painter.setClipPath(trackPath);
 
-    const double center = this->width() / 2.0;
+    const double center = width / 2.0;
     const double cardTop = 11;
-    const double cardHeight = this->height() - 2 * cardTop;
+    const double cardHeight = height - 2 * cardTop;
     const auto cardColor =
         mixColors(this->colors_.panel, this->colors_.text, 0.07);
-    auto nameFont = this->font();
+    auto nameFont = fontUnderScale(this->font(), scale);
     nameFont.setBold(true);
-    auto smallFont = this->font();
-    smallFont.setPointSizeF(std::max(6.0, smallFont.pointSizeF() * 0.85));
+    auto smallFont = fontUnderScale(this->font(), scale);
+    smallFont.setPointSizeF(smallFont.pointSizeF() * 0.85);
     const QFontMetricsF nameMetrics(nameFont);
 
     const int firstVisible = std::max(
@@ -395,36 +420,34 @@ void GiveawayReel::paintEvent(QPaintEvent * /*event*/)
     painter.setOpacity(1.0);
 
     // Fade the cards out towards both edges
-    const double fade = std::min(64.0, this->width() / 5.0);
+    const double fade = std::min(64.0, width / 5.0);
     QLinearGradient left(track.left(), 0, track.left() + fade, 0);
     left.setColorAt(0, this->colors_.background);
     left.setColorAt(1, withAlpha(this->colors_.background, 0));
-    painter.fillRect(QRectF(track.left(), 0, fade, this->height()), left);
+    painter.fillRect(QRectF(track.left(), 0, fade, height), left);
     QLinearGradient right(track.right(), 0, track.right() - fade, 0);
     right.setColorAt(0, this->colors_.background);
     right.setColorAt(1, withAlpha(this->colors_.background, 0));
-    painter.fillRect(QRectF(track.right() - fade, 0, fade, this->height()),
-                     right);
+    painter.fillRect(QRectF(track.right() - fade, 0, fade, height), right);
 
     // Marker
     if (!this->cards_.empty())
     {
-        painter.fillRect(QRectF(center - 1, 0, 2, this->height()),
-                         MARKER_GOLD);
+        painter.fillRect(QRectF(center - 1, 0, 2, height), MARKER_GOLD);
         QPainterPath arrows;
         arrows.moveTo(center - 7, 0);
         arrows.lineTo(center + 7, 0);
         arrows.lineTo(center, 8);
         arrows.closeSubpath();
-        arrows.moveTo(center - 7, this->height());
-        arrows.lineTo(center + 7, this->height());
-        arrows.lineTo(center, this->height() - 8);
+        arrows.moveTo(center - 7, height);
+        arrows.lineTo(center + 7, height);
+        arrows.lineTo(center, height - 8);
         arrows.closeSubpath();
         painter.fillPath(arrows, MARKER_GOLD);
     }
     painter.restore();
 
-    painter.setPen(QPen(this->colors_.border, 1));
+    painter.setPen(QPen(this->colors_.border, 1 / scale));
     painter.setBrush(Qt::NoBrush);
     painter.drawPath(trackPath);
 }
@@ -489,7 +512,15 @@ GiveawayWheel::~GiveawayWheel() = default;
 
 QSize GiveawayWheel::sizeHint() const
 {
-    return {220, 228};
+    return {qRound(220 * this->contentScale_),
+            qRound(228 * this->contentScale_)};
+}
+
+void GiveawayWheel::setContentScale(qreal scale)
+{
+    this->contentScale_ = scale;
+    this->rebuildFace();
+    this->update();
 }
 
 void GiveawayWheel::setColors(const GiveawayDrawColors &colors)
@@ -550,10 +581,11 @@ void GiveawayWheel::applyPendingEntries()
 
 QRectF GiveawayWheel::wheelRect() const
 {
-    const double size =
-        std::min<double>(this->width() - 4,
-                         this->height() - WHEEL_READOUT_HEIGHT - 10);
-    return {(this->width() - size) / 2.0, 8, size, size};
+    const auto scale = this->contentScale_;
+    const double size = std::min<double>(
+        this->width() - 4 * scale,
+        this->height() - (WHEEL_READOUT_HEIGHT + 10) * scale);
+    return {(this->width() - size) / 2.0, 8 * scale, size, size};
 }
 
 int GiveawayWheel::sliceAt(double angle) const
@@ -661,12 +693,14 @@ void GiveawayWheel::rebuildFace()
         font.setBold(true);
         const auto arcHeight =
             radius * 0.72 * qDegreesToRadians(smallest) * 0.8;
-        font.setPixelSize(static_cast<int>(std::clamp(arcHeight, 7.0, 12.0)));
+        font.setPixelSize(static_cast<int>(
+            std::clamp(arcHeight, 7.0 * this->contentScale_,
+                       12.0 * this->contentScale_)));
         painter.setFont(font);
         painter.setPen(QColor(0x1b, 0x1b, 0x1f));
         const QFontMetricsF metrics(font);
         const double inner = radius * 0.26;
-        const double outer = radius - 9;
+        const double outer = radius - 9 * this->contentScale_;
         for (size_t i = 0; i < this->entries_.size(); ++i)
         {
             const auto span = (i + 1 < this->sliceStarts_.size()
@@ -828,8 +862,9 @@ void GiveawayWheel::paintEvent(QPaintEvent * /*event*/)
 
     // Pointer, kicked back a little whenever a slice boundary passes it
     painter.save();
-    painter.translate(center.x(), rect.top() - 6);
+    painter.translate(center.x(), rect.top() - 6 * this->contentScale_);
     painter.rotate(this->pointerKick_);
+    painter.scale(this->contentScale_, this->contentScale_);
     QPainterPath pointer;
     pointer.moveTo(-8, 0);
     pointer.lineTo(8, 0);
@@ -865,8 +900,9 @@ void GiveawayWheel::paintEvent(QPaintEvent * /*event*/)
     }
     painter.setFont(font);
     painter.setPen(readoutColor);
-    const QRectF readoutRect(0, this->height() - WHEEL_READOUT_HEIGHT,
-                             this->width(), WHEEL_READOUT_HEIGHT);
+    const auto readoutHeight = WHEEL_READOUT_HEIGHT * this->contentScale_;
+    const QRectF readoutRect(0, this->height() - readoutHeight, this->width(),
+                             readoutHeight);
     painter.drawText(readoutRect, Qt::AlignCenter,
                      QFontMetricsF(font).elidedText(readout, Qt::ElideRight,
                                                     readoutRect.width() - 8));
@@ -973,7 +1009,14 @@ GiveawayEmoteTile::GiveawayEmoteTile(QWidget *parent)
 
 QSize GiveawayEmoteTile::sizeHint() const
 {
-    return {44, 44};
+    return {qRound(44 * this->contentScale_), qRound(44 * this->contentScale_)};
+}
+
+void GiveawayEmoteTile::setContentScale(qreal scale)
+{
+    this->contentScale_ = scale;
+    this->setFixedSize(this->sizeHint());
+    this->update();
 }
 
 void GiveawayEmoteTile::setColors(const GiveawayDrawColors &colors)
@@ -1245,8 +1288,12 @@ void GiveawayEmoteTile::paintEvent(QPaintEvent * /*event*/)
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    const QRectF frame = QRectF(this->rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-    painter.setPen(QPen(this->colors_.border, 1));
+    const auto scale = this->contentScale_;
+    painter.scale(scale, scale);
+    const double inset = 0.5 / scale;
+    const QRectF frame = QRectF(QPointF(), QSizeF(this->size()) / scale)
+                             .adjusted(inset, inset, -inset, -inset);
+    painter.setPen(QPen(this->colors_.border, 1 / scale));
     painter.setBrush(this->colors_.background);
     painter.drawRoundedRect(frame, 5, 5);
 

@@ -63,6 +63,7 @@ public:
 
 private:
     friend struct YouTubeLiveChatTestAccess;
+    friend class PriorityChatTestAccess;
 
     using ActiveLiveChatIdCallback =
         std::function<void(std::shared_ptr<YouTubeAccount>, QString)>;
@@ -146,6 +147,7 @@ private:
                                        const QString &error);
     void updateModeratorPrivilegesFromRenderer(const QJsonObject &renderer);
     void updateLiveViewerCount(uint64_t viewerCount);
+    void refreshLiveViewerCount();
     void setLive(bool live);
     void setStatusText(QString text, bool notifyAsSystemMessage = false);
     bool shouldResolveLiveStreamFromSource() const;
@@ -207,6 +209,7 @@ private:
     uint64_t liveViewerCount_{0};
     QElapsedTimer liveChatSessionRefreshTimer_;
     QElapsedTimer liveChatProgressTimer_;
+    QElapsedTimer viewerCountRefreshTimer_;
     QTimer sendWaitTimer_;
     std::optional<std::chrono::steady_clock::time_point> sendWaitEnd_;
 

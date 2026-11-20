@@ -10,6 +10,7 @@
 #include "twitch-eventsub-ws/payloads/channel-chat-user-message-hold-v1.hpp"
 #include "twitch-eventsub-ws/payloads/channel-chat-user-message-update-v1.hpp"
 #include "twitch-eventsub-ws/payloads/channel-moderate-v2.hpp"
+#include "twitch-eventsub-ws/payloads/channel-shoutout-create-v1.hpp"
 #include "twitch-eventsub-ws/payloads/channel-suspicious-user-message-v1.hpp"
 #include "twitch-eventsub-ws/payloads/channel-suspicious-user-update-v1.hpp"
 
@@ -192,5 +193,10 @@ MessagePtr makeUserMessageHeldMessage(
 MessagePtr makeUserMessageUpdateMessage(
     TwitchChannel *channel, const QDateTime &time,
     const lib::payload::channel_chat_user_message_update::v1::Event &event);
+
+/// <MODERATOR> gave a shoutout to <CHANNEL>.
+MessagePtr makeShoutoutMessage(
+    TwitchChannel *channel, const QDateTime &time,
+    const lib::payload::channel_shoutout_create::v1::Event &event);
 
 }  // namespace chatterino::eventsub

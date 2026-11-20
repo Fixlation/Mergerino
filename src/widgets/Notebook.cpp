@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/Notebook.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/Args.hpp"
@@ -3098,6 +3099,32 @@ void Notebook::paintEvent(QPaintEvent *event)
     auto scale = this->scale();
 
     QPainter painter(this);
+
+    if (this->showTabs_ && this->theme->effect().isScene())
+    {
+        QRect strip;
+        switch (this->tabLocation_)
+        {
+            case NotebookTabLocation::Top:
+                strip = QRect(0, 0, this->width(), this->lineOffset_);
+                break;
+            case NotebookTabLocation::Bottom:
+                strip = QRect(0, this->lineOffset_, this->width(),
+                              this->height() - this->lineOffset_);
+                break;
+            case NotebookTabLocation::Left:
+                strip = QRect(0, 0, this->lineOffset_, this->height());
+                break;
+            case NotebookTabLocation::Right:
+                strip = QRect(this->lineOffset_, 0,
+                              this->width() - this->lineOffset_,
+                              this->height());
+                break;
+        }
+        scenes::ThemeSceneHost::instance().paintSurface(
+            this, painter, strip, scenes::SceneSurface::Tabs,
+            this->theme->tabs.regular.backgrounds.regular);
+    }
 
     if (this->showTabs_ && !this->folderDropTargetRect_.isNull())
     {

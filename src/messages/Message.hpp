@@ -127,6 +127,10 @@ struct Message {
 
     MessagePlatform platform = MessagePlatform::AnyOrTwitch;
 
+    // Reported membership tenure. A badge can establish only a minimum.
+    std::optional<uint32_t> membershipMonths;
+    std::optional<bool> activeMember;
+
     // The original Kick chat-message object. Kick's pin endpoint requires the
     // complete message payload rather than only the message ID.
     QByteArray kickMessageJson;

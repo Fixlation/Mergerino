@@ -148,6 +148,7 @@ TwitchChannel::TwitchChannel(const QString &name)
         [this](const auto & /*oldAccount*/, const auto & /*newAccount*/) {
             this->eventSubChannelChatUserMessageHoldHandle.reset();
             this->eventSubChannelChatUserMessageUpdateHandle.reset();
+            this->eventSubChannelShoutoutCreateHandle.reset();
             this->eventSubChannelModerateHandle.reset();
             this->eventSubAutomodMessageHoldHandle.reset();
             this->eventSubAutomodMessageUpdateHandle.reset();
@@ -1634,6 +1635,7 @@ void TwitchChannel::refreshPubSub()
         this->eventSubSuspiciousUserUpdateHandle.reset();
         this->eventSubChannelChatUserMessageHoldHandle.reset();
         this->eventSubChannelChatUserMessageUpdateHandle.reset();
+        this->eventSubChannelShoutoutCreateHandle.reset();
         return;
     }
 
@@ -1727,11 +1729,31 @@ void TwitchChannel::refreshPubSub()
                     },
             });
 
+        // Twitch only sends shoutouts to the broadcaster and moderators.
+        this->eventSubChannelShoutoutCreateHandle =
+            getApp()->getEventSub()->subscribe(eventsub::SubscriptionRequest{
+                .subscriptionType = "channel.shoutout.create",
+                .subscriptionVersion = "1",
+                .ownerTwitchUserID = currentTwitchUserID,
+                .conditions =
+                    {
+                        {
+                            "broadcaster_user_id",
+                            roomId,
+                        },
+                        {
+                            "moderator_user_id",
+                            currentTwitchUserID,
+                        },
+                    },
+            });
+
         this->eventSubChannelChatUserMessageHoldHandle.reset();
         this->eventSubChannelChatUserMessageUpdateHandle.reset();
     }
     else
     {
+        this->eventSubChannelShoutoutCreateHandle.reset();
         this->eventSubChannelModerateHandle.reset();
         this->eventSubAutomodMessageHoldHandle.reset();
         this->eventSubAutomodMessageUpdateHandle.reset();

@@ -28,7 +28,7 @@ double contrast(const QColor &foreground, const QColor &background)
 }
 }  // namespace
 
-TEST(ThemeModes, PickersListNineStaticAndFiveAnimatedThemes)
+TEST(ThemeModes, PickersListNineStaticAndNineAnimatedThemes)
 {
     mock::BaseApplication app;
     const auto available = app.theme.availableThemes();
@@ -44,7 +44,8 @@ TEST(ThemeModes, PickersListNineStaticAndFiveAnimatedThemes)
         }
     }
     EXPECT_EQ(available.size() - animated, 9);
-    EXPECT_EQ(animated, 5);
+    // Five ambient backdrops and four interactive scenes
+    EXPECT_EQ(animated, 9);
 }
 
 TEST(ThemeModes, EveryPresetKeepsItsIdentityAcrossModes)
@@ -53,6 +54,11 @@ TEST(ThemeModes, EveryPresetKeepsItsIdentityAcrossModes)
     for (const auto &[name, value] : app.theme.availableThemes())
     {
         SCOPED_TRACE(name.toStdString());
+        if (value.toString().startsWith("scene."))
+        {
+            // Interactive scenes keep one look; see ThemeScenes.cpp
+            continue;
+        }
         app.theme.themeName = value.toString();
         app.theme.appearanceMode = "Dark";
         const auto dark = app.theme.currentThemeJson();

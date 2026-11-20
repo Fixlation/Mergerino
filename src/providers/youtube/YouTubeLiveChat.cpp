@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "providers/youtube/YouTubeLiveChat.hpp"
+#include "controllers/priority/PriorityChatModel.hpp"
 
 #include "Application.hpp"
 #include "common/LinkParser.hpp"
@@ -185,6 +186,7 @@ constexpr int YOUTUBE_BLOCKED_RETRY_DELAY_MS = 60000;
 constexpr int YOUTUBE_FOREGROUND_DISCOVERY_DELAY_MS = 5000;
 constexpr int YOUTUBE_BACKGROUND_DISCOVERY_DELAY_MS = 60000;
 constexpr int YOUTUBE_SESSION_REFRESH_MS = 10 * 60 * 1000;
+constexpr int YOUTUBE_VIEWER_COUNT_REFRESH_MS = 30000;
 constexpr int YOUTUBE_HEALTH_CHECK_INTERVAL_MS = 10000;
 constexpr int YOUTUBE_STALL_TIMEOUT_MS = 30000;
 constexpr int YOUTUBE_POLL_REFRESH_FALLBACK_DELAY_MS = 1000;
@@ -539,6 +541,15 @@ bool isYouTubeMembershipBadgeRenderer(const QJsonObject &badgeRenderer)
                             Qt::CaseInsensitive);
 }
 
+bool isYouTubeModeratorBadgeRenderer(const QJsonObject &badgeRenderer)
+{
+    return badgeRenderer["icon"].toObject()["iconType"].toString().compare(
+               QStringLiteral("MODERATOR"), Qt::CaseInsensitive) == 0 ||
+           youtubeAuthorBadgeTooltip(badgeRenderer)
+                   .compare(QStringLiteral("Moderator"), Qt::CaseInsensitive) ==
+               0;
+}
+
 EmotePtr makeYouTubeMembershipBadgeEmote(const QJsonObject &badgeRenderer)
 {
     // YouTube sends channel membership badges as custom thumbnails.
@@ -567,6 +578,7 @@ EmotePtr makeYouTubeMembershipBadgeEmote(const QJsonObject &badgeRenderer)
 void appendYouTubeMembershipBadges(MessageBuilder &builder,
                                    const QJsonObject &authorSource)
 {
+    if (authorSource["authorBadges"].isArray()) builder->activeMember = false;
     for (const auto &badgeValue : authorSource["authorBadges"].toArray())
     {
         const auto badgeRenderer =
@@ -574,6 +586,21 @@ void appendYouTubeMembershipBadges(MessageBuilder &builder,
         if (badgeRenderer.isEmpty())
         {
             continue;
+        }
+
+        // Priority Chat reads the author's role from this tag.
+        if (isYouTubeModeratorBadgeRenderer(badgeRenderer) &&
+            !builder->externalBadges.contains(
+                QStringLiteral("youtube:moderator")))
+            builder->externalBadges.append(
+                QStringLiteral("youtube:moderator"));
+
+        if (isYouTubeMembershipBadgeRenderer(badgeRenderer))
+        {
+            builder->activeMember = true;
+            if (auto months = priority::youtubeBadgeMonths(
+                    youtubeAuthorBadgeTooltip(badgeRenderer)))
+                builder->membershipMonths = static_cast<uint32_t>(*months);
         }
 
         if (const auto badge = makeYouTubeMembershipBadgeEmote(badgeRenderer))
@@ -2901,6 +2928,7 @@ void YouTubeLiveChat::beginLiveChatSession(QString continuation,
     this->activePollStreak_ = 0;
     this->pollRefreshFallbackCount_ = 0;
     this->liveChatSessionRefreshTimer_.restart();
+    this->viewerCountRefreshTimer_.start();
     this->liveChatProgressTimer_.restart();
     this->invalidateLiveChatSession();
     if (this->joinedLiveVideoId_ != this->videoId_)
@@ -3574,6 +3602,13 @@ void YouTubeLiveChat::scheduleHealthCheck(int delayMs)
                                   YOUTUBE_RECONNECT_DELAY_MS, false);
         }
 
+        if (this->live_ && (!this->viewerCountRefreshTimer_.isValid() ||
+                            this->viewerCountRefreshTimer_.elapsed() >=
+                                YOUTUBE_VIEWER_COUNT_REFRESH_MS))
+        {
+            this->refreshLiveViewerCount();
+        }
+
         this->scheduleHealthCheck(YOUTUBE_HEALTH_CHECK_INTERVAL_MS);
     });
 }
@@ -3851,6 +3886,55 @@ void YouTubeLiveChat::updateModeratorPrivilegesFromRenderer(
         this->moderationDisabledAccountChannelId_.clear();
     }
     this->moderationStatusChanged.invoke();
+}
+
+void YouTubeLiveChat::refreshLiveViewerCount()
+{
+    if (!this->running_ || !this->live_ || this->videoId_.isEmpty() ||
+        this->apiKey_.isEmpty() || this->clientVersion_.isEmpty())
+    {
+        return;
+    }
+    this->viewerCountRefreshTimer_.restart();
+    const auto requestedVideoId = this->videoId_;
+    const auto sessionGeneration = this->chatSessionGeneration_;
+    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    const QJsonObject body{
+        {"context", QJsonObject{{"client", makeYoutubeClientContext(
+                                               this->clientVersion_)}}},
+        {"videoId", requestedVideoId},
+    };
+    auto request =
+        NetworkRequest(QString("https://www.youtube.com/youtubei/v1/next?"
+                               "prettyPrint=false&key=%1")
+                           .arg(this->apiKey_)
+                           .toStdString())
+            .type(NetworkRequestType::Post)
+            .headerList(youtubeHeaders())
+            .header("Referer", QString("https://www.youtube.com/watch?v=%1")
+                                   .arg(requestedVideoId))
+            .json(body)
+            .timeout(15000);
+    if (!this->visitorData_.isEmpty())
+    {
+        request =
+            std::move(request).header("X-Goog-Visitor-Id", this->visitorData_);
+    }
+    std::move(request)
+        .onSuccess([this, weak, requestedVideoId,
+                    sessionGeneration](const NetworkResult &result) {
+            if (!weak.lock() || !this->running_ || !this->live_ ||
+                this->videoId_ != requestedVideoId ||
+                sessionGeneration != this->chatSessionGeneration_)
+            {
+                return;
+            }
+            // Metadata polling must not replace the chat continuation or
+            // reconnect a healthy chat session.
+            this->updateLiveViewerCount(
+                extractLiveViewerCount(result.parseJson()));
+        })
+        .execute();
 }
 
 void YouTubeLiveChat::updateLiveViewerCount(uint64_t viewerCount)

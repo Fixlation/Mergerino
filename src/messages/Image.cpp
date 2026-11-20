@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <vector>
 
 // Duration between each check of every Image instance
 const auto IMAGE_POOL_CLEANUP_INTERVAL = std::chrono::minutes(1);
@@ -779,41 +780,57 @@ void ImageExpirationPool::removeImagePtr(Image *rawPtr)
 
 void ImageExpirationPool::freeAll()
 {
+    decltype(this->allImages_) images;
     {
         std::lock_guard<std::mutex> lock(this->mutex_);
-        for (auto it = this->allImages_.begin(); it != this->allImages_.end();)
+        images.swap(this->allImages_);
+    }
+    for (const auto &[raw, weak] : images)
+    {
+        if (auto img = weak.lock())
         {
-            auto img = it->second.lock();
             img->expireFrames();
-            it = this->allImages_.erase(it);
         }
     }
-    this->freeOld();
 }
 
 void ImageExpirationPool::freeOld()
 {
-    std::lock_guard<std::mutex> lock(this->mutex_);
+    // Image destruction removes the image from this pool. Never acquire or
+    // release a strong Image reference while holding the registry mutex.
+    std::vector<std::weak_ptr<Image>> images;
+    {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        images.reserve(this->allImages_.size());
+        for (auto it = this->allImages_.begin(); it != this->allImages_.end();)
+        {
+            if (it->second.expired())
+            {
+                it = this->allImages_.erase(it);
+            }
+            else
+            {
+                images.push_back(it->second);
+                ++it;
+            }
+        }
+    }
 
     size_t numExpired = 0;
     size_t eligible = 0;
 
     auto now = std::chrono::steady_clock::now();
-    for (auto it = this->allImages_.begin(); it != this->allImages_.end();)
+    for (const auto &weak : images)
     {
-        auto img = it->second.lock();
+        auto img = weak.lock();
         if (!img)
         {
-            // This can only really happen from a race condition because ~Image
-            // should remove itself from the ImageExpirationPool automatically.
-            it = this->allImages_.erase(it);
             continue;
         }
 
         if (img->frames_->empty())
         {
             // No frame data, nothing to do
-            ++it;
             continue;
         }
 
@@ -825,12 +842,8 @@ void ImageExpirationPool::freeOld()
         {
             ++numExpired;
             img->expireFrames();
-            // erase without mutex locking issue
-            it = this->allImages_.erase(it);
-            continue;
+            this->removeImagePtr(img.get());
         }
-
-        ++it;
     }
 
 #    ifndef NDEBUG
@@ -839,7 +852,10 @@ void ImageExpirationPool::freeOld()
 #    endif
     DebugCount::set(DebugObject::LastImageGcExpired, numExpired);
     DebugCount::set(DebugObject::LastImageGcEligible, eligible);
-    DebugCount::set(DebugObject::LastImageGcLeft, this->allImages_.size());
+    {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        DebugCount::set(DebugObject::LastImageGcLeft, this->allImages_.size());
+    }
 }
 
 #endif

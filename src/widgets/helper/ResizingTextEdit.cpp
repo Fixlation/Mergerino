@@ -154,6 +154,10 @@ void ResizingTextEdit::keyPressEvent(QKeyEvent *event)
 
     if (doComplete)
     {
+        // Tab belongs to completion, even with no results. Otherwise Qt
+        // propagates it to the parent and moves focus into adjacent panes.
+        event->accept();
+
         // check if there is a completer
         if (!this->completer_)
         {

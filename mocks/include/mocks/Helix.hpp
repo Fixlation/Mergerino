@@ -39,6 +39,11 @@ public:
          ResultCallback<HelixGetChannelFollowersResponse> successCallback,
          std::function<void(QString)> failureCallback),
         (override));
+    MOCK_METHOD(void, getChannelFollowDate,
+                (QString broadcasterID, QString userID, const QObject *caller,
+                 ResultCallback<QDateTime> successCallback,
+                 FailureCallback<QString> failureCallback),
+                (override));
 
     MOCK_METHOD(void, fetchStreams,
                 (QStringList userIds, QStringList userLogins,

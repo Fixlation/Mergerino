@@ -321,6 +321,12 @@ void TwitchIrcServer::initializeConnection(IrcConnection *connection,
     {
         connection->setPassword(oauthToken);
     }
+    else
+    {
+        // Connections are reused when changing accounts. Never leave the
+        // previous account's OAuth token on an anonymous IRC session.
+        connection->setPassword({});
+    }
 
     // https://dev.twitch.tv/docs/irc#connecting-to-the-twitch-irc-server
     // SSL disabled: irc://irc.chat.twitch.tv:6667 (or port 80)
@@ -691,6 +697,10 @@ std::shared_ptr<Channel> TwitchIrcServer::getChannelOrEmptyByID(
 bool TwitchIrcServer::prepareToSend(
     const std::shared_ptr<TwitchChannel> &channel)
 {
+    if (getApp()->getAccounts()->twitch.getCurrent()->isAnon())
+    {
+        return false;
+    }
     std::lock_guard<std::mutex> guard(this->lastMessageMutex_);
 
     auto &lastMessage = channel->hasHighRateLimit() ? this->lastMessageMod_
@@ -1191,6 +1201,11 @@ void TwitchIrcServer::sendRawMessage(const QString &rawMessage)
 {
     std::lock_guard<std::mutex> locker(this->connectionMutex_);
 
+    if (getApp()->getAccounts()->twitch.getCurrent()->isAnon())
+    {
+        return;
+    }
+
     this->writeConnection_->sendRaw(rawMessage);
 }
 
@@ -1285,7 +1300,10 @@ void TwitchIrcServer::open(ConnectionType type)
 
     if (type == ConnectionType::Write)
     {
-        this->writeConnection_->open();
+        if (!getApp()->getAccounts()->twitch.getCurrent()->isAnon())
+        {
+            this->writeConnection_->open();
+        }
     }
     if (type == ConnectionType::Read)
     {

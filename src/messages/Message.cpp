@@ -329,6 +329,8 @@ std::shared_ptr<Message> Message::clone() const
     cloned->count = this->count;
     cloned->reward = this->reward;
     cloned->platform = this->platform;
+    cloned->membershipMonths = this->membershipMonths;
+    cloned->activeMember = this->activeMember;
     cloned->kickMessageJson = this->kickMessageJson;
     cloned->bits = this->bits;
     cloned->giftedSubscriptionRecipientCount =

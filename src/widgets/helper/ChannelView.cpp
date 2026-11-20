@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/helper/ChannelView.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/Common.hpp"
@@ -12,6 +13,7 @@
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/commands/builtin/PinMessage.hpp"
 #include "controllers/filters/FilterSet.hpp"
+#include "controllers/priority/PriorityChatModel.hpp"
 #include "debug/Benchmark.hpp"
 #include "messages/Emote.hpp"
 #include "messages/Image.hpp"
@@ -1682,6 +1684,8 @@ void ChannelView::queueLayout()
 
 void ChannelView::showEvent(QShowEvent * /*event*/)
 {
+    this->clearMessageLayoutShiftAnimations();
+    this->clearMessageArrivalAnimations();
     if (this->layoutQueued_)
     {
         this->performLayout(false, true);
@@ -1694,6 +1698,12 @@ void ChannelView::performLayout(bool causedByScrollbar, bool causedByShow)
     // BenchmarkGuard benchmark("layout");
 
     this->layoutQueued_ = false;
+    if (causedByScrollbar || causedByShow)
+    {
+        // These animations store viewport coordinates, which are invalid as
+        // soon as the viewport moves or a different tab becomes visible.
+        this->clearMessageLayoutShiftAnimations();
+    }
 
     /// Get messages and check if there are at least 1
     const auto &messages = this->getMessagesSnapshot();
@@ -1701,14 +1711,27 @@ void ChannelView::performLayout(bool causedByScrollbar, bool causedByShow)
     this->showingLatestMessages_ =
         this->scrollBar_->isAtBottom() ||
         (!this->scrollBar_->isVisible() && !causedByScrollbar);
+    if (!this->showingLatestMessages_)
+    {
+        this->clearMessageArrivalAnimations();
+    }
 
     const bool shouldAnimateLayoutShifts =
         this->isVisible() && this->shouldAnimateMessageAnimations() &&
-        this->messageArrivalAnimations_.empty() && !causedByScrollbar;
+        this->showingLatestMessages_ &&
+        qFuzzyCompare(this->scrollBar_->getCurrentValue() + 1.0,
+                      this->scrollBar_->getDesiredValue() + 1.0) &&
+        this->messageArrivalAnimations_.empty() && !causedByScrollbar &&
+        !causedByShow;
+    if (!shouldAnimateLayoutShifts)
+    {
+        this->clearMessageLayoutShiftAnimations();
+    }
 
     struct VisibleMessagePosition {
         MessageLayoutPtr layout;
         qreal y;
+        int height;
     };
     auto collectVisibleMessagePositions =
         [this, &messages]() -> std::vector<VisibleMessagePosition> {
@@ -1725,7 +1748,7 @@ void ChannelView::performLayout(bool causedByScrollbar, bool causedByShow)
             -(messages[start]->getHeight() * (fmod(relativeCurrentValue, 1)));
         for (auto i = start; i < messages.size() && y <= this->height(); i++)
         {
-            positions.push_back({messages[i], y});
+            positions.push_back({messages[i], y, messages[i]->getHeight()});
             y += messages[i]->getHeight();
         }
         return positions;
@@ -1742,7 +1765,14 @@ void ChannelView::performLayout(bool causedByScrollbar, bool causedByShow)
 
     if (redrawRequired)
     {
-        if (shouldAnimateLayoutShifts)
+        // Heights change immediately. Animating the following rows from their
+        // old positions would paint them over a row that has already grown.
+        const bool heightsUnchanged = std::none_of(
+            oldVisiblePositions.begin(), oldVisiblePositions.end(),
+            [](const auto &position) {
+                return position.layout->getHeight() != position.height;
+            });
+        if (shouldAnimateLayoutShifts && heightsUnchanged)
         {
             std::unordered_map<MessageLayout *, qreal> oldYByLayout;
             oldYByLayout.reserve(oldVisiblePositions.size());
@@ -1762,6 +1792,10 @@ void ChannelView::performLayout(bool causedByScrollbar, bool causedByShow)
                 this->startOrUpdateMessageLayoutShiftAnimation(
                     position.layout, it->second, position.y);
             }
+        }
+        else
+        {
+            this->clearMessageLayoutShiftAnimations();
         }
 
         this->queueUpdate();
@@ -1783,7 +1817,7 @@ bool ChannelView::layoutVisibleMessages(
 
     if (messages.size() > start)
     {
-        auto y = -(messages[start]->getHeight() * (fmod(relativeCurrentValue, 1)));
+        qreal y = 0;
 
         for (auto i = start; i < messages.size() && y <= this->height(); i++)
         {
@@ -1799,6 +1833,13 @@ bool ChannelView::layoutVisibleMessages(
                 },
                 this->bufferInvalidationQueued_);
 
+            if (i == start)
+            {
+                // The first row may have changed height or be newly laid out.
+                // Use its current height, exactly as drawMessages does, before
+                // deciding how many following rows fit in the viewport.
+                y = -(message->getHeight() * fmod(relativeCurrentValue, 1));
+            }
             y += message->getHeight();
         }
         this->bufferInvalidationQueued_ = false;
@@ -1880,6 +1921,7 @@ void ChannelView::clearMessages()
     this->clearMessageArrivalAnimations();
 
     // Clear all stored messages in this chat widget
+    this->snapshotDirty_ = true;
     this->messages_.clear();
     this->scrollBar_->clearHighlights();
     this->scrollBar_->resetBounds();
@@ -1985,9 +2027,10 @@ const std::optional<MessageElementFlags> &ChannelView::getOverrideFlags() const
 std::vector<MessageLayoutPtr> &ChannelView::getMessagesSnapshot()
 {
     this->snapshotGuard_.guard();
-    if (!this->paused() /*|| this->scrollBar_->isVisible()*/)
+    if (!this->paused() && this->snapshotDirty_)
     {
         this->snapshot_ = this->messages_.getSnapshot();
+        this->snapshotDirty_ = false;
     }
 
     return this->snapshot_;
@@ -2152,7 +2195,8 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
                 this->split_ ? this->split_->kickActivityMinimumKicks() : 100,
                 this->split_ ? this->split_->tiktokActivityMinimumDiamonds()
                              : 0,
-                !this->split_ || this->split_->showRaidsAndWatchStreaks()))
+                !this->split_ || this->split_->showRaids(),
+                this->split_ && this->split_->showWatchStreaks()))
         {
             return std::nullopt;
         }
@@ -2197,7 +2241,8 @@ std::optional<MessagePtr> ChannelView::transformActivityMessage(
             this->split_ ? this->split_->twitchActivityMinimumBits() : 100,
             this->split_ ? this->split_->kickActivityMinimumKicks() : 100,
             this->split_ ? this->split_->tiktokActivityMinimumDiamonds() : 0,
-            !this->split_ || this->split_->showRaidsAndWatchStreaks()))
+            !this->split_ || this->split_->showRaids(),
+            this->split_ && this->split_->showWatchStreaks()))
     {
         return std::nullopt;
     }
@@ -2301,6 +2346,7 @@ bool ChannelView::tryMergeActivityGiftMessage(const MessagePtr &message)
         this->scrollBar_->replaceHighlight(
             index, this->scrollbarHighlightForMessage(mergedMessage));
     }
+    this->snapshotDirty_ = true;
     this->messages_.replaceItem(index, mergedLayout);
     return true;
 }
@@ -2311,6 +2357,7 @@ void ChannelView::rebuildActivityMessages()
     this->clearMessageArrivalAnimations();
     auto snapshot = this->channel_->getMessageSnapshot();
 
+    this->snapshotDirty_ = true;
     this->messages_.clear();
     this->scrollBar_->clearHighlights();
     this->scrollBar_->resetBounds();
@@ -2350,6 +2397,7 @@ void ChannelView::rebuildActivityMessages()
             messageLayout->flags.set(MessageLayoutFlag::IgnoreHighlights);
         }
 
+        this->snapshotDirty_ = true;
         this->messages_.pushBack(messageLayout);
         nMessagesAdded++;
         if (this->showScrollbarHighlights())
@@ -2438,13 +2486,14 @@ void ChannelView::appendProxyMessage(const MessagePtr &message,
 
 bool ChannelView::shouldQueueSlowChatMessages() const
 {
-    return this->split_ != nullptr && !this->isActivityPaneView() &&
+    return this->split_ != nullptr && !this->split_->isPriorityChatPane() && this->context_ != Context::PriorityChat && !this->isActivityPaneView() &&
            this->split_->slowerChatEnabled();
 }
 
 bool ChannelView::shouldAnimateMessageAnimations() const
 {
     return this->split_ != nullptr && this->context_ != Context::Search &&
+           this->context_ != Context::PriorityChat && !this->split_->isPriorityChatPane() &&
            !this->isActivityPaneView() &&
            getSettings()->messageAnimations &&
            this->split_->slowerChatMessageAnimations();
@@ -2712,6 +2761,13 @@ std::optional<qreal> ChannelView::messageArrivalAnimationProgress(
 
 void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
 {
+    std::vector<MessagePtr> retained;
+    if (this->retainFilteredHistory_ &&
+        this->underlyingChannel_ == underlyingChannel)
+    {
+        for (const auto &layout : this->messages_.getSnapshot())
+            retained.push_back(layout->getMessagePtr());
+    }
     /// Clear connections from the last channel
     this->channelConnections_.clear();
     this->activityGiftRecipientsToSuppress_ = 0;
@@ -2815,6 +2871,13 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
                         view.channel_->replaceMessage(index, proxyPrev,
                                                       proxyReplacement);
                     }
+                    else if (view.retainFilteredHistory_)
+                    {
+                        // A replacement that no longer qualifies must not be
+                        // mistaken for a message that merely aged out.
+                        view.channel_->removeMessage(
+                            view.findProxyMessage(prev));
+                    }
                 });
         });
 
@@ -2869,7 +2932,11 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
             runOnChannelViewThread(
                 this, [message](ChannelView &view) {
                     auto proxyMessage = message;
-                    if (message != nullptr && !message->id.isEmpty())
+                    if (view.retainFilteredHistory_)
+                    {
+                        proxyMessage = view.findProxyMessage(message);
+                    }
+                    else if (message != nullptr && !message->id.isEmpty())
                     {
                         if (auto existing =
                                 view.channel_->findMessageByID(message->id))
@@ -2913,6 +2980,66 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
     // Copy over messages from the backing channel to the filtered one
     // and the ui.
     auto snapshot = underlyingChannel->getMessageSnapshot();
+    if (!retained.empty())
+    {
+        QHash<const Message *, size_t> currentPointers;
+        QHash<QString, size_t> currentIds;
+        const auto identity = [](const MessagePtr &message) {
+            return QString::number(static_cast<int>(message->platform)) +
+                   QLatin1Char(':') + message->id;
+        };
+        for (size_t i = 0; i < snapshot.size(); ++i)
+        {
+            const auto &message = snapshot[i];
+            currentPointers.insert(message.get(), i);
+            if (!message->id.isEmpty())
+                currentIds.insert(identity(message), i);
+        }
+        std::vector<MessagePtr> combined;
+        combined.reserve(retained.size() + snapshot.size());
+        const auto positionInSource =
+            [&](const MessagePtr &message) -> std::optional<size_t> {
+            if (const auto found = currentPointers.constFind(message.get());
+                found != currentPointers.cend())
+                return *found;
+            if (!message->id.isEmpty())
+                if (const auto found = currentIds.constFind(identity(message));
+                    found != currentIds.cend())
+                    return *found;
+            return std::nullopt;
+        };
+        QSet<size_t> anchors;
+        for (const auto &message : retained)
+            if (const auto position = positionInSource(message))
+                anchors.insert(*position);
+        size_t nextSource = 0;
+        // Shared messages anchor the two windows; edits use the source copy.
+        // Previously unseen backfill can be inserted by time before an anchor.
+        for (const auto &message : retained)
+        {
+            const auto position = positionInSource(message);
+            if (!position)
+            {
+                while (nextSource < snapshot.size() &&
+                       !anchors.contains(nextSource) &&
+                       message->serverReceivedTime.isValid() &&
+                       snapshot[nextSource]->serverReceivedTime.isValid() &&
+                       snapshot[nextSource]->serverReceivedTime <
+                           message->serverReceivedTime)
+                    combined.push_back(snapshot[nextSource++]);
+                combined.push_back(message);
+            }
+            else if (*position >= nextSource)
+            {
+                combined.insert(combined.end(), snapshot.begin() + nextSource,
+                                snapshot.begin() + *position + 1);
+                nextSource = *position + 1;
+            }
+        }
+        combined.insert(combined.end(), snapshot.begin() + nextSource,
+                        snapshot.end());
+        snapshot = std::move(combined);
+    }
 
     size_t nMessagesAdded = 0;
     for (const auto &msg : snapshot)
@@ -2937,6 +3064,7 @@ void ChannelView::setChannel(const ChannelPtr &underlyingChannel)
             messageLayout->flags.set(MessageLayoutFlag::IgnoreHighlights);
         }
 
+        this->snapshotDirty_ = true;
         this->messages_.pushBack(messageLayout);
 
         this->channel_->addMessage(proxyMessage, MessageContext::Repost);
@@ -3058,6 +3186,42 @@ void ChannelView::refreshMessages()
     this->setChannel(this->underlyingChannel_);
 }
 
+void ChannelView::setMessagePredicate(
+    std::function<bool(const MessagePtr &)> predicate, bool retainHistory)
+{
+    this->messagePredicate_ = std::move(predicate);
+    this->retainFilteredHistory_ =
+        retainHistory && bool(this->messagePredicate_);
+}
+
+void ChannelView::refreshMessagePredicate()
+{
+    if (!this->underlyingChannel_) return;
+    const bool bottom = this->scrollBar_->isAtBottom();
+    const auto value = this->scrollBar_->getRelativeCurrentValue();
+    const auto snapshot = this->channel_->getMessageSnapshot();
+    const auto index = static_cast<size_t>(std::max(qreal(0), std::floor(value)));
+    const auto anchor = index < snapshot.size() ? snapshot[index] : MessagePtr{};
+    this->refreshMessages();
+    if (bottom)
+    {
+        this->scrollBar_->scrollToBottom();
+        return;
+    }
+    const auto refreshed = this->channel_->getMessageSnapshot();
+    qreal restored = value;
+    for (size_t i = 0; anchor && i < refreshed.size(); ++i)
+    {
+        if (refreshed[i] == anchor || (!anchor->id.isEmpty() &&
+            refreshed[i]->id == anchor->id && refreshed[i]->platform == anchor->platform))
+        {
+            restored = qreal(i) + value - std::floor(value);
+            break;
+        }
+    }
+    this->scrollBar_->setDesiredValue(restored, false);
+}
+
 void ChannelView::refreshSlowerChatSettings()
 {
     if (!this->shouldAnimateMessageAnimations())
@@ -3106,12 +3270,15 @@ FilterSetPtr ChannelView::getFilterSet() const
 
 bool ChannelView::shouldIncludeMessage(const MessagePtr &m) const
 {
+    if (this->messagePredicate_ && !this->messagePredicate_(m)) return false;
     if (this->split_ && this->split_->filterActivity() &&
         !this->split_->isActivityPane())
     {
         if (m->flags.hasAny({MessageFlag::Raid, MessageFlag::WatchStreak}))
         {
-            if (this->split_->showRaidsAndWatchStreaks())
+            if ((m->flags.has(MessageFlag::Raid) && this->split_->showRaids()) ||
+                (m->flags.has(MessageFlag::WatchStreak) &&
+                 this->split_->showWatchStreaks()))
             {
                 return false;
             }
@@ -3179,6 +3346,12 @@ bool ChannelView::hasSourceChannel() const
 void ChannelView::messageAppended(MessagePtr &message,
                                   std::optional<MessageFlags> overridingFlags)
 {
+    if (message != nullptr && this->hasThemeBackdrop() &&
+        getTheme()->effect().isScene())
+    {
+        scenes::ThemeSceneHost::instance().messageAppended(this, *message);
+    }
+
     MessagePtr visibleMessage = message;
     if (this->isActivityPaneView())
     {
@@ -3232,6 +3405,7 @@ void ChannelView::messageAppended(MessagePtr &message,
         this->scrollBar_->offsetMaximum(1);
     }
 
+    this->snapshotDirty_ = true;
     if (this->messages_.pushBack(messageRef))
     {
         if (this->paused())
@@ -3307,6 +3481,7 @@ void ChannelView::messageAddedAtStart(std::vector<MessagePtr> &messages)
     }
 
     /// Add the messages at the start
+    this->snapshotDirty_ = true;
     auto addedMessages = this->messages_.pushFront(messageRefs);
     if (!addedMessages.empty())
     {
@@ -3367,8 +3542,24 @@ void ChannelView::messageReplaced(size_t hint, const MessagePtr &prev,
     this->scrollBar_->replaceHighlight(
         index, this->scrollbarHighlightForMessage(replacement));
 
+    this->snapshotDirty_ = true;
     this->messages_.replaceItem(index, newItem);
     this->queueLayout();
+}
+
+MessagePtr ChannelView::findProxyMessage(const MessagePtr &message) const
+{
+    if (!message)
+        return {};
+    const auto snapshot = this->channel_->getMessageSnapshot();
+    if (std::find(snapshot.begin(), snapshot.end(), message) != snapshot.end())
+        return message;
+    if (!message->id.isEmpty())
+        for (const auto &candidate : snapshot)
+            if (candidate->platform == message->platform &&
+                candidate->id == message->id)
+                return candidate;
+    return message;
 }
 
 void ChannelView::messageRemoved(size_t hint, const MessagePtr &message)
@@ -3391,6 +3582,7 @@ void ChannelView::messageRemoved(size_t hint, const MessagePtr &message)
     const bool wasAtBottom = this->scrollBar_->isAtBottom();
     const auto relativeCurrent = this->scrollBar_->getRelativeCurrentValue();
 
+    this->snapshotDirty_ = true;
     if (!this->messages_.removeItem(index))
     {
         return;
@@ -3429,6 +3621,7 @@ void ChannelView::messagesUpdated()
     auto snapshot = this->channel_->getMessageSnapshot();
 
     this->clearMessageArrivalAnimations();
+    this->snapshotDirty_ = true;
     this->messages_.clear();
     this->scrollBar_->clearHighlights();
     this->scrollBar_->resetBounds();
@@ -3453,6 +3646,7 @@ void ChannelView::messagesUpdated()
             messageLayout->flags.set(MessageLayoutFlag::IgnoreHighlights);
         }
 
+        this->snapshotDirty_ = true;
         this->messages_.pushBack(messageLayout);
         if (this->showScrollbarHighlights())
         {
@@ -3533,7 +3727,7 @@ MessageElementFlags ChannelView::getFlags() const
 
     if (split != nullptr)
     {
-        if (split->getModerationMode())
+        if (split->showInlineModerationActions())
         {
             flags.set(MessageElementFlag::ModeratorTools);
         }
@@ -3677,7 +3871,18 @@ void ChannelView::paintEvent(QPaintEvent *event)
 
     QPainter painter(this);
 
-    if (this->hasThemeBackdrop())
+    const bool sceneShown =
+        this->hasThemeBackdrop() && getTheme()->effect().isScene() &&
+        scenes::ThemeSceneHost::instance().paintSurface(
+            this, painter, this->rect(),
+            this->isActivityPaneView() ? scenes::SceneSurface::Activity
+                                       : scenes::SceneSurface::Chat,
+            this->messageColors_.channelBackground);
+    if (sceneShown)
+    {
+        // The interactive scene is the background
+    }
+    else if (this->hasThemeBackdrop() && !getTheme()->effect().isScene())
     {
         const auto *theme = getTheme();
         const auto *topLevel = this->window();
@@ -3728,6 +3933,12 @@ void ChannelView::paintEvent(QPaintEvent *event)
         painter.setPen(color);
         painter.drawText(QRectF(textX, pausedY, textWidth, indicatorSize),
                          Qt::AlignLeft | Qt::AlignVCenter, text);
+    }
+
+    if (sceneShown)
+    {
+        scenes::ThemeSceneHost::instance().paintFront(this, painter,
+                                                      this->rect());
     }
 }
 
@@ -4047,6 +4258,8 @@ void ChannelView::wheelEvent(QWheelEvent *event)
 
     if (this->scrollBar_->isVisible())
     {
+        this->clearMessageLayoutShiftAnimations();
+        this->clearMessageArrivalAnimations();
         float mouseMultiplier = getSettings()->mouseScrollMultiplier;
 
         // This ensures snapshot won't be indexed out of bounds when scrolling really fast
@@ -4158,6 +4371,10 @@ void ChannelView::enterEvent(QEnterEvent * /*event*/)
 void ChannelView::leaveEvent(QEvent * /*event*/)
 {
     this->tooltipWidget_->hide();
+    if (this->hasThemeBackdrop() && getTheme()->effect().isScene())
+    {
+        scenes::ThemeSceneHost::instance().messageHovered(this, nullptr, {});
+    }
 
     this->unpause(PauseReason::Mouse);
 }
@@ -4243,12 +4460,28 @@ void ChannelView::mouseMoveEvent(QMouseEvent *event)
     QPointF relativePos;
     int messageIndex;
 
+    const bool sceneHover =
+        this->hasThemeBackdrop() && getTheme()->effect().isScene();
+
     // no message under cursor
     if (!this->tryGetMessageAt(event->pos(), layout, relativePos, messageIndex))
     {
         this->setCursor(Qt::ArrowCursor);
         this->tooltipWidget_->hide();
+        if (sceneHover)
+        {
+            scenes::ThemeSceneHost::instance().messageHovered(this, nullptr,
+                                                              {});
+        }
         return;
+    }
+
+    if (sceneHover)
+    {
+        const auto top = event->position().y() - relativePos.y();
+        scenes::ThemeSceneHost::instance().messageHovered(
+            this, layout->getMessage(),
+            QRectF(0, top, this->width(), layout->getHeight()));
     }
 
     if (this->isScrolling_)
@@ -5023,6 +5256,32 @@ void ChannelView::addMessageContextMenuItems(QMenu *menu,
     }
 
     const auto message = layout->getMessage();
+    if (this->split_ && this->split_->canUsePriorityChat() &&
+        !this->split_->isActivityPane() &&
+        (this->context_ == Context::None ||
+         this->context_ == Context::PriorityChat) &&
+        priority::isChatMessage(*message))
+    {
+        const bool included = this->split_->isPriorityChatUserIncluded(*message);
+        const auto choice = included ? priority::Choice::Exclude
+                                     : priority::Choice::Include;
+        menu->addAction(
+            included ? "Exclude from Priority Chat" : "Add to Priority List",
+            this,
+            [split = QPointer<Split>(this->split_),
+             target = layout->getMessagePtr(), choice] {
+                if (split) split->setPriorityChatUserChoice(target, choice);
+            });
+    }
+    if (this->split_ && this == &this->split_->getChannelView() &&
+        !this->split_->isUtilityPane() && !message->loginName.isEmpty() &&
+        !message->messageText.isEmpty())
+    {
+        menu->addAction("Review user in Mod View", this->split_,
+                        [split = QPointer<Split>(this->split_), message = layout->getMessagePtr()] {
+            if (split) split->inspectInModView(message);
+        });
+    }
     const auto moderationChannel = this->hasSourceChannel()
                                        ? this->sourceChannel_
                                        : this->underlyingChannel_;
@@ -5346,13 +5605,22 @@ void ChannelView::mouseDoubleClickEvent(QMouseEvent *event)
 void ChannelView::hideEvent(QHideEvent * /*event*/)
 {
     this->activityTimeRefreshTimer_.stop();
+    this->clearMessageLayoutShiftAnimations();
+    this->clearMessageArrivalAnimations();
 
-    for (const auto &layout : this->messagesWithBuffers_)
-    {
-        layout->deleteBuffer();
-    }
-
-    this->messagesWithBuffers_.clear();
+    // Keep the small visible-message cache during quick tab switches. Release
+    // it after the view has stayed hidden instead of rebuilding it every click.
+    QTimer::singleShot(3000, this, [this] {
+        if (this->isVisible())
+        {
+            return;
+        }
+        for (const auto &layout : this->messagesWithBuffers_)
+        {
+            layout->deleteBuffer();
+        }
+        this->messagesWithBuffers_.clear();
+    });
 }
 
 void ChannelView::showUserInfoPopup(const QString &userName,
@@ -5468,9 +5736,10 @@ void ChannelView::handleLinkClick(QMouseEvent *event, const Link &link,
         case Link::UserWhisper:
         case Link::UserInfo: {
             auto user = link.value;
-            this->showUserInfoPopup(user, layout->getMessage()->platform,
-                                    layout->getMessage()->channelName,
-                                    layout->getMessage()->userID);
+            const auto &message = *layout->getMessage();
+            this->showUserInfoPopup(
+                user, message.platform, message.channelName,
+                UserInfoPopup::userIDForLink(user, message));
         }
         break;
 

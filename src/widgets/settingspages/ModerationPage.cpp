@@ -311,11 +311,11 @@ ModerationPage::ModerationPage()
 
     }  // logs end
 
-    auto modMode = tabs.appendTab(new QVBoxLayout, "Moderation buttons");
+    auto modMode = tabs.appendTab(new QVBoxLayout, "Inline moderation buttons");
     {
         // clang-format off
         auto label = modMode.emplace<QLabel>(
-            "Moderation mode is enabled by clicking <img width='18' height='18' src=':/buttons/moderationDisabledDarkMode18x18.png'> in a channel that you moderate.<br><br>"
+            "Click the moderation icon in a chat header to open Mod View. Its Rules tab controls whether these optional buttons also appear beside chat messages.<br><br>"
             "Moderation buttons can be bound to chat commands such as \"/ban {user.name}\", \"/timeout {user.name} 1000\", \"/w someusername !report {user.name} was bad in channel {channel.name}\" or any other custom text commands.<br>"
             "For deleting messages use /delete {msg.id}.");
         label->setWordWrap(true);

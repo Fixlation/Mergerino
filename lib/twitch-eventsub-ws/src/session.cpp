@@ -159,6 +159,20 @@ const NotificationHandlers NOTIFICATION_HANDLERS{
         },
     },
     {
+        {"channel.shoutout.create", "1"},
+        [](const auto &metadata, const auto &jv, auto &listener) {
+            auto oPayload =
+                parsePayload<payload::channel_shoutout_create::v1::Payload>(
+                    jv);
+            if (!oPayload)
+            {
+                return oPayload.error();
+            }
+            listener->onChannelShoutoutCreate(metadata, *oPayload);
+            return boost::system::error_code{};
+        },
+    },
+    {
         {"automod.message.hold", "2"},
         [](const auto &metadata, const auto &jv, auto &listener) {
             auto oPayload =

@@ -60,6 +60,8 @@ public:
     ~GiveawayReel() override;
 
     void setColors(const GiveawayDrawColors &colors);
+    /// Scales the widget's drawing with the UI.
+    void setContentScale(qreal scale);
 
     /// Spins towards entries[winner]. The other cards are drawn from entries
     /// in proportion to their weights.
@@ -100,6 +102,7 @@ private:
     QVariantAnimation *settle_ = nullptr;
     std::array<QPixmap, 4> platformIcons_;
     qreal platformIconRatio_ = 0;
+    qreal contentScale_ = 1;
 };
 
 /// Prize wheel with one slice per entrant, sized by weight.
@@ -110,6 +113,8 @@ public:
     ~GiveawayWheel() override;
 
     void setColors(const GiveawayDrawColors &colors);
+    /// Scales the widget's drawing with the UI.
+    void setContentScale(qreal scale);
 
     /// Replaces the slices. While the wheel spins or shows a result the new
     /// slices are kept back until the result has been shown.
@@ -156,6 +161,7 @@ private:
     QVariantAnimation *spin_ = nullptr;
     QTimer resultTimer_;
     QTimer pointerTimer_;
+    qreal contentScale_ = 1;
 };
 
 /// Small square showing the target emote of an emote guess. While the target
@@ -167,6 +173,8 @@ public:
     explicit GiveawayEmoteTile(QWidget *parent = nullptr);
 
     void setColors(const GiveawayDrawColors &colors);
+    /// Scales the widget's drawing with the UI.
+    void setContentScale(qreal scale);
     void setEmote(EmotePtr emote);
     /// Emotes cycled through while the target is hidden
     void setDecoys(std::vector<EmotePtr> decoys);
@@ -204,6 +212,7 @@ private:
     qint64 landingDuration_ = 1;
     qint64 landingSlot_ = 0;
     QTimer frameTimer_;
+    qreal contentScale_ = 1;
 };
 
 /// Line edit that keeps its text secret by showing a fixed-length run of

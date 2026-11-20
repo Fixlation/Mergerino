@@ -15,6 +15,7 @@
 #include "providers/kick/KickChatServer.hpp"
 #include "providers/kick/KickEmotes.hpp"
 #include "providers/kick/KickMessageBuilder.hpp"
+#include "providers/kick/KickUserBlock.hpp"
 #include "providers/seventv/SeventvBadges.hpp"
 #include "providers/seventv/SeventvEmotes.hpp"
 #include "providers/seventv/SeventvPersonalEmotes.hpp"
@@ -27,6 +28,9 @@
 #include <QImage>
 #include <QImageReader>
 #include <QJsonDocument>
+
+#include <utility>
+#include <vector>
 
 using namespace chatterino;
 
@@ -369,18 +373,19 @@ TEST(KickAssets, LegacyAndV2RoleBadgesDoNotDuplicate)
               "https://files.kick.com/moderator.png");
 }
 
-TEST(KickAssets, PlainNativeNamesAndInlineTagsBothRenderEmotes)
+TEST(KickAssets, NativeNamesStayTextUnlessExplicitlyTagged)
 {
     KickAssetApplication app;
     auto channel = std::make_shared<KickChannel>("test");
     const auto native = KickEmotes::emoteForID(
-        u"987650003", u"Native", "https://files.kick.com/native.gif");
+        u"987650003", u"BANG", "https://files.kick.com/native.gif");
     KickAssetTestAccess::setEmotes(*channel, native);
-    for (const auto *payload : {
-        R"({"id":"3","content":"Native","sender":{"id":123,
-             "username":"Viewer","identity":{}}})",
-        R"({"id":"4","content":"[emote:987650003:Native]",
-             "sender":{"id":123,"username":"Viewer","identity":{}}})"})
+    for (const auto &[payload, expectedEmotes] :
+         std::vector<std::pair<const char *, int>>{
+             {R"({"id":"3","content":"BANG","sender":{"id":123,
+                  "username":"Viewer","identity":{}}})", 0},
+             {R"({"id":"4","content":"[emote:987650003:BANG]",
+                  "sender":{"id":123,"username":"Viewer","identity":{}}})", 1}})
     {
         const auto message = buildKickAssetMessage(*channel, payload);
         int emoteCount = 0;
@@ -394,8 +399,8 @@ TEST(KickAssets, PlainNativeNamesAndInlineTagsBothRenderEmotes)
                 EXPECT_EQ(emote->getEmote(), native);
             }
         }
-        EXPECT_EQ(emoteCount, 1);
-        EXPECT_EQ(message->messageText, "Native");
+        EXPECT_EQ(emoteCount, expectedEmotes);
+        EXPECT_EQ(message->messageText, "BANG");
     }
 }
 
@@ -591,12 +596,12 @@ TEST(KickAssets, OwnedCollectiblesRenderAndSendAsNativeEmotes)
         *channel, "collectiblesMurlocJam ChannelEmote");
     EXPECT_EQ(prepared,
               "[emote:6163976:collectiblesMurlocJam] [emote:2:ChannelEmote]");
-    for (
-        const auto *payload : {
-            R"({"id":"collectible-1","content":"collectiblesMurlocJam",
-          "sender":{"id":123,"username":"Viewer","identity":{}}})",
-            R"({"id":"collectible-2","content":"[emote:6163976:collectiblesMurlocJam]",
-          "sender":{"id":123,"username":"Viewer","identity":{}}})"})
+    for (const auto &[payload, expectedEmotes] :
+         std::vector<std::pair<const char *, int>>{
+             {R"({"id":"collectible-1","content":"collectiblesMurlocJam",
+               "sender":{"id":123,"username":"Viewer","identity":{}}})", 0},
+             {R"({"id":"collectible-2","content":"[emote:6163976:collectiblesMurlocJam]",
+               "sender":{"id":123,"username":"Viewer","identity":{}}})", 1}})
     {
         const auto message = buildKickAssetMessage(*channel, payload);
         int count = 0;
@@ -612,7 +617,7 @@ TEST(KickAssets, OwnedCollectiblesRenderAndSendAsNativeEmotes)
                           "https://files.kick.com/emotes/6163976/fullsize");
             }
         }
-        EXPECT_EQ(count, 1);
+        EXPECT_EQ(count, expectedEmotes);
     }
 }
 
@@ -668,4 +673,40 @@ TEST(KickAssets, LargeCollectibleAnimationKeepsAllFramesWithinDisplayBounds)
         retainedBytes += frame.image.width() * frame.image.height() * 4;
     }
     EXPECT_LT(retainedBytes, Image::maxBytesRam);
+}
+
+TEST(KickLocalBlock, LoadsStoredPreferenceAndSupportsCaseInsensitiveUnblock)
+{
+    mock::BaseApplication app(QStringLiteral(
+        R"({"kick":{"localBlockedUsers":["Blocked_Viewer"]}})"));
+    EXPECT_TRUE(isKickUserLocallyBlocked(" blocked_viewer "));
+    setKickUserLocallyBlocked("BLOCKED_VIEWER", true);
+    EXPECT_EQ(pajlada::Settings::Setting<std::vector<QString>>::get(
+                  KICK_LOCAL_BLOCKED_USERS)
+                  .size(),
+              1);
+    setKickUserLocallyBlocked(" blocked_viewer ", false);
+    EXPECT_FALSE(isKickUserLocallyBlocked("Blocked_Viewer"));
+    EXPECT_TRUE(pajlada::Settings::Setting<std::vector<QString>>::get(
+                    KICK_LOCAL_BLOCKED_USERS)
+                    .empty());
+    setKickUserLocallyBlocked(" ", true);
+    EXPECT_FALSE(isKickUserLocallyBlocked(" "));
+}
+
+TEST(KickLocalBlock, FiltersIncomingAndRecentMessageBuilderUntilUnblocked)
+{
+    KickAssetApplication app;
+    auto channel = std::make_shared<KickChannel>("test");
+    const auto *blocked = R"({"id":"blocked-1","content":"hello",
+      "created_at":"2026-10-19T16:00:00Z",
+      "sender":{"id":123,"username":"Blocked_Viewer","identity":{}}})";
+    const auto *other = R"({"id":"allowed-1","content":"hello",
+      "created_at":"2026-10-19T16:00:00Z",
+      "sender":{"id":456,"username":"Other_Viewer","identity":{}}})";
+    setKickUserLocallyBlocked(" blocked_viewer ", true);
+    EXPECT_EQ(buildKickAssetMessage(*channel, blocked), nullptr);
+    EXPECT_NE(buildKickAssetMessage(*channel, other), nullptr);
+    setKickUserLocallyBlocked("BLOCKED_VIEWER", false);
+    EXPECT_NE(buildKickAssetMessage(*channel, blocked), nullptr);
 }

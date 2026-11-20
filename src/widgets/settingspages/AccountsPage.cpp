@@ -174,7 +174,8 @@ AccountsPage::AccountsPage()
             "1. Click Copy Helper; twitch.tv opens.\n"
             "2. Sign in to the selected Twitch account.\n"
             "3. Press F12, open Console, paste the helper, and press Enter.\n"
-            "4. Return to Mergerino and click Paste Token."),
+            "4. If Copy Token appears on the Twitch page, click it.\n"
+            "5. Return to Mergerino and click Paste Token."),
         moderationAuthFrame);
     this->moderationAuthInstructionsLabel_->setWordWrap(true);
     this->moderationAuthInstructionsLabel_->setStyleSheet(
@@ -482,8 +483,9 @@ void AccountsPage::copyModerationAuthHelper()
     QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.twitch.tv/")));
     this->finishModerationAuthLogin(
         QStringLiteral("Helper copied. On twitch.tv, press F12 to open "
-                       "DevTools, switch to Console, paste it, then return "
-                       "here and click Paste Token."),
+                       "DevTools, switch to Console, and run it. If Copy Token "
+                       "appears on the Twitch page, click it, then return here "
+                       "and click Paste Token."),
         false);
 }
 

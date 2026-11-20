@@ -51,13 +51,23 @@ struct SplitDescriptor {
 
     // Whether "Moderation Mode" (the sword icon) is enabled in this split or not
     bool moderationMode_{false};
+    bool modViewPane_{false};
+    bool modViewStandalone_{false};
+    QString modViewId_;
+    QString modViewOwnerId_;
+    bool priorityChatEnabled_{false};
+    bool priorityChatPane_{false};
+    bool priorityChatStandalone_{false};
+    QString priorityChatId_;
+    QString priorityChatOwnerId_;
     std::optional<bool> activityPane_;
     bool inputEnabled_{true};
     std::optional<bool> filterActivity_;
     std::optional<bool> filterActivityExplicit_;
     qreal activityMessageScale_{0.9};
     bool collapseGiftedSubscriptions_{true};
-    bool showRaidsAndWatchStreaks_{true};
+    bool showRaids_{true};
+    bool showWatchStreaks_{false};
     std::optional<ActivityTimeDisplayMode> activityTimeDisplayMode_;
     bool slowerChatEnabled_{false};
     qreal slowerChatMessagesPerSecond_{5.0};

@@ -20,6 +20,9 @@ enum class ThemeEffectKind : std::uint8_t {
     Starfield,
     Embers,
     Rain,
+    /// An interactive scene painted behind the whole window (see
+    /// widgets/scenes/ThemeScene.hpp). `ThemeEffect::scene` names it.
+    Scene,
 };
 
 struct ThemeEffect {
@@ -32,10 +35,17 @@ struct ThemeEffect {
     double speed = 1.0;
     /// How strongly the effect tints the chat background, 0 to 1
     double intensity = 0.6;
+    /// Key of the interactive scene when `kind` is Scene
+    QString scene;
 
     bool isAnimated() const
     {
         return this->kind != ThemeEffectKind::None;
+    }
+
+    bool isScene() const
+    {
+        return this->kind == ThemeEffectKind::Scene;
     }
 
     /// Milliseconds between frames; slow ambient effects need fewer frames
@@ -44,7 +54,8 @@ struct ThemeEffect {
     bool operator==(const ThemeEffect &other) const = default;
 };
 
-/// The effects users can pick from, in display order (excludes None)
+/// The effects users can pick from, in display order (excludes None and
+/// Scene, which only comes with the interactive theme presets)
 const std::vector<std::pair<QString, ThemeEffectKind>> &themeEffectKinds();
 
 QString themeEffectKindKey(ThemeEffectKind kind);

@@ -8,7 +8,12 @@
 
 #include <QStringListModel>
 
+#include <vector>
+
 class QVBoxLayout;
+class QListView;
+class QPushButton;
+class QLabel;
 
 namespace chatterino {
 
@@ -20,7 +25,14 @@ public:
     void onShow() final;
 
 private:
+    void updateKickBlockedUsers();
+
     QStringListModel userListModel_;
+    QStringListModel kickBlockedUserListModel_;
+    pajlada::Settings::Setting<std::vector<QString>> kickBlockedUsersSetting_;
+    QListView *kickBlockedUsersView_ = nullptr;
+    QPushButton *unblockKickUsersButton_ = nullptr;
+    QLabel *emptyKickBlocksLabel_ = nullptr;
 };
 
 }  // namespace chatterino

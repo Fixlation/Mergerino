@@ -109,6 +109,7 @@ private:
     QAction *modeActionSetFollowers{};
 
     SvgButton *alertsButton_{};
+    SvgButton *priorityChatButton_{};
     SvgButton *moderationButton_{};
     SvgButton *chattersButton_{};
     SvgButton *clearActivityButton_{};

@@ -72,11 +72,54 @@ struct YouTubeLiveChatTestAccess {
     {
         return YouTubeLiveChat::extractLiveVideoId(html, false);
     }
+
+    static uint64_t viewers(const QJsonValue &value)
+    {
+        return YouTubeLiveChat::extractLiveViewerCount(value);
+    }
 };
 
 }  // namespace chatterino
 
 using namespace chatterino;
+
+TEST(YouTubeLiveChat, ReadsViewerCountFromWatchMetadata)
+{
+    const QJsonObject metadata{
+        {"contents",
+         QJsonObject{
+             {"videoPrimaryInfoRenderer",
+              QJsonObject{
+                  {"viewCount",
+                   QJsonObject{
+                       {"videoViewCountRenderer",
+                        QJsonObject{
+                            {"viewCount",
+                             QJsonObject{{"simpleText", "1,234 watching now"}}},
+                            {"isLive", true}}}}}}}}},
+    };
+    EXPECT_EQ(YouTubeLiveChatTestAccess::viewers(metadata), 1234);
+}
+
+TEST(YouTubeLiveChat, DoesNotUseTotalVideoViewsAsLiveViewerCount)
+{
+    const QJsonObject metadata{
+        {"videoViewCountRenderer",
+         QJsonObject{{"viewCount", QJsonObject{{"simpleText", "20,000 views"}}},
+                     {"isLive", false}}},
+    };
+    EXPECT_EQ(YouTubeLiveChatTestAccess::viewers(metadata), 0);
+}
+
+TEST(YouTubeLiveChat, DoesNotReadViewerCountFromChatMessages)
+{
+    const QJsonObject chat{
+        {"actions", QJsonArray{QJsonObject{
+                        {"message", QJsonObject{{"simpleText",
+                                                 "999,999 watching now"}}}}}},
+    };
+    EXPECT_EQ(YouTubeLiveChatTestAccess::viewers(chat), 0);
+}
 
 namespace {
 

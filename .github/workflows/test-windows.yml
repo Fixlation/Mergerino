@@ -175,7 +175,17 @@ jobs:
           ./server 127.0.0.1:9050 127.0.0.1:9052 &
           cd ..\build-test
           $Env:PATH = "$((Resolve-Path .\bin).Path);$Env:PATH"
-          ctest --repeat until-pass:$Env:CTEST_REPEAT_COUNT --output-on-failure
+          ctest -E '^Giveaway.*Layout' --repeat until-pass:$Env:CTEST_REPEAT_COUNT --output-on-failure
+        working-directory: build-test
+
+      # The giveaway layout assertions use the desktop geometry and native font metrics.
+      - name: Test giveaway window layout
+        timeout-minutes: 5
+        env:
+          QT_QPA_PLATFORM: windows
+        run: |
+          $Env:PATH = "$((Resolve-Path .\bin).Path);$Env:PATH"
+          ctest -R '^Giveaway.*Layout' --no-tests=error --repeat until-pass:$Env:CTEST_REPEAT_COUNT --output-on-failure
         working-directory: build-test
 
       - name: Clean Conan cache

@@ -1,5 +1,13 @@
 Patch Notes
 
+19/11/2026
+- Added Interactive Themes
+- Added new Mod View
+- Added Priority Chat
+- General bug fixes and QoL improvements
+- Improved app performance
+- Improved TikTok and YouTube Chat connection
+
 15/10/2026
 - Added guess the emote and wheel spin to giveaway feature
 - Added mass ban/unban command

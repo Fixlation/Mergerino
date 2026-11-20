@@ -5,6 +5,7 @@
 #include "providers/twitch/TwitchAccountManager.hpp"
 
 #include "Application.hpp"
+#include "common/AccountAccess.hpp"
 #include "common/Args.hpp"
 #include "common/Common.hpp"
 #include "common/Literals.hpp"
@@ -84,6 +85,8 @@ void checkMissingScopes(const std::shared_ptr<TwitchAccount> &account)
             }
 
             const auto json = res.parseJson();
+            auto &manager = app->getAccounts()->twitch;
+            const bool wasCurrent = manager.getCurrent() == account;
             std::string settingsBasePath =
                 "/accounts/uid" + account->getUserId().toStdString();
             bool accountSettingsChanged = false;
@@ -127,7 +130,6 @@ void checkMissingScopes(const std::shared_ptr<TwitchAccount> &account)
                 account->setUserName(login);
                 pajlada::Settings::Setting<QString>::set(
                     settingsBasePath + "/username", login);
-                auto &manager = app->getAccounts()->twitch;
                 auto currentUsername = manager.getCurrent()->getUserName();
                 if (currentUsername.compare(manager.currentUsername.getValue(),
                                             Qt::CaseInsensitive) != 0)
@@ -141,6 +143,20 @@ void checkMissingScopes(const std::shared_ptr<TwitchAccount> &account)
             if (accountSettingsChanged)
             {
                 getSettings()->requestSave();
+            }
+            if (const auto error = accountAccessError(
+                    ProviderId::Twitch, account->getUserName());
+                !error.isEmpty())
+            {
+                if (wasCurrent)
+                {
+                    manager.currentUsername = "";
+                    auto message = makeSystemMessage(error);
+                    app->getTwitch()->forEachChannel([message](const auto &chan) {
+                        chan->addMessage(message, MessageContext::Original);
+                    });
+                }
+                return;
             }
             if (shouldReloadIdentityBackedData)
             {
@@ -168,7 +184,10 @@ void checkMissingScopes(const std::shared_ptr<TwitchAccount> &account)
 
 bool hasHelixCredentials(const std::shared_ptr<TwitchAccount> &account)
 {
-    return account && !account->getOAuthClient().isEmpty() &&
+    return account &&
+           accountAccessError(ProviderId::Twitch, account->getUserName())
+               .isEmpty() &&
+           !account->getOAuthClient().isEmpty() &&
            !account->getOAuthToken().isEmpty();
 }
 
@@ -258,7 +277,7 @@ const std::vector<QStringView> AUTH_SCOPES{
     u"moderator:manage:shield_mode",  // for reading/managing the channel's shield-mode status
 
     // https://dev.twitch.tv/docs/api/reference/#send-a-shoutout
-    u"moderator:manage:shoutouts",  // for reading/managing the channel's shoutouts (not currently used)
+    u"moderator:manage:shoutouts",  // for sending shoutouts and showing the ones others send
 
     // https://dev.twitch.tv/docs/api/reference/#get-moderated-channels
     u"user:read:moderated_channels",  // for reading where the user is modded (not currently used)
@@ -341,6 +360,11 @@ std::vector<QString> TwitchAccountManager::getUsernames() const
 std::shared_ptr<TwitchAccount> TwitchAccountManager::findUserByUsername(
     const QString &username) const
 {
+    if (!accountAccessError(ProviderId::Twitch, username).isEmpty())
+    {
+        return nullptr;
+    }
+
     std::lock_guard<std::mutex> lock(this->mutex_);
 
     for (const auto &user : this->accounts)
@@ -392,6 +416,13 @@ void TwitchAccountManager::reloadUsers()
         }
 
         userData.username = username.trimmed();
+        if (const auto error =
+                accountAccessError(ProviderId::Twitch, userData.username);
+            !error.isEmpty())
+        {
+            qCWarning(chatterinoTwitch) << error;
+            continue;
+        }
         userData.userID = userID.trimmed();
         userData.clientID = clientID.trimmed();
         userData.oauthToken = normalizeOAuthToken(oauthToken);
@@ -416,11 +447,16 @@ void TwitchAccountManager::reloadUsers()
                 qCDebug(chatterinoTwitch)
                     << "User" << userData.username
                     << "already exists, and values updated!";
-                if (userData.username == this->getCurrent()->getUserName())
+                const auto currentUser = this->getCurrent();
+                if (!currentUser->isAnon() &&
+                    userData.username.compare(currentUser->getUserName(),
+                                              Qt::CaseInsensitive) == 0)
                 {
                     qCDebug(chatterinoTwitch)
                         << "It was the current user, so we need to "
                            "reconnect stuff!";
+                    getHelix()->update(currentUser->getOAuthClient(),
+                                       currentUser->getOAuthToken());
                     this->currentUserChanged();
                 }
             }

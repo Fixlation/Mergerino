@@ -1,6 +1,7 @@
 #include "widgets/dialogs/TwitchLoginPage.hpp"
 
 #include "Application.hpp"
+#include "common/AccountAccess.hpp"
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
@@ -233,7 +234,8 @@ QString formatAPIError(const NetworkResult &result)
 bool saveTwitchAccount(const QString &username, const QString &userID,
                        const QString &clientID, const QString &accessToken)
 {
-    if (username.isEmpty() || userID.isEmpty() || clientID.isEmpty() ||
+    if (!accountAccessError(ProviderId::Twitch, username).isEmpty() ||
+        username.isEmpty() || userID.isEmpty() || clientID.isEmpty() ||
         accessToken.isEmpty())
     {
         return false;
@@ -378,11 +380,13 @@ private:
     QUrl buildAuthUrl() const
     {
         QStringList scopes;
-        scopes.reserve(static_cast<int>(AUTH_SCOPES.size()));
+        scopes.reserve(static_cast<int>(AUTH_SCOPES.size()) + 1);
         for (const auto scope : AUTH_SCOPES)
         {
             scopes.push_back(scope.toString());
         }
+        // Optional for existing accounts. Twitch also requires channel access.
+        scopes.push_back(u"moderator:read:followers"_s);
 
         QUrlQuery query{
             {"response_type", "token"},
@@ -421,6 +425,15 @@ private:
                     const auto error =
                         u"Twitch returned a token for a different app."_s;
                     qCWarning(chatterinoTwitch) << error << json;
+                    this->setBrowserState(u"error"_s, error);
+                    return;
+                }
+
+                if (const auto error =
+                        accountAccessError(ProviderId::Twitch, username);
+                    !error.isEmpty())
+                {
+                    this->authorizationTimer_.stop();
                     this->setBrowserState(u"error"_s, error);
                     return;
                 }

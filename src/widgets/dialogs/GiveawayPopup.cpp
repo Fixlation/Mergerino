@@ -17,17 +17,21 @@
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchBadge.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
+#include "singletons/Fonts.hpp"
 #include "singletons/Theme.hpp"
+#include "util/WidgetHelpers.hpp"
 
 #include <QAbstractAnimation>
 #include <QCheckBox>
 #include <QCompleter>
+#include <QCursor>
 #include <QDateTime>
 #include <QEasingCurve>
 #include <QEvent>
 #include <QFont>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
@@ -39,6 +43,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShowEvent>
@@ -69,16 +74,18 @@ namespace {
 
 constexpr int MAX_CAPTURED_MESSAGES_PER_PARTICIPANT = 40;
 constexpr int MAX_NUMBER = 999999999;
-constexpr int MAX_VISIBLE_ENTRANTS = 6;
+// All sizes below are at a UI scale of 1
+constexpr int WINDOW_WIDTH = 520;
+constexpr int MIN_BODY_HEIGHT = 120;
+constexpr int BODY_SIDE_MARGIN = 16;
 constexpr int ENTRANT_ROW_HEIGHT = 24;
-constexpr int ENTRANT_VIEWPORT_HEIGHT =
-    MAX_VISIBLE_ENTRANTS * ENTRANT_ROW_HEIGHT + 4;
+constexpr int ENTRANT_VIEWPORT_HEIGHT = 6 * ENTRANT_ROW_HEIGHT + 4;
+constexpr int MIN_ENTRANT_VIEWPORT_HEIGHT = 3 * ENTRANT_ROW_HEIGHT + 4;
+constexpr int WHEEL_WIDTH = 220;
 constexpr int WHEEL_AREA_HEIGHT = 228;
-constexpr int KEYWORD_WINDOW_HEIGHT = 625;
-constexpr int WHEEL_WINDOW_HEIGHT =
-    KEYWORD_WINDOW_HEIGHT + WHEEL_AREA_HEIGHT - ENTRANT_VIEWPORT_HEIGHT;
-constexpr int NUMBER_WINDOW_HEIGHT = 455;
-constexpr int EMOTE_WINDOW_HEIGHT = 486;
+constexpr int MIN_WHEEL_AREA_HEIGHT = 150;
+constexpr int WINNER_MESSAGES_HEIGHT = 72;
+constexpr int MIN_WINNER_MESSAGES_HEIGHT = 48;
 constexpr int REEL_RESULT_MS = 3500;
 constexpr int MAX_EMOTE_HINT = 3;
 
@@ -231,13 +238,31 @@ protected:
         painter.setPen(QPen(option.palette.color(QPalette::ButtonText), 1.5,
                             Qt::SolidLine, Qt::RoundCap));
         const auto center = QRectF(this->rect()).center();
-        constexpr qreal HALF_STROKE = 3.0;
-        painter.drawLine(center + QPointF(-HALF_STROKE, -HALF_STROKE),
-                         center + QPointF(HALF_STROKE, HALF_STROKE));
-        painter.drawLine(center + QPointF(HALF_STROKE, -HALF_STROKE),
-                         center + QPointF(-HALF_STROKE, HALF_STROKE));
+        const qreal halfStroke = this->width() * 0.15;
+        painter.drawLine(center + QPointF(-halfStroke, -halfStroke),
+                         center + QPointF(halfStroke, halfStroke));
+        painter.drawLine(center + QPointF(halfStroke, -halfStroke),
+                         center + QPointF(-halfStroke, halfStroke));
     }
 };
+
+// Stylesheet lengths are written for a UI scale of 1. Hairlines stay hairlines.
+QString scalePixels(const QString &sheet, float scale)
+{
+    static const QRegularExpression pixels(QStringLiteral("(\\d+)px"));
+    QString result;
+    qsizetype position = 0;
+    for (auto it = pixels.globalMatch(sheet); it.hasNext();)
+    {
+        const auto match = it.next();
+        const auto value = match.captured(1).toInt();
+        result += sheet.mid(position, match.capturedStart() - position);
+        result += QString::number(value > 1 ? qRound(value * scale) : value);
+        result += QStringLiteral("px");
+        position = match.capturedEnd();
+    }
+    return result + sheet.mid(position);
+}
 
 QLabel *sectionLabel(const QString &text, QWidget *parent)
 {
@@ -273,14 +298,12 @@ GiveawayPopup::GiveawayPopup(QWidget *parent)
           {
               BaseWindow::EnableCustomFrame,
               BaseWindow::CloseButtonOnly,
-              BaseWindow::FixedSizeCustomFrame,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
           },
           parent)
 {
     this->setWindowTitle(QStringLiteral("Giveaway"));
-    this->setScaleIndependentSize(520, KEYWORD_WINDOW_HEIGHT);
     this->setAutoFillBackground(true);
     this->entrantRefreshTimer_.setSingleShot(true);
     this->entrantRefreshTimer_.setInterval(100);
@@ -295,6 +318,7 @@ GiveawayPopup::GiveawayPopup(QWidget *parent)
     });
     this->buildUi();
     this->applyTheme();
+    this->applyScale();
     this->randomizeTarget();
     this->updateModeControls();
     this->updatePlatformControls();
@@ -382,8 +406,24 @@ void GiveawayPopup::buildUi()
     this->root_->setObjectName(QStringLiteral("GiveawayRoot"));
     this->root_->setAutoFillBackground(true);
 
-    auto *rootLayout = new QVBoxLayout(this->root_);
-    rootLayout->setContentsMargins(16, 10, 16, 10);
+    auto *windowLayout = new QVBoxLayout(this->root_);
+    windowLayout->setContentsMargins(0, 0, 0, 0);
+    windowLayout->setSpacing(0);
+
+    // Scrolls when the window can't fit it; the action row below stays pinned
+    // so that starting and rolling are always reachable.
+    this->bodyScroll_ = new QScrollArea(this->root_);
+    this->bodyScroll_->setObjectName(QStringLiteral("GiveawayBodyScroll"));
+    this->bodyScroll_->setFrameShape(QFrame::NoFrame);
+    this->bodyScroll_->setFocusPolicy(Qt::NoFocus);
+    this->bodyScroll_->setWidgetResizable(true);
+    this->bodyScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    this->body_ = new QWidget(this->bodyScroll_);
+    this->body_->setObjectName(QStringLiteral("GiveawayBody"));
+    this->body_->installEventFilter(this);
+
+    auto *rootLayout = new QVBoxLayout(this->body_);
+    rootLayout->setContentsMargins(BODY_SIDE_MARGIN, 10, BODY_SIDE_MARGIN, 0);
     rootLayout->setSpacing(8);
 
     rootLayout->addWidget(sectionLabel(QStringLiteral("Platforms"), this));
@@ -397,9 +437,7 @@ void GiveawayPopup::buildUi()
     {
         auto *button = new GiveawayPlatformButton(platform, this);
         button->setObjectName(QStringLiteral("GiveawayPlatformButton"));
-        button->setIconSize(QSize(20, 20));
         button->setToolButtonStyle(Qt::ToolButtonIconOnly);
-        button->setFixedSize(QSize(38, 34));
         button->setAccessibleName(platformName(platform));
         button->setCheckable(true);
         button->setChecked(true);
@@ -508,7 +546,6 @@ void GiveawayPopup::buildUi()
         QStringLiteral("GiveawaySubscriberLuckValue"));
     this->subscriberLuckValue_->setAlignment(Qt::AlignRight |
                                              Qt::AlignVCenter);
-    this->subscriberLuckValue_->setFixedWidth(34);
     subLuckRow->addWidget(this->subscriberLuckValue_);
     keywordLayout->addLayout(subLuckRow);
     QObject::connect(this->subscriberLuck_, &QSlider::valueChanged, this,
@@ -579,8 +616,6 @@ void GiveawayPopup::buildUi()
     this->numberVisibilityButton_ = new QPushButton(numberPage);
     this->numberVisibilityButton_->setObjectName(
         QStringLiteral("GiveawayVisibilityButton"));
-    this->numberVisibilityButton_->setFixedSize(QSize(32, 30));
-    this->numberVisibilityButton_->setIconSize(QSize(16, 16));
     this->numberVisibilityButton_->setAccessibleName(
         QStringLiteral("Hide target number"));
     this->numberVisibilityButton_->setCursor(Qt::PointingHandCursor);
@@ -668,17 +703,10 @@ void GiveawayPopup::buildUi()
     this->emoteHintButton_->setToolTip(
         QStringLiteral("Reveal a little more about the emote: where it is "
                        "from, its length, then its first letter."));
-    // room for the longest label so the row never shifts
-    this->emoteHintButton_->setMinimumWidth(
-        this->emoteHintButton_->fontMetrics().horizontalAdvance(
-            QStringLiteral("Hint %1/%1").arg(MAX_EMOTE_HINT)) +
-        28);
     emoteTargetRow->addWidget(this->emoteHintButton_);
     this->emoteVisibilityButton_ = new QPushButton(emotePage);
     this->emoteVisibilityButton_->setObjectName(
         QStringLiteral("GiveawayVisibilityButton"));
-    this->emoteVisibilityButton_->setFixedSize(QSize(32, 30));
-    this->emoteVisibilityButton_->setIconSize(QSize(16, 16));
     this->emoteVisibilityButton_->setCursor(Qt::PointingHandCursor);
     emoteTargetRow->addWidget(this->emoteVisibilityButton_);
     emoteLayout->addLayout(emoteTargetRow);
@@ -781,9 +809,9 @@ void GiveawayPopup::buildUi()
                          this->updateRoundControls();
                      });
 
-    auto *roundCard = new QWidget(this);
+    this->roundCard_ = new QWidget(this);
+    auto *roundCard = this->roundCard_;
     roundCard->setObjectName(QStringLiteral("GiveawayRoundCard"));
-    roundCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto *roundLayout = new QVBoxLayout(roundCard);
     roundLayout->setContentsMargins(11, 7, 11, 7);
     roundLayout->setSpacing(4);
@@ -814,8 +842,11 @@ void GiveawayPopup::buildUi()
         Qt::ScrollBarAlwaysOff);
     this->entrantScrollArea_->setVerticalScrollBarPolicy(
         Qt::ScrollBarAsNeeded);
+    // The flexible sections ignore their size hints: the body scrolls once it
+    // is shorter than its hints, which should only be below these minimums.
     this->entrantScrollArea_->setSizePolicy(QSizePolicy::Expanding,
-                                            QSizePolicy::Fixed);
+                                            QSizePolicy::Ignored);
+    this->entrantScrollArea_->viewport()->installEventFilter(this);
     this->entrantListWidget_ = new QWidget(this->entrantScrollArea_);
     this->entrantListWidget_->setObjectName(
         QStringLiteral("GiveawayEntrantList"));
@@ -830,13 +861,9 @@ void GiveawayPopup::buildUi()
                          this->renderEntrantRows();
                      });
     this->entrantScrollArea_->setWidget(this->entrantListWidget_);
-    this->entrantScrollArea_->setFixedHeight(ENTRANT_VIEWPORT_HEIGHT);
-    this->entrantScrollArea_->verticalScrollBar()->setSingleStep(
-        ENTRANT_ROW_HEIGHT);
     drawLayout->addWidget(this->entrantScrollArea_, 1);
 
     this->reel_ = new GiveawayReel(this->drawArea_);
-    this->reel_->setFixedHeight(ENTRANT_VIEWPORT_HEIGHT);
     this->reel_->hide();
     this->reel_->onLanded = [this] {
         this->handleDrawLanded();
@@ -848,13 +875,13 @@ void GiveawayPopup::buildUi()
     drawLayout->addWidget(this->reel_, 1);
 
     this->wheel_ = new GiveawayWheel(this->drawArea_);
-    this->wheel_->setFixedSize(220, WHEEL_AREA_HEIGHT);
+    this->wheel_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Ignored);
     this->wheel_->hide();
     this->wheel_->onLanded = [this] {
         this->handleDrawLanded();
     };
     drawLayout->addWidget(this->wheel_);
-    roundLayout->addWidget(this->drawArea_);
+    roundLayout->addWidget(this->drawArea_, 1);
 
     this->updateEntrantList();
     rootLayout->addWidget(roundCard);
@@ -877,11 +904,14 @@ void GiveawayPopup::buildUi()
     this->winnerMessages_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     this->winnerMessages_->setPlaceholderText(QStringLiteral(
         "The winner's messages will stay here until the next roll."));
-    this->winnerMessages_->setFixedHeight(72);
-    rootLayout->addWidget(this->winnerMessages_);
+    this->winnerMessages_->setSizePolicy(QSizePolicy::Expanding,
+                                         QSizePolicy::Ignored);
+    rootLayout->addWidget(this->winnerMessages_, 1);
+    this->bodyScroll_->setWidget(this->body_);
+    windowLayout->addWidget(this->bodyScroll_, 1);
 
     auto *actionRow = new QHBoxLayout;
-    actionRow->setContentsMargins(0, 0, 0, 0);
+    actionRow->setContentsMargins(BODY_SIDE_MARGIN, 8, BODY_SIDE_MARGIN, 10);
     actionRow->setSpacing(8);
     this->startButton_ = new QPushButton(this);
     this->startButton_->setObjectName(QStringLiteral("GiveawayStartButton"));
@@ -892,7 +922,7 @@ void GiveawayPopup::buildUi()
     actionRow->addStretch(1);
     actionRow->addWidget(this->startButton_);
     actionRow->addWidget(this->rollButton_);
-    rootLayout->addLayout(actionRow);
+    windowLayout->addLayout(actionRow);
     QObject::connect(this->startButton_, &QPushButton::clicked, this, [this] {
         this->startOrStopRound();
     });
@@ -997,11 +1027,12 @@ void GiveawayPopup::updateEntrantList()
 {
     this->entrantRefreshTimer_.stop();
     auto *scroll = this->entrantScrollArea_->verticalScrollBar();
-    const int first = scroll->value() / ENTRANT_ROW_HEIGHT;
+    const int rowHeight = this->entrantRowHeight();
+    const int first = scroll->value() / rowHeight;
     const auto anchor = first < this->sortedParticipantKeys_.size()
                             ? this->sortedParticipantKeys_[first]
                             : QString{};
-    const int offset = scroll->value() % ENTRANT_ROW_HEIGHT;
+    const int offset = scroll->value() % rowHeight;
     if (!this->pendingParticipantKeys_.isEmpty())
     {
         const auto less = [this](const QString &left, const QString &right) {
@@ -1021,15 +1052,12 @@ void GiveawayPopup::updateEntrantList()
                            this->sortedParticipantKeys_.end(), less);
     }
     this->entrantListWidget_->setMinimumHeight(
-        std::max<int>(this->sortedParticipantKeys_.size(),
-                      MAX_VISIBLE_ENTRANTS) *
-            ENTRANT_ROW_HEIGHT +
-        4);
+        this->sortedParticipantKeys_.size() * rowHeight + 4);
     if (first > 0 && !anchor.isEmpty())
     {
         const auto position = this->sortedParticipantKeys_.indexOf(anchor);
         if (position >= 0)
-            scroll->setValue(position * ENTRANT_ROW_HEIGHT + offset);
+            scroll->setValue(position * rowHeight + offset);
     }
     this->renderEntrantRows();
     this->updateEntrantControls();
@@ -1037,9 +1065,17 @@ void GiveawayPopup::updateEntrantList()
 
 bool GiveawayPopup::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == this->entrantListWidget_ && event->type() == QEvent::Resize)
+    if (event->type() == QEvent::Resize)
     {
-        this->renderEntrantRows();
+        if (watched == this->body_)
+        {
+            this->updateModeStackHeight(this->body_->width());
+        }
+        else if (watched == this->entrantListWidget_ ||
+                 watched == this->entrantScrollArea_->viewport())
+        {
+            this->renderEntrantRows();
+        }
     }
     return BasePopup::eventFilter(watched, event);
 }
@@ -1048,16 +1084,16 @@ void GiveawayPopup::renderEntrantRows()
 {
     if (!this->entrantListWidget_ || !this->entrantEmptyLabel_)
         return;
+    const int rowHeight = this->entrantRowHeight();
     const int viewportRows =
-        std::max(MAX_VISIBLE_ENTRANTS,
-                 this->entrantScrollArea_->maximumHeight() / ENTRANT_ROW_HEIGHT);
-    this->entrantEmptyLabel_->setGeometry(0, 2,
-                                          this->entrantListWidget_->width(),
-                                          viewportRows * ENTRANT_ROW_HEIGHT);
+        this->entrantScrollArea_->viewport()->height() / rowHeight;
+    this->entrantEmptyLabel_->setGeometry(
+        0, 2, this->entrantListWidget_->width(),
+        this->entrantListWidget_->height() - 4);
     this->entrantEmptyLabel_->setVisible(
         this->sortedParticipantKeys_.isEmpty());
-    const int first = this->entrantScrollArea_->verticalScrollBar()->value() /
-                      ENTRANT_ROW_HEIGHT;
+    const int first =
+        this->entrantScrollArea_->verticalScrollBar()->value() / rowHeight;
     const int count = std::min<int>(
         viewportRows + 2,
         std::max<int>(0, this->sortedParticipantKeys_.size() - first));
@@ -1067,12 +1103,12 @@ void GiveawayPopup::renderEntrantRows()
         row.widget = new QWidget(this->entrantListWidget_);
         row.widget->setObjectName(QStringLiteral("GiveawayEntrantRow"));
         auto *layout = new QHBoxLayout(row.widget);
-        layout->setContentsMargins(6, 0, 8, 0);
-        layout->setSpacing(8);
+        layout->setContentsMargins(this->scaled(6), 0, this->scaled(8), 0);
+        layout->setSpacing(this->scaled(8));
         row.platform = new QLabel(row.widget);
         row.platform->setObjectName(
             QStringLiteral("GiveawayEntrantPlatformIcon"));
-        row.platform->setFixedSize(QSize(18, ENTRANT_ROW_HEIGHT));
+        row.platform->setFixedSize(this->scaled(18), rowHeight);
         row.platform->setAlignment(Qt::AlignCenter);
         row.name = new QLabel(row.widget);
         row.name->setObjectName(QStringLiteral("GiveawayEntrantName"));
@@ -1084,7 +1120,7 @@ void GiveawayPopup::renderEntrantRows()
         row.remove->setObjectName(QStringLiteral("GiveawayRemoveEntrant"));
         row.remove->setAutoRaise(true);
         row.remove->setCursor(Qt::PointingHandCursor);
-        row.remove->setFixedSize(20, 20);
+        row.remove->setFixedSize(this->scaled(20), this->scaled(20));
         QObject::connect(
             row.remove, &QToolButton::pressed, this, [button = row.remove] {
                 button->setProperty("pressedParticipantKey",
@@ -1126,7 +1162,7 @@ void GiveawayPopup::renderEntrantRows()
             row.name->setText(participant->author);
             row.platform->setPixmap(
                 QIcon(giveawayPlatformIconPath(participant->platform))
-                    .pixmap(QSize(16, 16)));
+                    .pixmap(QSize(this->scaled(16), this->scaled(16))));
             row.platform->setToolTip(platformName(participant->platform));
             row.remove->setProperty("participantKey", key);
             row.remove->setAccessibleName(
@@ -1144,9 +1180,8 @@ void GiveawayPopup::renderEntrantRows()
         if (this->previousWinnerKeys_.contains(key))
             entryText.prepend(QStringLiteral("Won • "));
         row.entries->setText(entryText);
-        row.widget->setGeometry(0, 2 + (first + i) * ENTRANT_ROW_HEIGHT,
-                                this->entrantListWidget_->width(),
-                                ENTRANT_ROW_HEIGHT);
+        row.widget->setGeometry(0, 2 + (first + i) * rowHeight,
+                                this->entrantListWidget_->width(), rowHeight);
         row.widget->show();
     }
 }
@@ -1170,6 +1205,7 @@ void GiveawayPopup::setMode(Mode mode)
                         .arg(this->selectedPlatformsText()));
     this->updateModeControls();
     this->updateRoundControls();
+    this->fitToContent();
 }
 
 void GiveawayPopup::updateModeControls()
@@ -1198,8 +1234,6 @@ void GiveawayPopup::updateModeControls()
     this->entrantCountLabel_->setVisible(entries ||
                                          this->mode_ == Mode::Emote);
     this->drawArea_->setVisible(entries);
-    this->entrantScrollArea_->setFixedHeight(
-        wheel ? WHEEL_AREA_HEIGHT : ENTRANT_VIEWPORT_HEIGHT);
     this->wheel_->setVisible(wheel);
     if (!keyword)
     {
@@ -1212,29 +1246,157 @@ void GiveawayPopup::updateModeControls()
     this->entrantScrollArea_->setVisible(entries && !reelShown);
     this->renderEntrantRows();
 
-    this->modeStack_->setFixedHeight(
-        this->modeStack_->currentWidget()->sizeHint().height());
-    if (auto *layout = this->root_->layout())
+    // Extra height goes to the entrants, or to the messages if there are none
+    this->roundCard_->setSizePolicy(
+        QSizePolicy::Expanding,
+        entries ? QSizePolicy::Expanding : QSizePolicy::Fixed);
+    qobject_cast<QVBoxLayout *>(this->body_->layout())
+        ->setStretchFactor(this->roundCard_, entries ? 3 : 0);
+    this->updateModeStackHeight(this->width());
+}
+
+void GiveawayPopup::updateModeStackHeight(int bodyWidth)
+{
+    // QStackedWidget would otherwise reserve room for its tallest page
+    const auto *layout = this->modeStack_->currentWidget()->layout();
+    const int width = bodyWidth - 2 * this->scaled(BODY_SIDE_MARGIN);
+    this->modeStack_->setFixedHeight(layout->hasHeightForWidth()
+                                         ? layout->totalHeightForWidth(width)
+                                         : layout->totalSizeHint().height());
+}
+
+QSize GiveawayPopup::availableSize() const
+{
+    // BaseWindow places the window on the screen with the cursor when it opens
+    const auto *screen = this->placed_
+                             ? this->screen()
+                             : QGuiApplication::screenAt(QCursor::pos());
+    if (screen == nullptr)
     {
-        layout->invalidate();
-        layout->activate();
+        screen = this->screen();
     }
-    switch (this->mode_)
+    return screen != nullptr ? screen->availableGeometry().size()
+                             : QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+}
+
+void GiveawayPopup::fitToContent()
+{
+    const auto available = this->availableSize();
+    const bool fitted = this->fittedHeight_ > 0;
+    const int addedByUser =
+        fitted ? std::max(0, this->height() - this->fittedHeight_) : 0;
+    const int width = std::min(
+        fitted ? this->width() : this->scaled(WINDOW_WIDTH), available.width());
+
+    // Nested layouts only catch up on their own when the event loop runs
+    this->updateModeStackHeight(width);
+    auto *windowLayout = this->layout();
+    windowLayout->invalidate();
+    windowLayout->activate();
+
+    auto *layout = this->body_->layout();
+    this->bodyScroll_->setMinimumWidth(std::min(
+        layout->minimumSize().width() + this->scaled(8), available.width()));
+    const int minimum = layout->hasHeightForWidth()
+                            ? layout->minimumHeightForWidth(width)
+                            : layout->minimumSize().height();
+
+    // How far the flexible sections sit above their minimum by default
+    int spare =
+        this->scaled(WINNER_MESSAGES_HEIGHT - MIN_WINNER_MESSAGES_HEIGHT);
+    if (this->mode_ == Mode::Keyword)
     {
-        case Mode::Wheel:
-            this->setScaleIndependentHeight(WHEEL_WINDOW_HEIGHT);
-            break;
-        case Mode::Emote:
-            this->setScaleIndependentHeight(EMOTE_WINDOW_HEIGHT);
-            break;
-        case Mode::Number:
-            this->setScaleIndependentHeight(NUMBER_WINDOW_HEIGHT);
-            break;
-        case Mode::Keyword:
-        default:
-            this->setScaleIndependentHeight(KEYWORD_WINDOW_HEIGHT);
-            break;
+        spare += this->scaled(ENTRANT_VIEWPORT_HEIGHT -
+                              MIN_ENTRANT_VIEWPORT_HEIGHT);
     }
+    else if (this->mode_ == Mode::Wheel)
+    {
+        spare += this->scaled(WHEEL_AREA_HEIGHT - MIN_WHEEL_AREA_HEIGHT);
+    }
+
+    const int chrome = this->height() - this->bodyScroll_->height();
+    this->fittedHeight_ = chrome + minimum + spare;
+    this->resize(width, std::min(this->fittedHeight_ + addedByUser,
+                                 available.height()));
+    if (this->placed_)
+    {
+        this->moveTo(this->pos(), widgets::BoundsChecking::DesiredPosition);
+    }
+}
+
+int GiveawayPopup::scaled(int value) const
+{
+    return qRound(value * this->scale());
+}
+
+int GiveawayPopup::entrantRowHeight() const
+{
+    return this->scaled(ENTRANT_ROW_HEIGHT);
+}
+
+void GiveawayPopup::applyScale()
+{
+    if (this->layoutMetrics_.empty())
+    {
+        for (auto *layout : this->root_->findChildren<QLayout *>())
+        {
+            this->layoutMetrics_.push_back(
+                {layout, layout->contentsMargins(), layout->spacing()});
+        }
+    }
+    for (const auto &[layout, margins, spacing] : this->layoutMetrics_)
+    {
+        layout->setContentsMargins(
+            this->scaled(margins.left()), this->scaled(margins.top()),
+            this->scaled(margins.right()), this->scaled(margins.bottom()));
+        if (spacing > 0)
+        {
+            layout->setSpacing(this->scaled(spacing));
+        }
+    }
+
+    for (auto *button : std::as_const(this->platformButtons_))
+    {
+        button->setIconSize(QSize(this->scaled(20), this->scaled(20)));
+        button->setFixedSize(this->scaled(38), this->scaled(34));
+    }
+    this->subscriberLuckValue_->setFixedWidth(this->scaled(34));
+    for (auto *button :
+         {this->numberVisibilityButton_, this->emoteVisibilityButton_})
+    {
+        button->setFixedSize(this->scaled(32), this->scaled(30));
+        button->setIconSize(QSize(this->scaled(16), this->scaled(16)));
+    }
+    // room for the longest label so the row never shifts
+    this->emoteHintButton_->ensurePolished();
+    this->emoteHintButton_->setMinimumWidth(
+        this->emoteHintButton_->fontMetrics().horizontalAdvance(
+            QStringLiteral("Hint %1/%1").arg(MAX_EMOTE_HINT)) +
+        this->scaled(28));
+
+    this->emoteTile_->setContentScale(this->scale());
+    this->reel_->setContentScale(this->scale());
+    this->reel_->setMinimumHeight(this->scaled(MIN_ENTRANT_VIEWPORT_HEIGHT));
+    this->reel_->setMaximumHeight(this->scaled(ENTRANT_VIEWPORT_HEIGHT));
+    this->wheel_->setContentScale(this->scale());
+    this->wheel_->setFixedWidth(this->scaled(WHEEL_WIDTH));
+    this->wheel_->setMinimumHeight(this->scaled(MIN_WHEEL_AREA_HEIGHT));
+    this->wheel_->setMaximumHeight(this->scaled(WHEEL_AREA_HEIGHT));
+    this->winnerMessages_->setMinimumHeight(
+        this->scaled(MIN_WINNER_MESSAGES_HEIGHT));
+    this->bodyScroll_->setMinimumHeight(this->scaled(MIN_BODY_HEIGHT));
+    this->entrantScrollArea_->setMinimumHeight(
+        this->scaled(MIN_ENTRANT_VIEWPORT_HEIGHT));
+    this->entrantScrollArea_->verticalScrollBar()->setSingleStep(
+        this->entrantRowHeight());
+
+    // Rows take their sizes when they are created
+    for (const auto &row : this->entrantRows_)
+    {
+        delete row.widget;
+    }
+    this->entrantRows_.clear();
+    this->updateEntrantList();
 }
 
 void GiveawayPopup::updatePlatformControls()
@@ -2189,7 +2351,7 @@ QString GiveawayPopup::selectedPlatformsText() const
                                 MessagePlatform::TikTok})
     {
         const auto button = this->platformButtons_.value(platform, nullptr);
-        if (button != nullptr && button->isVisible() && button->isChecked())
+        if (button != nullptr && !button->isHidden() && button->isChecked())
         {
             platforms.append(platformName(platform));
         }
@@ -2266,8 +2428,11 @@ void GiveawayPopup::applyTheme()
     this->setPalette(palette);
     this->root_->setPalette(palette);
 
-    this->root_->setStyleSheet(QStringLiteral(R"(
-QWidget#GiveawayRoot { background: %1; color: %4; }
+    const auto font =
+        getApp()->getFonts()->getFont(FontStyle::UiMedium, this->scale());
+    const auto sheet = QStringLiteral(R"(
+QWidget#GiveawayRoot, QWidget#GiveawayBody { background: %1; color: %4; }
+QScrollArea#GiveawayBodyScroll { background: transparent; border: none; }
 QLabel { color: %4; }
 QLabel#GiveawaySectionLabel { font-weight: 600; }
 QLabel#GiveawayHelp, QLabel#GiveawayEntrantEmpty,
@@ -2277,6 +2442,16 @@ QLabel#GiveawayWinnerLabel { font-weight: 600; }
 QLabel#GiveawaySubscriberLuckValue { font-weight: 600; }
 QCheckBox#GiveawayExcludePreviousWinners,
 QCheckBox#GiveawayEmoteGlobals { color: %5; spacing: 6px; }
+QCheckBox::indicator {
+    width: 7px;
+    height: 7px;
+    padding: 2px;
+    background-clip: content;
+    background: %3;
+    border: 1px solid %6;
+    border-radius: 2px;
+}
+QCheckBox::indicator:checked { background: %4; }
 QLabel#GiveawayStatus[error="true"] { color: #ff6b6b; }
 QWidget#GiveawayRoundCard {
     background: %2;
@@ -2303,6 +2478,9 @@ QScrollBar::handle:vertical {
     min-height: 22px;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
 QLineEdit, QSpinBox, QTextBrowser {
     background: %3;
     color: %4;
@@ -2388,10 +2566,15 @@ QPushButton#GiveawayEmoteSource:!checked { color: %5; }
 QPushButton#GiveawayStartButton,
 QPushButton#GiveawayRollButton { font-weight: 600; min-width: 104px; }
 )")
-                                  .arg(background.name(), panel.name(),
-                                       field.name(), text.name(), muted.name(),
-                                       border.name(), hover.name(),
-                                       selected.name()));
+                           .arg(background.name(), panel.name(), field.name(),
+                                text.name(), muted.name(), border.name(),
+                                hover.name(), selected.name());
+    // Every descendant gets its size from here, so widgets that get repolished
+    // or are created later can't fall back to an unscaled font
+    this->root_->setStyleSheet(
+        QStringLiteral("QWidget { font-size: %1pt; }\n")
+            .arg(font.pointSizeF(), 0, 'f', 1) +
+        scalePixels(sheet, this->scale()));
 
     this->updateEntrantList();
     this->applyNumberVisibility(this->numberVisibility_);
@@ -2403,9 +2586,29 @@ void GiveawayPopup::themeChangedEvent()
     this->applyTheme();
 }
 
+void GiveawayPopup::scaleChangedEvent(float scale)
+{
+    BasePopup::scaleChangedEvent(scale);
+    if (this->root_ == nullptr)
+    {
+        return;  // Initial UI construction.
+    }
+    this->applyTheme();
+    this->applyScale();
+    this->fittedHeight_ = 0;
+    if (this->isVisible())
+    {
+        this->fitToContent();
+    }
+}
+
 void GiveawayPopup::showEvent(QShowEvent *event)
 {
+    // Done first so that the base class checks the bounds of the final size
+    this->placed_ = false;
+    this->fitToContent();
     BasePopup::showEvent(event);
+    this->placed_ = true;
     if (this->mode_ == Mode::Emote)
     {
         // Emote sets load in the background, so pick up anything new

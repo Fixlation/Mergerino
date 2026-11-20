@@ -278,7 +278,7 @@ bool shouldShowMessageInActivityPane(const Message &message,
                                      uint32_t twitchMinimumBits,
                                      uint32_t kickMinimumKicks,
                                      uint32_t tiktokGiftMinimumDiamonds,
-                                     bool showRaidsAndWatchStreaks)
+                                     bool showRaids, bool showWatchStreaks)
 {
     if (isActivityBotMessage(message))
     {
@@ -306,7 +306,8 @@ bool shouldShowMessageInActivityPane(const Message &message,
 
     if (message.flags.hasAny({MessageFlag::Raid, MessageFlag::WatchStreak}))
     {
-        return showRaidsAndWatchStreaks;
+        return (message.flags.has(MessageFlag::Raid) && showRaids) ||
+               (message.flags.has(MessageFlag::WatchStreak) && showWatchStreaks);
     }
 
     if (isActivityTwitchBitsMessage(message))

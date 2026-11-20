@@ -79,6 +79,11 @@ public:
 
     bool isEditFirstWord() const;
     QString getInputText() const;
+    /// The text caret, in this widget's coordinates
+    QRect caretRect() const;
+    /// The message box (text and its buttons, without the emote bar or
+    /// reply bar), in this widget's coordinates
+    QRect composerRect() const;
     void insertText(const QString &text);
 
     void setReply(MessagePtr target);

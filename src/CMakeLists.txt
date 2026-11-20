@@ -88,6 +88,14 @@ set(SOURCE_FILES
         controllers/commands/builtin/MassModeration.hpp
         controllers/moderation/MassModerationQueue.cpp
         controllers/moderation/MassModerationQueue.hpp
+        controllers/moderation/ModerationProfiles.cpp
+        controllers/moderation/ModerationProfiles.hpp
+        controllers/moderation/ModerationReview.cpp
+        controllers/moderation/ModerationReview.hpp
+        controllers/moderation/ModerationRules.cpp
+        controllers/moderation/ModerationRules.hpp
+        controllers/priority/PriorityChatModel.cpp
+        controllers/priority/PriorityChatModel.hpp
         controllers/commands/builtin/Misc.cpp
         controllers/commands/builtin/Misc.hpp
         controllers/commands/builtin/PinMessage.cpp
@@ -899,6 +907,14 @@ set(SOURCE_FILES
         widgets/helper/TableStyles.hpp
         widgets/helper/ThemeBackdrop.cpp
         widgets/helper/ThemeBackdrop.hpp
+        widgets/scenes/ArcadeScene.cpp
+        widgets/scenes/DepartureScene.cpp
+        widgets/scenes/KoiScene.cpp
+        widgets/scenes/LanternScene.cpp
+        widgets/scenes/ThemeScene.cpp
+        widgets/scenes/ThemeScene.hpp
+        widgets/scenes/ThemeSceneHost.cpp
+        widgets/scenes/ThemeSceneHost.hpp
         widgets/helper/ThemePreview.cpp
         widgets/helper/ThemePreview.hpp
         widgets/helper/TrimRegExpValidator.cpp
@@ -966,6 +982,13 @@ set(SOURCE_FILES
         widgets/splits/InputHighlighter.hpp
         widgets/splits/Split.cpp
         widgets/splits/Split.hpp
+        widgets/splits/ModView.cpp
+        widgets/splits/ModView.hpp
+        widgets/splits/PriorityChat.cpp
+        widgets/splits/PriorityChat.hpp
+        widgets/splits/ModViewButton.hpp
+        widgets/splits/ModViewRules.cpp
+        widgets/splits/ModViewRules.hpp
         widgets/splits/SplitCommon.hpp
         widgets/splits/SplitContainer.cpp
         widgets/splits/SplitContainer.hpp

@@ -30,8 +30,10 @@ class MarkdownLabel;
 class EditUserNotesDialog;
 class TwitchModCommentsDialog;
 class ChannelView;
+class IHelix;
 class Split;
 struct HelixUser;
+struct Message;
 class LabelButton;
 class PixmapButton;
 class LiveIndicator;
@@ -41,6 +43,7 @@ enum class MessagePlatform : std::uint8_t;
 class UserInfoPopup final : public DraggablePopup
 {
     Q_OBJECT
+    friend class UserInfoPopupTestAccess;
 
 public:
     /**
@@ -60,6 +63,9 @@ public:
                  const ChannelPtr &openingChannel, MessagePlatform platform,
                  const QString &platformUserID = {});
 
+    // A user link can refer to someone other than the message's author.
+    static QString userIDForLink(const QString &name, const Message &message);
+
 protected:
     void themeChangedEvent() override;
     void scaleChangedEvent(float scale) override;
@@ -70,6 +76,8 @@ protected:
 private:
     void installEvents();
     void updateUserData();
+    void requestTwitchFollowDate(IHelix &helix, const QString &broadcasterID,
+                                 const QString &userID);
     void updateGenericPlatformUserData(const QString &platformUserID);
     void updateLatestMessages();
     void updateNotes();
@@ -83,6 +91,7 @@ private:
     bool canModerateTargetUser() const;
     bool isCurrentPlatformUser() const;
     void sendModerationCommand(const QString &command);
+    QString moderationCommand(const QString &action, int durationSeconds) const;
     void sendModerationAction(const QString &action, int durationSeconds = 0);
     void sendYouTubeModerationAction(const QString &action,
                                      int durationSeconds);
@@ -99,6 +108,7 @@ private:
     void updateAvatarUrl();
 
     void updateKickUserData();
+    void updateKickUserID(uint64_t userID);
     void onKickProfilePictureClick(Qt::MouseButton button);
 
     QStringView platformName() const;
@@ -158,6 +168,7 @@ private:
         Label *createdDateLabel = nullptr;
         Label *userIDLabel = nullptr;
         Label *followageLabel = nullptr;
+        Label *followageInfo = nullptr;
         Label *subageLabel = nullptr;
 
         LiveIndicator *liveIndicator = nullptr;

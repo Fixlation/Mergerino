@@ -22,6 +22,7 @@
 #include "providers/kick/KickAccount.hpp"
 #include "providers/kick/KickApi.hpp"
 #include "providers/kick/KickChatServer.hpp"
+#include "providers/kick/KickUserBlock.hpp"
 #include "providers/merged/MergedChannel.hpp"
 #include "providers/tiktok/TikTokLiveChat.hpp"
 #include "providers/twitch/api/Helix.hpp"
@@ -89,6 +90,22 @@ constexpr QStringView SEVENTV_KICK_USER_API =
 constexpr QStringView SEVENTV_USER_PAGE = u"https://7tv.app/users/";
 
 using namespace chatterino;
+
+bool setFollowingSince(Label *label, const QDateTime &followedAt)
+{
+    if (!followedAt.isValid())
+    {
+        return false;
+    }
+
+    label->setText(QStringLiteral("❤ Following since ") +
+                   followedAt.date().toString(Qt::ISODate));
+    label->setToolTip(
+        formatLongFriendlyDuration(followedAt, QDateTime::currentDateTimeUtc()) +
+        QStringLiteral(" ago"));
+    label->setMouseTracking(true);
+    return true;
+}
 
 Label *addCopyableLabel(LayoutCreator<QHBoxLayout> box, const char *tooltip,
                         PixmapButton **copyButton = nullptr)
@@ -491,7 +508,17 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                 .assign(&this->ui_.followerCountLabel);
             vbox.emplace<Label>(TEXT_CREATED.arg(""))
                 .assign(&this->ui_.createdDateLabel);
-            vbox.emplace<Label>("").assign(&this->ui_.followageLabel);
+            auto followage = vbox.emplace<QHBoxLayout>()
+                                 .withoutMargin()
+                                 .withoutSpacing();
+            followage.emplace<Label>("").assign(&this->ui_.followageLabel);
+            auto info = followage.emplace<Label>(QStringLiteral("ⓘ"))
+                            .assign(&this->ui_.followageInfo);
+            info->setPadding(QMargins(0, 0, 4, 0));
+            info->setAccessibleName(QStringLiteral("Follow date information"));
+            info->setMouseTracking(true);
+            info->hide();
+            followage->addStretch(1);
             vbox.emplace<Label>("").assign(&this->ui_.subageLabel);
         }
     }
@@ -972,8 +999,18 @@ void UserInfoPopup::installEvents()
     QObject::connect(
         this->ui_.block, &QCheckBox::stateChanged, this,
         [this](int newState) mutable {
-            if (this->isKick_ || this->isGenericPlatform_)
+            if (this->isGenericPlatform_)
             {
+                return;
+            }
+
+            if (this->isKick_)
+            {
+                if (newState == Qt::Checked || newState == Qt::Unchecked)
+                {
+                    setKickUserLocallyBlocked(this->userName_,
+                                              newState == Qt::Checked);
+                }
                 return;
             }
 
@@ -1130,6 +1167,17 @@ void UserInfoPopup::installEvents()
             }));
 }
 
+QString UserInfoPopup::userIDForLink(const QString &name, const Message &message)
+{
+    if (message.platform == MessagePlatform::Kick &&
+        name.compare(message.loginName, Qt::CaseInsensitive) != 0 &&
+        name.compare(message.displayName, Qt::CaseInsensitive) != 0)
+    {
+        return {};
+    }
+    return message.userID;
+}
+
 void UserInfoPopup::setData(const QString &name, const ChannelPtr &channel)
 {
     this->setData(name, channel, channel);
@@ -1195,10 +1243,28 @@ void UserInfoPopup::setData(const QString &name,
     this->platformUserID_ = platformUserID;
     this->isKick_ = platform == MessagePlatform::Kick ||
                     this->underlyingChannel_->getType() == Channel::Type::Kick;
+    this->kickUserID_ = 0;
+    if (this->isKick_)
+    {
+        bool ok = false;
+        auto userID = (isId ? name.mid(idPrefix.size()) : platformUserID)
+                          .toULongLong(&ok);
+        this->updateKickUserID(ok ? userID : 0);
+    }
     this->isGenericPlatform_ = platform == MessagePlatform::YouTube ||
                                platform == MessagePlatform::TikTok;
+    this->ui_.block->setText(this->isKick_ ? "Block in Mergerino" : "Block");
+    this->ui_.block->setToolTip(
+        this->isKick_
+            ? "Stops new messages from this Kick user in Mergerino only. "
+              "It doesn't mute them on Kick."
+            : QString());
     ++this->channelModerationPermissionsGeneration_;
     this->channelModerationPermissions_ = {};
+    this->ui_.followageLabel->setText({});
+    this->ui_.followageLabel->setToolTip({});
+    this->ui_.followageInfo->hide();
+    this->ui_.followageInfo->setToolTip({});
     this->updateTargetRoleStateFromMessages();
     this->ui_.timeoutWidget->setMinTimeout(this->isKick_ ? 60 : 1);
     this->youtubeModerationConnection_.reset();
@@ -1319,7 +1385,6 @@ void UserInfoPopup::updateGenericPlatformUserData(
     this->ui_.followerCountLabel->setText(TEXT_PLATFORM.arg(platform));
     this->ui_.createdDateLabel->setText(TEXT_CREATED.arg(TEXT_UNAVAILABLE));
     this->ui_.createdDateLabel->setToolTip(QString());
-    this->ui_.followageLabel->setText(QString());
     this->ui_.subageLabel->setText(QString());
 
     const auto labelID = visibleID.isEmpty() ? TEXT_UNAVAILABLE.toString()
@@ -1512,19 +1577,35 @@ void UserInfoPopup::sendModerationAction(const QString &action,
         return;
     }
 
-    if (action == QStringLiteral("ban"))
+    auto command = this->moderationCommand(action, durationSeconds);
+    if (!command.isEmpty())
     {
-        this->sendModerationCommand("/ban " + this->userName_);
+        this->sendModerationCommand(command);
     }
-    else if (action == QStringLiteral("unban"))
+}
+
+QString UserInfoPopup::moderationCommand(const QString &action,
+                                       int durationSeconds) const
+{
+    // Kick's moderation API accepts user IDs. Its channel directory cannot
+    // reliably resolve ordinary chatters, so keep the identity from chat.
+    const auto target = this->isKick_ && this->kickUserID_ != 0
+                            ? "id:" + QString::number(this->kickUserID_)
+                            : this->userName_;
+    if (target.isEmpty())
     {
-        this->sendModerationCommand("/unban " + this->userName_);
+        return {};
     }
-    else if (action == QStringLiteral("timeout"))
+    if (action == QStringLiteral("ban") || action == QStringLiteral("unban"))
     {
-        this->sendModerationCommand("/timeout " + this->userName_ + " " +
-                                    QString::number(durationSeconds) + 's');
+        return "/" + action + " " + target;
     }
+    if (action == QStringLiteral("timeout"))
+    {
+        return "/timeout " + target + " " + QString::number(durationSeconds) +
+               's';
+    }
+    return {};
 }
 
 void UserInfoPopup::sendYouTubeModerationAction(const QString &action,
@@ -1560,9 +1641,14 @@ void UserInfoPopup::updateUserData()
 {
     std::weak_ptr<bool> hack = this->lifetimeHack_;
     auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
+    const auto generation = this->channelModerationPermissionsGeneration_;
+    const auto isCurrent = [this, hack, generation] {
+        return !hack.expired() &&
+               this->channelModerationPermissionsGeneration_ == generation;
+    };
 
-    const auto onUserFetchFailed = [this, hack] {
-        if (!hack.lock())
+    const auto onUserFetchFailed = [this, isCurrent] {
+        if (!isCurrent())
         {
             return;
         }
@@ -1578,9 +1664,9 @@ void UserInfoPopup::updateUserData()
         this->ui_.userIDLabel->setProperty("copy-text",
                                            TEXT_UNAVAILABLE.toString());
     };
-    const auto onUserFetched = [this, hack,
+    const auto onUserFetched = [this, hack, isCurrent,
                                 currentUser](const HelixUser &user) {
-        if (!hack.lock())
+        if (!isCurrent())
         {
             return;
         }
@@ -1712,28 +1798,30 @@ void UserInfoPopup::updateUserData()
 
         if (type == Channel::Type::Twitch)
         {
-            // get followage and subage
+            const auto requestFollowDate = [this, isCurrent, userID = user.id] {
+                if (!isCurrent())
+                    return;
+                if (const auto *channel = dynamic_cast<const TwitchChannel *>(
+                        this->underlyingChannel_.get()))
+                {
+                    this->requestTwitchFollowDate(*getHelix(), channel->roomId(),
+                                                  userID);
+                }
+            };
             getIvr()->getSubage(
-                this->userName_, this->underlyingChannel_->getName(),
-                [this, hack](const IvrSubage &subageInfo) {
-                    if (!hack.lock())
+                user.login, this->underlyingChannel_->getName(),
+                [this, isCurrent, requestFollowDate](const IvrSubage &subageInfo) {
+                    if (!isCurrent())
                     {
                         return;
                     }
 
-                    if (!subageInfo.followingSince.isEmpty())
+                    if (!setFollowingSince(
+                            this->ui_.followageLabel,
+                            QDateTime::fromString(subageInfo.followingSince,
+                                                  Qt::ISODate)))
                     {
-                        QDateTime followedAt = QDateTime::fromString(
-                            subageInfo.followingSince, Qt::ISODate);
-                        QString followingSince =
-                            followedAt.toString("yyyy-MM-dd");
-                        this->ui_.followageLabel->setText("❤ Following since " +
-                                                          followingSince);
-                        this->ui_.followageLabel->setToolTip(
-                            formatLongFriendlyDuration(
-                                followedAt, QDateTime::currentDateTimeUtc()) +
-                            u" ago"_s);
-                        this->ui_.followageLabel->setMouseTracking(true);
+                        requestFollowDate();
                     }
 
                     if (subageInfo.isSubHidden)
@@ -1755,7 +1843,7 @@ void UserInfoPopup::updateUserData()
                                 .arg(subageInfo.totalSubMonths));
                     }
                 },
-                [] {});
+                requestFollowDate);
         }
 
     };
@@ -1780,6 +1868,81 @@ void UserInfoPopup::updateUserData()
             this->userName_, Qt::CaseInsensitive) == 0;
     this->ui_.block->setVisible(!isMyself);
     this->ui_.ignoreHighlights->setVisible(!isMyself);
+}
+
+void UserInfoPopup::requestTwitchFollowDate(IHelix &helix,
+                                           const QString &broadcasterID,
+                                           const QString &userID)
+{
+    if (broadcasterID.isEmpty() || userID.isEmpty())
+    {
+        return;
+    }
+
+    const auto generation = this->channelModerationPermissionsGeneration_;
+    const auto currentPopup =
+        [self = QPointer(this), generation]() -> UserInfoPopup * {
+            if (self && !self->preparedForClose_ &&
+                self->channelModerationPermissionsGeneration_ == generation)
+            {
+                return self.data();
+            }
+            return nullptr;
+        };
+    const auto showDate = [currentPopup](const QDateTime &date) {
+        if (auto *popup = currentPopup())
+        {
+            popup->ui_.followageInfo->hide();
+            popup->ui_.followageInfo->setToolTip({});
+            auto *label = popup->ui_.followageLabel;
+            if (!setFollowingSince(label, date))
+            {
+                label->setText("Not following");
+                label->setToolTip({});
+            }
+        }
+    };
+    const auto showUnavailable = [currentPopup](const QString &reason) {
+        if (auto *popup = currentPopup())
+        {
+            auto *label = popup->ui_.followageLabel;
+            label->setText("Follow date unavailable");
+            const auto guidance = QStringLiteral(
+                "Viewing another user's follow date requires moderator or\n"
+                "broadcaster access in this channel. If you already have that\n"
+                "access, sign in with Twitch again under Settings → Accounts\n"
+                "to refresh your permissions.");
+            const auto tooltip = reason.isEmpty()
+                                     ? guidance
+                                     : reason + QStringLiteral("\n\n") + guidance;
+            label->setToolTip(tooltip);
+            label->setMouseTracking(true);
+            popup->ui_.followageInfo->setToolTip(tooltip);
+            popup->ui_.followageInfo->show();
+        }
+    };
+
+    const auto account = getApp()->getAccounts()->twitch.getCurrent();
+    if (!account->isAnon() && account->getUserId() == userID)
+    {
+        helix.getFollowedChannel(
+            userID, broadcasterID, this,
+            [showDate, showUnavailable](
+                const std::optional<HelixFollowedChannel> &channel) {
+                if (channel && !channel->followedAt.isValid())
+                {
+                    showUnavailable(QStringLiteral(
+                        "Twitch returned an invalid follower response."));
+                    return;
+                }
+                showDate(channel ? channel->followedAt : QDateTime{});
+            },
+            showUnavailable);
+        return;
+    }
+
+    helix.getChannelFollowDate(broadcasterID, userID, this, showDate,
+                               showUnavailable);
 }
 
 void UserInfoPopup::loadAvatar(const QString &userID, const QString &pictureURL,
@@ -2104,6 +2267,20 @@ void UserInfoPopup::updateUsercardButton()
     this->ui_.usercardLabel->setVisible(supportsTwitchUsercard && hasTarget);
 }
 
+void UserInfoPopup::updateKickUserID(uint64_t userID)
+{
+    this->kickUserID_ = userID;
+    const auto id = userID != 0 ? QString::number(userID) : QString{};
+    this->userId_ = id.isEmpty() ? QString{} : "kick:" + id;
+    this->ui_.userIDLabel->setText(
+        id.isEmpty() ? QString(u"ID " % TEXT_UNAVAILABLE)
+                     : QString(TEXT_USER_ID % id));
+    this->ui_.userIDLabel->setProperty(
+        "copy-text", id.isEmpty() ? TEXT_UNAVAILABLE.toString() : id);
+    this->ui_.notesAdd->setEnabled(userID != 0);
+    this->updateNotes();
+}
+
 void UserInfoPopup::updateKickUserData()
 {
     assert(this->isKick_);
@@ -2116,9 +2293,7 @@ void UserInfoPopup::updateKickUserData()
 
         self->ui_.nameLabel->setText(self->userName_);
 
-        self->ui_.userIDLabel->setText(u"ID " % TEXT_UNAVAILABLE);
-        self->ui_.userIDLabel->setProperty("copy-text",
-                                           TEXT_UNAVAILABLE.toString());
+        self->updateKickUserID(self->kickUserID_);
     };
     auto onChannelFetched = [](UserInfoPopup *self,
                                const KickPrivateChannelInfo &channel) {
@@ -2136,7 +2311,7 @@ void UserInfoPopup::updateKickUserData()
         }
         self->updateUsercardButton();
 
-        self->kickUserID_ = channel.user.userID;
+        self->updateKickUserID(channel.user.userID);
         auto userIDStr = QString::number(self->kickUserID_);
         self->userId_ = u"kick:" % userIDStr;
         self->helixAvatarUrl_ = channel.user.profilePictureURL.value_or(
@@ -2192,7 +2367,11 @@ void UserInfoPopup::updateKickUserData()
         {
             self->ui_.ignoreHighlights->setEnabled(true);
         }
-        self->ui_.block->setChecked(/*is_ignoring=*/false);
+        {
+            QSignalBlocker blocker(self->ui_.block);
+            self->ui_.block->setChecked(
+                isKickUserLocallyBlocked(self->userName_));
+        }
         self->ui_.block->setEnabled(true);
         self->ui_.ignoreHighlights->setChecked(isIgnoringHighlights);
         self->ui_.notesAdd->setEnabled(true);
@@ -2200,43 +2379,46 @@ void UserInfoPopup::updateKickUserData()
 
     // FIXME: this doesn't support opening by user ID
 
+    const auto generation = this->channelModerationPermissionsGeneration_;
     KickApi::privateChannelInfo(
         this->userName_, [self = QPointer(this), onChannelFetched,
-                          onChannelFetchFailed](const auto &res) {
-            if (!self)
+                          onChannelFetchFailed, generation](const auto &res) {
+            if (!self || self->preparedForClose_ ||
+                self->channelModerationPermissionsGeneration_ != generation)
             {
                 return;
             }
-            if (res)
+            if (res && res->user.userID != 0 &&
+                (self->kickUserID_ == 0 ||
+                 self->kickUserID_ == res->user.userID))
             {
                 onChannelFetched(self.get(), *res);
             }
             else
             {
                 qCDebug(chatterinoKick)
-                    << "Channel fetch failed" << res.error();
+                    << "Channel profile unavailable for usercard";
                 onChannelFetchFailed(self.get());
             }
         });
     KickApi::privateUserInChannelInfo(
         this->userName_, this->underlyingChannel_->getName(),
-        [self = QPointer(this)](const auto &res) {
-            if (!self || !res)
+        [self = QPointer(this), generation](const auto &res) {
+            if (!self || self->preparedForClose_ || !res ||
+                self->channelModerationPermissionsGeneration_ != generation)
             {
                 return;
             }
 
+            if (self->kickUserID_ == 0 && res->userID != 0 &&
+                res->username.compare(self->userName_, Qt::CaseInsensitive) == 0)
+            {
+                self->updateKickUserID(res->userID);
+            }
+
             if (res->followingSince)
             {
-                QString followingSince =
-                    res->followingSince->date().toString(Qt::ISODate);
-                self->ui_.followageLabel->setText("❤ Following since " +
-                                                  followingSince);
-                self->ui_.followageLabel->setToolTip(
-                    formatLongFriendlyDuration(
-                        *res->followingSince, QDateTime::currentDateTimeUtc()) +
-                    u" ago"_s);
-                self->ui_.followageLabel->setMouseTracking(true);
+                setFollowingSince(self->ui_.followageLabel, *res->followingSince);
             }
 
             if (res->subscriptionMonths)
@@ -2247,9 +2429,13 @@ void UserInfoPopup::updateKickUserData()
             }
         });
 
-    this->ui_.block->setEnabled(false);
+    {
+        QSignalBlocker blocker(this->ui_.block);
+        this->ui_.block->setChecked(isKickUserLocallyBlocked(this->userName_));
+    }
+    this->ui_.block->setEnabled(!this->userName_.isEmpty());
     this->ui_.ignoreHighlights->setEnabled(false);
-    this->ui_.notesAdd->setEnabled(false);
+    this->ui_.notesAdd->setEnabled(this->kickUserID_ != 0);
 
     bool isMyself = false;  // FIXME: kick account
     this->ui_.block->setVisible(!isMyself);

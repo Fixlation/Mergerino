@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/helper/NotebookTab.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/Channel.hpp"
@@ -952,7 +953,19 @@ void NotebookTab::paintEvent(QPaintEvent *)
             break;
     }
 
-    painter.fillRect(bgRect, tabBackground);
+    if (this->theme->effect().isScene() &&
+        scenes::ThemeSceneHost::instance().showsScene(this))
+    {
+        // The tab strip shows the scene through a pane that keeps the
+        // tab name readable
+        auto pane = tabBackground.color();
+        pane.setAlphaF(visuallySelected ? 0.8F : 0.55F);
+        painter.fillRect(bgRect, pane);
+    }
+    else
+    {
+        painter.fillRect(bgRect, tabBackground);
+    }
 
     // draw color indicator line
     auto lineThickness = ceil((visuallySelected ? 2.f : 1.f) * scale);

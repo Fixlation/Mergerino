@@ -19,6 +19,7 @@
 #include "providers/kick/KickChannel.hpp"
 #include "providers/kick/KickChatServer.hpp"
 #include "providers/kick/KickEmotes.hpp"
+#include "providers/kick/KickUserBlock.hpp"
 #include "providers/seventv/SeventvBadges.hpp"
 #include "providers/seventv/SeventvEmotes.hpp"
 #include "providers/seventv/SeventvPersonalEmotes.hpp"
@@ -58,16 +59,8 @@ EmotePtr lookupEmote(const KickChannel &channel, uint64_t senderID,
                      QStringView word)
 {
     EmoteName wordStr(word.toString());  // FIXME: don't do this...
-    const auto channelEmotes = channel.kickChannelEmotes();
-    if (auto it = channelEmotes->find(wordStr); it != channelEmotes->end())
-    {
-        return it->second;
-    }
-    const auto globalEmotes = getApp()->getKickChatServer()->globalEmotes();
-    if (auto it = globalEmotes->find(wordStr); it != globalEmotes->end())
-    {
-        return it->second;
-    }
+    // Native Kick emotes require explicit [emote:id:name] markup. Looking up
+    // plain names here turns literal words such as BANG into unwanted emotes.
     const auto *globalFfzEmotes = getApp()->getFfzEmotes();
     const auto *globalBttvEmotes = getApp()->getBttvEmotes();
     const auto *globalSeventvEmotes = getApp()->getSeventvEmotes();
@@ -643,6 +636,8 @@ void appendReplyButtons(KickMessageBuilder &builder)
 std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
                                              BoostJsonObject identity)
 {
+    if (identity["badges"].isArray() || identity["badges_v2"].isArray())
+        builder->activeMember = false;
     std::vector<std::pair<BoostJsonObject, KickPrivateUserBadgeInfo>> badges;
     for (auto key : {"badges_v2", "badges"})
     {
@@ -671,6 +666,13 @@ std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
     QSet<QString> emittedBadges;
     for (const auto &[obj, badgeInfo] : badges)
     {
+        // Subscription state is metadata, independent of the selected artwork.
+        if (badgeInfo.type.compare("subscriber", Qt::CaseInsensitive) == 0)
+        {
+            builder->activeMember = true;
+            if (badgeInfo.count <= 1200)
+                builder->membershipMonths = static_cast<uint32_t>(badgeInfo.count);
+        }
         if (!isVisibleKickBadgeObject(obj))
         {
             continue;
@@ -693,6 +695,12 @@ std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
             !builder->externalBadges.contains(QStringLiteral("kick:bot")))
         {
             builder->externalBadges.append(QStringLiteral("kick:bot"));
+        }
+        if (ty == "subscriber")
+        {
+            builder->activeMember = true;
+            if (badgeInfo.count <= 1200)
+                builder->membershipMonths = static_cast<uint32_t>(badgeInfo.count);
         }
         if (isKickLevelBadgeObject(obj, ty))
         {
@@ -740,6 +748,12 @@ std::optional<KickLevelBadge> appendKickBadges(KickMessageBuilder &builder,
         builder.emplace<BadgeElement>(emote, flag);
     }
 
+    // Priority Chat reads the author's role from these tags.
+    for (const auto &[has, tag] :
+         {std::pair{hasMod, QStringLiteral("kick:moderator")},
+          std::pair{hasVip, QStringLiteral("kick:vip")}})
+        if (has && !builder->externalBadges.contains(tag))
+            builder->externalBadges.append(tag);
     bool isSelf = builder->loginName ==
                   getApp()->getAccounts()->kick.current()->username();
     if (isSelf)
@@ -880,6 +894,10 @@ std::pair<MessagePtrMut, HighlightAlert> KickMessageBuilder::makeChatMessage(
     auto createdAt = data["created_at"].toQString();
 
     auto sender = data["sender"].toObject();
+    if (isKickUserLocallyBlocked(sender["username"].toQString()))
+    {
+        return {};
+    }
     auto identity = sender["identity"].toObject();
 
     KickMessageBuilder builder(kickChannel);

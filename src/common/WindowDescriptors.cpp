@@ -253,6 +253,15 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
     descriptor.type_ = data.value("type").toString();
     descriptor.server_ = data.value("server").toInt(-1);
     descriptor.moderationMode_ = root.value("moderationMode").toBool();
+    descriptor.modViewPane_ = root.value("modViewPane").toBool();
+    descriptor.modViewStandalone_ = root.value("modViewStandalone").toBool();
+    descriptor.modViewId_ = root.value("modViewId").toString();
+    descriptor.modViewOwnerId_ = root.value("modViewOwnerId").toString();
+    descriptor.priorityChatEnabled_ = root.value("priorityChatEnabled").toBool();
+    descriptor.priorityChatPane_ = root.value("priorityChatPane").toBool();
+    descriptor.priorityChatStandalone_ = root.value("priorityChatStandalone").toBool();
+    descriptor.priorityChatId_ = root.value("priorityChatId").toString();
+    descriptor.priorityChatOwnerId_ = root.value("priorityChatOwnerId").toString();
     if (root["activityPane"].isBool())
     {
         descriptor.activityPane_ = root.value("activityPane").toBool();
@@ -271,8 +280,11 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
         root.value("activityMessageScale").toDouble(0.9);
     descriptor.collapseGiftedSubscriptions_ =
         root.value("collapseGiftedSubscriptions").toBool(true);
-    descriptor.showRaidsAndWatchStreaks_ =
-        root.value("showRaidsAndWatchStreaks").toBool(true);
+    descriptor.showRaids_ = root.value("showRaids").toBool(
+        root.value("showRaidsAndWatchStreaks").toBool(true));
+    // The old combined option was not an explicit opt-in to watch streaks.
+    // New and upgraded layouts leave them off until this separate option is set.
+    descriptor.showWatchStreaks_ = root.value("showWatchStreaks").toBool(false);
     if (auto activityTimeDisplayMode = root["activityTimeDisplayMode"];
         activityTimeDisplayMode.isString())
     {

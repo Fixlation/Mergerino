@@ -211,6 +211,7 @@ enum class SplitHeaderViewerCountMode : std::uint8_t {
     Twitch,
     Kick,
     YouTube,
+    TikTok,
 };
 
 constexpr std::optional<std::string_view> qmagicenumDisplayName(
@@ -226,6 +227,8 @@ constexpr std::optional<std::string_view> qmagicenumDisplayName(
             return "Kick only";
         case SplitHeaderViewerCountMode::YouTube:
             return "YouTube only";
+        case SplitHeaderViewerCountMode::TikTok:
+            return "TikTok only";
     }
 }
 
@@ -685,6 +688,8 @@ public:
 
     /// Moderation
     QStringSetting timeoutAction = {"/moderation/timeoutAction", "Disable"};
+    QStringSetting modViewPreferences = {"/moderation/modView/preferences", "{}"};
+    QStringSetting priorityChatPreferences = {"/priorityChat/preferences", "{}"};
     IntSetting timeoutStackStyle = {
         "/moderation/timeoutStackStyle",
         static_cast<int>(TimeoutStackStyle::Default)};

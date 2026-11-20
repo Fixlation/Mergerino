@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/helper/ThemeBackdrop.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include <QLinearGradient>
 #include <QPainter>
@@ -98,6 +99,11 @@ void ThemeBackdrop::paint(QPainter &painter, const QRect &target,
         painter.fillRect(target, opaqueSurface);
         return;
     }
+    if (effect.isScene())
+    {
+        scenes::paintScenePreview(painter, target, effect.scene);
+        return;
+    }
 
     // Light backgrounds show tints far more readily than dark ones
     const auto lightSurface = opaqueSurface.lightnessF() > 0.5F;
@@ -131,6 +137,7 @@ void ThemeBackdrop::paint(QPainter &painter, const QRect &target,
             break;
         case ThemeEffectKind::Aurora:
         case ThemeEffectKind::Drift:
+        case ThemeEffectKind::Scene:
         case ThemeEffectKind::None:
             break;
     }

@@ -8,6 +8,13 @@ namespace chatterino {
 class MergedChannelTestAccess
 {
 public:
+    // Simulate provider source resolution without creating a live connection.
+    static void resolveTikTokSource(MergedChannel &channel, QString source)
+    {
+        channel.config_.tiktokEnabled = true;
+        channel.config_.tiktokSource = std::move(source);
+    }
+
     static void append(MergedChannel &channel, const MessagePtr &msg,
                        MessagePlatform platform)
     {

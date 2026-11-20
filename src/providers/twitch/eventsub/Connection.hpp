@@ -88,6 +88,11 @@ public:
         const lib::payload::channel_chat_user_message_update::v1::Payload
             &payload) override;
 
+    void onChannelShoutoutCreate(
+        const lib::messages::Metadata &metadata,
+        const lib::payload::channel_shoutout_create::v1::Payload &payload)
+        override;
+
     QString getSessionID() const;
 
     bool isSubscribedTo(const SubscriptionRequest &request) const;

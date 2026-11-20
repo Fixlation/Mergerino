@@ -11,6 +11,7 @@
 
 #include <pajlada/signals/signalholder.hpp>
 #include <QHash>
+#include <QMargins>
 #include <QSet>
 #include <QTimer>
 #include <QVector>
@@ -25,6 +26,7 @@ class QCompleter;
 class QGraphicsOpacityEffect;
 class QHBoxLayout;
 class QLabel;
+class QLayout;
 class QLineEdit;
 class QPushButton;
 class QScrollArea;
@@ -51,6 +53,7 @@ public:
 
 protected:
     void themeChangedEvent() override;
+    void scaleChangedEvent(float scale) override;
     void showEvent(QShowEvent *event) override;
 
 private:
@@ -94,8 +97,22 @@ private:
         QVector<CapturedMessage> messages;
     };
 
+    struct LayoutMetrics {
+        QLayout *layout = nullptr;
+        QMargins margins;
+        int spacing = 0;
+    };
+
     void buildUi();
     void applyTheme();
+    void applyScale();
+    int scaled(int value) const;
+    int entrantRowHeight() const;
+    QSize availableSize() const;
+    /// Sizes the window for the current mode, keeping any height the user added.
+    void fitToContent();
+    /// @param bodyWidth width of the scrolling body
+    void updateModeStackHeight(int bodyWidth);
     void setMode(Mode mode);
     void updateModeControls();
     void updatePlatformControls();
@@ -172,6 +189,11 @@ private:
     QString winnerKey_;
 
     QWidget *root_ = nullptr;
+    QScrollArea *bodyScroll_ = nullptr;
+    QWidget *body_ = nullptr;
+    std::vector<LayoutMetrics> layoutMetrics_;
+    int fittedHeight_ = 0;
+    bool placed_ = false;
     QHash<MessagePlatform, QToolButton *> platformButtons_;
     QPushButton *keywordModeButton_ = nullptr;
     QPushButton *wheelModeButton_ = nullptr;
@@ -201,6 +223,7 @@ private:
     QPushButton *emoteVisibilityButton_ = nullptr;
     QGraphicsOpacityEffect *emoteVisibilityOpacity_ = nullptr;
     QLabel *emoteHintLabel_ = nullptr;
+    QWidget *roundCard_ = nullptr;
     QLabel *statusLabel_ = nullptr;
     QLabel *entrantCountLabel_ = nullptr;
     QWidget *drawArea_ = nullptr;

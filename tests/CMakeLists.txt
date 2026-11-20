@@ -9,10 +9,12 @@ set(test_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/Test.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/ChannelChatters.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/AccessGuard.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/AccountAccess.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/ActivityMessageUtils.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/KickApi.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/StreamLink.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/ThemeModes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/ThemeScenes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/BaseWindow.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkCommon.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/NetworkRequest.cpp
@@ -74,6 +76,8 @@ set(test_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/MemoryAndGiveaway.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/SettingsPersistence.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/YouTubeLiveChat.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/ModView.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/PriorityChat.cpp
     # Add your new file above this line!
     )
 
@@ -183,3 +187,14 @@ if (CHATTERINO_STATIC_QT_BUILD)
 endif ()
 
 gtest_discover_tests(${PROJECT_NAME} DISCOVERY_MODE PRE_TEST)
+
+# Exercise the JavaScript used by browser readers and auth helpers without a browser.
+find_program(MERGERINO_NODE_EXECUTABLE NAMES node)
+if(MERGERINO_NODE_EXECUTABLE)
+    add_test(NAME TikTokLiveChatSnapshot
+        COMMAND "${MERGERINO_NODE_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/tiktok-live-chat.test.cjs")
+    add_test(NAME TwitchAuthHelper
+        COMMAND "${MERGERINO_NODE_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/twitch-auth-helper.test.cjs")
+endif()

@@ -10,6 +10,7 @@
 #include "common/WindowDescriptors.hpp"
 #include "controllers/filters/FilterRecord.hpp"
 #include "debug/AssertInGuiThread.hpp"
+#include "providers/merged/MergedChannel.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
@@ -75,9 +76,7 @@ std::optional<QUuid> findAlertsFilterId()
 
 QJsonObject encodeChannelSignature(IndirectChannel channel)
 {
-    QJsonObject obj;
-    WindowManager::encodeChannel(std::move(channel), obj);
-    return obj;
+    return Split::activityChannelSignature(std::move(channel));
 }
 
 bool splitMatchesChannelAndFilters(Split *split,
@@ -98,7 +97,7 @@ bool splitMatchesChannelAndFilters(Split *split,
 Split *findRestoredActivityOwner(SplitContainer *container, Split *candidate,
                                  const QUuid &alertFilterId)
 {
-    if (!container || !candidate || candidate->isActivityPane())
+    if (!container || !candidate || candidate->isUtilityPane())
     {
         return nullptr;
     }
@@ -122,7 +121,7 @@ Split *findRestoredActivityOwner(SplitContainer *container, Split *candidate,
         candidate->getIndirectChannel());
     for (auto *split : container->getSplits())
     {
-        if (split == candidate || split->isActivityPane())
+        if (split == candidate || split->isUtilityPane())
         {
             continue;
         }
@@ -269,7 +268,7 @@ Split *SplitContainer::appendNewSplit(bool openChannelNameDialog)
 
 Split *SplitContainer::cloneSplit(Split *source, const QList<QUuid> &filters,
                                   SplitDirection direction, qreal sourceRatio,
-                                  qreal newRatio)
+                                  qreal newRatio, bool copyLinkedPanes)
 {
     assertInGuiThread();
 
@@ -291,15 +290,20 @@ Split *SplitContainer::cloneSplit(Split *source, const QList<QUuid> &filters,
         horizontalDirection ? sourceNodeBefore->flexH_ : sourceNodeBefore->flexV_;
 
     auto *clone = new Split(this);
+    if (source->isPriorityChatPane())
+        clone->restorePriorityChatState(true, {}, source->priorityChatOwnerId(), true);
+    if (source->isModViewPane())
+        clone->restoreModViewState(true, {}, {}, true);
     clone->setFilters(filters);
-    clone->setModerationMode(source->getModerationMode());
+    clone->setModerationMode(copyLinkedPanes && source->getModerationMode());
     clone->setInputEnabled(source->inputEnabled());
     clone->setFilterActivity(source->filterActivity(),
                              source->filterActivityExplicit());
     clone->setActivityMessageScale(source->activityMessageScale());
     clone->setCollapseGiftedSubscriptions(
         source->collapseGiftedSubscriptions());
-    clone->setShowRaidsAndWatchStreaks(source->showRaidsAndWatchStreaks());
+    clone->setShowRaids(source->showRaids());
+    clone->setShowWatchStreaks(source->showWatchStreaks());
     clone->setActivityTimeDisplayMode(source->activityTimeDisplayMode());
     clone->setSlowerChatEnabled(source->slowerChatEnabled());
     clone->setSlowerChatMessagesPerSecond(
@@ -318,6 +322,8 @@ Split *SplitContainer::cloneSplit(Split *source, const QList<QUuid> &filters,
         source->tiktokActivityMinimumDiamonds());
     clone->setCheckSpellingOverride(source->checkSpellingOverride());
     clone->setChannel(source->getIndirectChannel());
+    clone->setPriorityChatEnabled(copyLinkedPanes &&
+                                  source->priorityChatRequested());
     clone->getInput().restoreSendPlatformSelection(
         source->getInput().sendPlatformSelection());
     clone->setPlatformIndicatorMode(source->platformIndicatorMode());
@@ -476,7 +482,15 @@ void SplitContainer::addSplit(Split *split)
     });
 
     conns.managedConnect(split->focused, [this, split] {
-        this->setSelected(split);
+        if (split->isModViewPane())
+        {
+            // Selecting a form field must not focus the panel's queue proxy.
+            this->selected_ = split;
+            if (auto *node = this->baseNode_->findNodeContainingSplit(split))
+                this->setPreferedTargetRecursive(node);
+        }
+        else
+            this->setSelected(split);
     });
 
     conns.managedConnect(split->openSplitRequested, [this](auto channel) {
@@ -568,6 +582,25 @@ SplitContainer::Position SplitContainer::releaseSplit(Split *split)
 {
     assertInGuiThread();
 
+    if (split->isModViewPane())
+        split->unlinkModViewPane();
+    QPointer<Split> activityOwner =
+        split->isActivityPane() ? split->activityOwner() : nullptr;
+    QPointer<Split> priorityOwner =
+        split->isPriorityChatPane() && !split->priorityChatStandalone() ? split->priorityChatOwner() : nullptr;
+    if (!split->isUtilityPane())
+    {
+        split->setModerationMode(false);
+        split->setPriorityChatEnabled(false);
+        // Activity belongs to its chat. Removing/moving the chat must not
+        // leave a detached pane in the old container with no active icon.
+        const auto previousSplits = this->splits_;
+        for (auto *pane : previousSplits)
+            if (pane != split && pane->isActivityPane() &&
+                pane->activityOwner() == split)
+                this->deleteSplit(pane);
+    }
+
     Node *node = this->baseNode_->findNodeContainingSplit(split);
     assert(node != nullptr);
 
@@ -590,6 +623,13 @@ SplitContainer::Position SplitContainer::releaseSplit(Split *split)
 
     this->connectionsPerSplit_.erase(this->connectionsPerSplit_.find(split));
 
+    if (priorityOwner && !priorityOwner->priorityChatEnabled())
+        priorityOwner->setPriorityChatEnabled(false);
+    if (activityOwner && !activityOwner->hasLinkedActivityPane())
+        activityOwner->setFilterActivity(false);
+    for (auto *remaining : this->splits_)
+        remaining->updateHeaderIcons();
+
     return position;
 }
 
@@ -601,6 +641,8 @@ SplitContainer::Position SplitContainer::deleteSplit(Split *split)
     assertInGuiThread();
     assert(split != nullptr);
 
+    if (split->isModViewPane())
+        split->returnModViewToOwner();
     split->deleteLater();
     return this->releaseSplit(split);
 }
@@ -1104,9 +1146,35 @@ NodeDescriptor SplitContainer::buildDescriptorRecursively(
             currentNode->split_->getIndirectChannel().getType();
 
         SplitNodeDescriptor result;
-        result.type_ = channelTypeToString(channelType);
+        if (const auto *merged = dynamic_cast<MergedChannel *>(
+                currentNode->split_->getChannel().get()))
+        {
+            const auto &config = merged->config();
+            result.type_ = "merged";
+            result.mergedTwitchEnabled = config.twitchEnabled;
+            result.mergedTwitchChannelName_ = config.twitchChannelName;
+            result.mergedKickEnabled = config.kickEnabled;
+            result.mergedKickChannelName_ = config.kickChannelName;
+            result.mergedYoutubeEnabled = config.youtubeEnabled;
+            result.mergedYoutubeStreamUrl_ = config.youtubeStreamUrl;
+            result.mergedTikTokEnabled = config.tiktokEnabled;
+            result.mergedTikTokSource_ = config.tiktokSource;
+            result.mergedTikTokShowJoinMessages = config.tiktokShowJoinMessages;
+        }
+        else
+            result.type_ = channelTypeToString(channelType);
         result.channelName_ = currentNode->split_->getChannel()->getName();
-        result.moderationMode_ = currentNode->split_->getModerationMode();
+        result.moderationMode_ = currentNode->split_->moderationModeRequested();
+        result.modViewPane_ = currentNode->split_->isModViewPane();
+        result.modViewStandalone_ = currentNode->split_->modViewStandalone();
+        result.modViewId_ = currentNode->split_->modViewId();
+        result.modViewOwnerId_ = currentNode->split_->modViewOwnerId();
+        result.priorityChatEnabled_ =
+            currentNode->split_->priorityChatRequested();
+        result.priorityChatPane_ = currentNode->split_->isPriorityChatPane();
+        result.priorityChatStandalone_ = currentNode->split_->priorityChatStandalone();
+        result.priorityChatId_ = currentNode->split_->priorityChatId();
+        result.priorityChatOwnerId_ = currentNode->split_->priorityChatOwnerId();
         result.filters_ = currentNode->split_->getFilters();
         result.spellCheckOverride =
             currentNode->split_->checkSpellingOverride();
@@ -1119,8 +1187,8 @@ NodeDescriptor SplitContainer::buildDescriptorRecursively(
             currentNode->split_->activityMessageScale();
         result.collapseGiftedSubscriptions_ =
             currentNode->split_->collapseGiftedSubscriptions();
-        result.showRaidsAndWatchStreaks_ =
-            currentNode->split_->showRaidsAndWatchStreaks();
+        result.showRaids_ = currentNode->split_->showRaids();
+        result.showWatchStreaks_ = currentNode->split_->showWatchStreaks();
         result.activityTimeDisplayMode_ =
             currentNode->split_->activityTimeDisplayMode();
         result.slowerChatEnabled_ = currentNode->split_->slowerChatEnabled();
@@ -1180,6 +1248,11 @@ void SplitContainer::applyFromDescriptorRecursively(
             QStringLiteral("leaf before new Split type=%1 channel=%2")
                 .arg(splitNode.type_, splitNode.channelName_));
         auto *split = new Split(this);
+        split->restorePriorityChatState(splitNode.priorityChatPane_, splitNode.priorityChatId_,
+                                        splitNode.priorityChatOwnerId_, splitNode.priorityChatStandalone_);
+        split->restoreModViewState(splitNode.modViewPane_, splitNode.modViewId_,
+                                   splitNode.modViewOwnerId_,
+                                   splitNode.modViewStandalone_);
         splitRestoreTrace(QStringLiteral("leaf after new Split"));
         splitRestoreTrace(QStringLiteral("leaf before decodeChannel"));
         auto channel = WindowManager::decodeChannel(splitNode);
@@ -1189,15 +1262,19 @@ void SplitContainer::applyFromDescriptorRecursively(
         splitRestoreTrace(QStringLiteral("leaf after setChannel"));
         splitRestoreTrace(QStringLiteral("leaf before setModerationMode"));
         split->setModerationMode(splitNode.moderationMode_);
+        split->setPriorityChatEnabled(splitNode.priorityChatEnabled_);
         splitRestoreTrace(QStringLiteral("leaf before setFilters"));
         split->setFilters(splitNode.filters_);
         splitRestoreTrace(QStringLiteral("leaf before setCheckSpellingOverride"));
         split->setCheckSpellingOverride(splitNode.spellCheckOverride);
         splitRestoreTrace(QStringLiteral("leaf before setInputEnabled"));
-        split->setInputEnabled(splitNode.activityPane_.value_or(false)
+        split->setInputEnabled((splitNode.modViewPane_ ||
+                                splitNode.priorityChatPane_ ||
+                                splitNode.activityPane_.value_or(false))
                                    ? false
                                    : splitNode.inputEnabled_);
-        if (!splitNode.activityPane_)
+        if (!splitNode.activityPane_ && !splitNode.priorityChatPane_ &&
+            !splitNode.modViewPane_)
         {
             this->splitsNeedingActivityPaneMigration_.push_back(split);
         }
@@ -1216,7 +1293,8 @@ void SplitContainer::applyFromDescriptorRecursively(
         split->setActivityMessageScale(splitNode.activityMessageScale_);
         split->setCollapseGiftedSubscriptions(
             splitNode.collapseGiftedSubscriptions_);
-        split->setShowRaidsAndWatchStreaks(splitNode.showRaidsAndWatchStreaks_);
+        split->setShowRaids(splitNode.showRaids_);
+        split->setShowWatchStreaks(splitNode.showWatchStreaks_);
         split->setActivityTimeDisplayMode(
             splitNode.activityTimeDisplayMode_.value_or(
                 ActivityTimeDisplayMode::Relative));
@@ -1292,6 +1370,11 @@ void SplitContainer::applyFromDescriptorRecursively(
                         .arg(restoreIndex)
                         .arg(splitNode.type_, splitNode.channelName_));
                 auto *split = new Split(this);
+                split->restorePriorityChatState(splitNode.priorityChatPane_, splitNode.priorityChatId_,
+                                                splitNode.priorityChatOwnerId_, splitNode.priorityChatStandalone_);
+                split->restoreModViewState(
+                    splitNode.modViewPane_, splitNode.modViewId_,
+                    splitNode.modViewOwnerId_, splitNode.modViewStandalone_);
                 splitRestoreTrace(
                     QStringLiteral("container item %1 after new Split")
                         .arg(restoreIndex));
@@ -1317,6 +1400,7 @@ void SplitContainer::applyFromDescriptorRecursively(
                     QStringLiteral("container item %1 before setModerationMode")
                         .arg(restoreIndex));
                 split->setModerationMode(splitNode.moderationMode_);
+                split->setPriorityChatEnabled(splitNode.priorityChatEnabled_);
                 splitRestoreTrace(
                     QStringLiteral(
                         "container item %1 before setCheckSpellingOverride")
@@ -1325,10 +1409,13 @@ void SplitContainer::applyFromDescriptorRecursively(
                 splitRestoreTrace(
                     QStringLiteral("container item %1 before setInputEnabled")
                         .arg(restoreIndex));
-                split->setInputEnabled(splitNode.activityPane_.value_or(false)
+                split->setInputEnabled((splitNode.modViewPane_ ||
+                                        splitNode.priorityChatPane_ ||
+                                        splitNode.activityPane_.value_or(false))
                                            ? false
                                            : splitNode.inputEnabled_);
-                if (!splitNode.activityPane_)
+                if (!splitNode.activityPane_ && !splitNode.priorityChatPane_ &&
+                    !splitNode.modViewPane_)
                 {
                     this->splitsNeedingActivityPaneMigration_.push_back(split);
                 }
@@ -1348,8 +1435,8 @@ void SplitContainer::applyFromDescriptorRecursively(
                 split->setActivityMessageScale(splitNode.activityMessageScale_);
                 split->setCollapseGiftedSubscriptions(
                     splitNode.collapseGiftedSubscriptions_);
-                split->setShowRaidsAndWatchStreaks(
-                    splitNode.showRaidsAndWatchStreaks_);
+                split->setShowRaids(splitNode.showRaids_);
+                split->setShowWatchStreaks(splitNode.showWatchStreaks_);
                 split->setActivityTimeDisplayMode(
                     splitNode.activityTimeDisplayMode_.value_or(
                         ActivityTimeDisplayMode::Relative));
@@ -1467,7 +1554,7 @@ void SplitContainer::normalizeRestoredActivityFiltering()
 
     for (auto *split : this->splitsNeedingActivityFilterNormalization_)
     {
-        if (!split || split->isActivityPane())
+        if (!split || split->isUtilityPane())
         {
             continue;
         }
@@ -1479,6 +1566,21 @@ void SplitContainer::normalizeRestoredActivityFiltering()
     }
 
     this->splitsNeedingActivityFilterNormalization_.clear();
+
+    const auto restoredSplits = this->splits_;
+    for (auto *split : restoredSplits)
+        if (!split->isUtilityPane())
+        {
+            split->normalizeLinkedActivityPanes();
+            split->normalizePriorityChatPanes();
+            split->normalizeModViewPanes();
+        }
+    const auto modPanes = this->splits_;
+    for (auto *split : modPanes)
+        if (split->isModViewPane())
+            split->normalizeModViewPanes();
+    for (auto *split : this->splits_)
+        split->updateHeaderIcons();
 }
 
 void SplitContainer::refreshTabTitle()
@@ -1493,7 +1595,7 @@ void SplitContainer::refreshTabTitle()
 
     for (const auto &chatWidget : this->splits_)
     {
-        if (chatWidget->isActivityPane())
+        if (chatWidget->isUtilityPane())
         {
             continue;
         }
@@ -1517,12 +1619,15 @@ void SplitContainer::refreshTabTitle()
     {
         for (const auto &chatWidget : this->splits_)
         {
-            if (!chatWidget->isActivityPane())
+            if (!chatWidget->isUtilityPane())
             {
                 continue;
             }
 
-            newTitle = chatWidget->activityPaneTitle();
+            newTitle = chatWidget->isModViewPane() ? QStringLiteral("Mod View")
+                       : chatWidget->isPriorityChatPane()
+                           ? chatWidget->priorityChatTitle()
+                           : chatWidget->activityPaneTitle();
             break;
         }
     }

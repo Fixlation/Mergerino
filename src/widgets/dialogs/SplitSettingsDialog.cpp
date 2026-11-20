@@ -543,14 +543,21 @@ SplitSettingsDialog::SplitSettingsDialog(bool isActivityPane,
             this->ui_.collapseGiftedSubscriptions,
             collapseGiftedSubscriptionsTooltip, this));
 
-        this->ui_.showRaidsAndWatchStreaks =
-            new QCheckBox("Raids and watch streaks");
-        this->ui_.showRaidsAndWatchStreaks->setChecked(true);
-        const auto raidsAndWatchStreaksTooltip = QStringLiteral(
-            "Show Twitch raids, Kick hosts, and Twitch watch streaks in this "
-            "Activity tab. Turn this off to keep these events in the main chat.");
+        this->ui_.showRaids = new QCheckBox("Raids");
+        this->ui_.showRaids->setChecked(true);
+        const auto raidsTooltip = QStringLiteral(
+            "Show Twitch raids and Kick hosts in this Activity tab. "
+            "Turn this off to keep these events in the main chat.");
         appearanceLayout->addRow(createCheckboxRow(
-            this->ui_.showRaidsAndWatchStreaks, raidsAndWatchStreaksTooltip, this));
+            this->ui_.showRaids, raidsTooltip, this));
+
+        this->ui_.showWatchStreaks = new QCheckBox("Watch streaks");
+        this->ui_.showWatchStreaks->setChecked(false);
+        const auto watchStreaksTooltip = QStringLiteral(
+            "Show Twitch watch streaks in this Activity tab. "
+            "Turn this off to keep these events in the main chat.");
+        appearanceLayout->addRow(createCheckboxRow(
+            this->ui_.showWatchStreaks, watchStreaksTooltip, this));
     }
 
     rootLayout->addWidget(appearanceGroup);
@@ -643,18 +650,31 @@ bool SplitSettingsDialog::collapseGiftedSubscriptions() const
            this->ui_.collapseGiftedSubscriptions->isChecked();
 }
 
-void SplitSettingsDialog::setShowRaidsAndWatchStreaks(bool enabled)
+void SplitSettingsDialog::setShowRaids(bool enabled)
 {
-    if (this->ui_.showRaidsAndWatchStreaks)
+    if (this->ui_.showRaids)
     {
-        this->ui_.showRaidsAndWatchStreaks->setChecked(enabled);
+        this->ui_.showRaids->setChecked(enabled);
     }
 }
 
-bool SplitSettingsDialog::showRaidsAndWatchStreaks() const
+bool SplitSettingsDialog::showRaids() const
 {
-    return this->ui_.showRaidsAndWatchStreaks == nullptr ||
-           this->ui_.showRaidsAndWatchStreaks->isChecked();
+    return this->ui_.showRaids == nullptr || this->ui_.showRaids->isChecked();
+}
+
+void SplitSettingsDialog::setShowWatchStreaks(bool enabled)
+{
+    if (this->ui_.showWatchStreaks)
+    {
+        this->ui_.showWatchStreaks->setChecked(enabled);
+    }
+}
+
+bool SplitSettingsDialog::showWatchStreaks() const
+{
+    return this->ui_.showWatchStreaks != nullptr &&
+           this->ui_.showWatchStreaks->isChecked();
 }
 
 void SplitSettingsDialog::setActivityTimeDisplayMode(
@@ -799,9 +819,13 @@ void SplitSettingsDialog::scaleChangedEvent(float newScale)
     {
         this->ui_.collapseGiftedSubscriptions->setFont(uiFont);
     }
-    if (this->ui_.showRaidsAndWatchStreaks)
+    if (this->ui_.showRaids)
     {
-        this->ui_.showRaidsAndWatchStreaks->setFont(uiFont);
+        this->ui_.showRaids->setFont(uiFont);
+    }
+    if (this->ui_.showWatchStreaks)
+    {
+        this->ui_.showWatchStreaks->setFont(uiFont);
     }
     if (this->ui_.slowerChat)
     {

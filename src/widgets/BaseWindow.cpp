@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/BaseWindow.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/Common.hpp"
@@ -1209,6 +1210,16 @@ void BaseWindow::paintEvent(QPaintEvent *)
     QPainter painter(this);
     this->drawOutline(painter);
     this->drawCustomWindowFrame(painter);
+
+    if (this->theme->effect().isScene())
+    {
+        // Keep the 1px frame of a restored custom-frame window
+        const auto inset =
+            this->hasCustomWindowFrame() && !this->isMaximized() ? 1 : 0;
+        scenes::ThemeSceneHost::instance().paintSurface(
+            this, painter, this->rect().adjusted(inset, inset, -inset, -inset),
+            scenes::SceneSurface::Tabs, this->theme->window.background);
+    }
 }
 
 void BaseWindow::drawOutline(QPainter &painter)

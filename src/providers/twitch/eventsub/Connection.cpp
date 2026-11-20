@@ -419,6 +419,30 @@ void Connection::onChannelChatUserMessageUpdate(
     });
 }
 
+void Connection::onChannelShoutoutCreate(
+    const lib::messages::Metadata &metadata,
+    const lib::payload::channel_shoutout_create::v1::Payload &payload)
+{
+    auto *channel = dynamic_cast<TwitchChannel *>(
+        getApp()
+            ->getTwitch()
+            ->getChannelOrEmpty(payload.event.broadcasterUserLogin.qt())
+            .get());
+    if (!channel || channel->isEmpty())
+    {
+        qCDebug(LOG) << "Shoutout event for broadcaster we're not interested in"
+                     << payload.event.broadcasterUserLogin.qt();
+        return;
+    }
+
+    auto time = chronoToQDateTime(metadata.messageTimestamp);
+    auto message = makeShoutoutMessage(channel, time, payload.event);
+
+    runInGuiThread([channel, message] {
+        channel->addMessage(message, MessageContext::Original);
+    });
+}
+
 QString Connection::getSessionID() const
 {
     return this->sessionID;

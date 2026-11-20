@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/splits/SplitInput.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/ChannelChatters.hpp"
@@ -899,7 +900,8 @@ void showModerationAuthLoginPrompt(QWidget *parent, const QString &currentUserID
     auto *body = new QLabel(
         QStringLiteral(
             "To %1, Mergerino needs a Twitch browser helper token. Copy the "
-            "helper, run it in the twitch.tv console, then click Paste Token.")
+            "helper, run it in the twitch.tv console, click Copy Token on the "
+            "Twitch page if it appears, then click Paste Token here.")
             .arg(actionText),
         dialog);
     body->setWordWrap(true);
@@ -908,7 +910,8 @@ void showModerationAuthLoginPrompt(QWidget *parent, const QString &currentUserID
     auto *status = new QLabel(
         QStringLiteral(
             "On twitch.tv, press F12 to open DevTools, switch to Console, "
-            "paste the helper, then return here."),
+            "run the helper, and click Copy Token on the Twitch page if it "
+            "appears. Then return here."),
         dialog);
     status->setWordWrap(true);
     status->setStyleSheet(QStringLiteral("QLabel { color: #9aa0a6; }"));
@@ -951,8 +954,9 @@ void showModerationAuthLoginPrompt(QWidget *parent, const QString &currentUserID
                          setStatus(QStringLiteral(
                                        "Helper copied. On twitch.tv, press F12 "
                                        "to open DevTools, switch to Console, "
-                                       "paste it, then return here and click "
-                                       "Paste Token."),
+                                       "and run it. Click Copy Token on the "
+                                       "Twitch page if it appears, then return "
+                                       "here and click Paste Token."),
                                    false);
                      });
 
@@ -3770,7 +3774,8 @@ void StreamDatabaseBadgePickerPopup::initLayout()
             "1. Click Copy Helper; twitch.tv opens and this menu stays open.\n"
             "2. Sign in to the selected Twitch account.\n"
             "3. Press F12, open Console, paste the helper, and press Enter.\n"
-            "4. Return to Mergerino and click Paste Token."),
+            "4. If Copy Token appears on the Twitch page, click it.\n"
+            "5. Return to Mergerino and click Paste Token."),
         this->authFrame_);
     authInstructions->setWordWrap(true);
     authInstructions->setProperty("muted", true);
@@ -9253,6 +9258,11 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
     {
         this->ui_.emoteBar->recordMessage(emoteBarMessage);
     }
+    if (!preparedSends.empty() && this->theme->effect().isScene())
+    {
+        scenes::ThemeSceneHost::instance().messageSent(
+            this, preparedSends.front().message);
+    }
     this->postMessageSend(historyMessage, arguments);
     return "";
 }
@@ -9566,13 +9576,13 @@ void SplitInput::addShortcuts()
 
 bool SplitInput::eventFilter(QObject *obj, QEvent *event)
 {
-    // The read-only box and the ghost both switch back to the saved account
+    // Only the explicit ghost control may switch back to a saved account.
+    // Focusing/clicking the read-only composer must preserve anonymous mode.
     if (!this->anonymousSwitchable_.isEmpty() &&
         event->type() == QEvent::MouseButtonRelease &&
         static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton &&
-        ((this->isAnonymousBlocked() && this->ui_.textEdit != nullptr &&
-          obj == this->ui_.textEdit->viewport()) ||
-         (this->inputIconIsGhost_ && obj == this->ui_.sendWaitLockIcon)))
+        this->isAnonymousBlocked() && this->inputIconIsGhost_ &&
+        obj == this->ui_.sendWaitLockIcon)
     {
         this->disableAnonymousMode();
         return true;
@@ -9949,6 +9959,18 @@ QString SplitInput::getInputText() const
     return this->ui_.textEdit->toPlainText();
 }
 
+QRect SplitInput::caretRect() const
+{
+    auto *edit = this->ui_.textEdit;
+    const auto rect = edit->cursorRect();
+    return {edit->viewport()->mapTo(this, rect.topLeft()), rect.size()};
+}
+
+QRect SplitInput::composerRect() const
+{
+    return this->ui_.inputWrapper->geometry();
+}
+
 void SplitInput::insertText(const QString &text)
 {
     if (this->isAnonymousBlocked())
@@ -10192,7 +10214,16 @@ void SplitInput::paintEvent(QPaintEvent * /*event*/)
                                 composerBounds.top() + radius));
     composerPath.lineTo(composerBounds.bottomRight());
     composerPath.closeSubpath();
-    painter.fillPath(composerPath, inputBackground);
+    painter.save();
+    painter.setClipPath(composerPath, Qt::IntersectClip);
+    const bool sceneShown = scenes::ThemeSceneHost::instance().paintSurface(
+        this, painter, composerRect.adjusted(0, 0, 1, 1),
+        scenes::SceneSurface::Input, inputBackground);
+    painter.restore();
+    if (!sceneShown)
+    {
+        painter.fillPath(composerPath, inputBackground);
+    }
     painter.setPen(QPen(borderColor, 1));
     painter.drawPath(composerPath);
 
@@ -10331,11 +10362,7 @@ void SplitInput::setAnonymousState(const QStringList &anonymousOn)
     const bool blocked = this->isAnonymousBlocked();
     this->ui_.textEdit->setReadOnly(blocked);
     this->ui_.textEdit->viewport()->setCursor(
-        !blocked ? Qt::IBeamCursor
-        : this->anonymousSwitchable_.isEmpty() ||
-                this->anonymousExit_ != AnonymousExit::None
-            ? Qt::ArrowCursor
-            : Qt::PointingHandCursor);
+        blocked ? Qt::ArrowCursor : Qt::IBeamCursor);
     this->refreshSendWaitStatus();
 }
 
@@ -10539,8 +10566,11 @@ void SplitInput::updateTextEditPalette()
                classicDark ? this->theme->tabs.selected.backgrounds.regular
                            : this->theme->splits.input.border);
 
-    // Background color
-    p.setBrush(QPalette::Base, this->backgroundColor());
+    // Background color. Interactive scenes show through the text box; the
+    // composer behind it paints the scene.
+    p.setBrush(QPalette::Base, this->theme->effect().isScene()
+                                   ? QColor(Qt::transparent)
+                                   : this->backgroundColor());
 
     this->ui_.textEdit->setPalette(p);
 }

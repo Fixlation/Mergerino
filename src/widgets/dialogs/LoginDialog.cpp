@@ -5,6 +5,7 @@
 #include "widgets/dialogs/LoginDialog.hpp"
 
 #include "Application.hpp"
+#include "common/AccountAccess.hpp"
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
@@ -33,6 +34,13 @@ bool logInWithCredentials(QWidget *parent, const QString &userID,
                           const QString &username, const QString &clientID,
                           const QString &oauthToken)
 {
+    if (const auto error = accountAccessError(ProviderId::Twitch, username);
+        !error.isEmpty())
+    {
+        QMessageBox::critical(parent, QStringLiteral("Error"), error);
+        return false;
+    }
+
     QStringList errors;
 
     if (userID.isEmpty())

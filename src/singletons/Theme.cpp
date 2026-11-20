@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "singletons/Theme.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/Literals.hpp"
@@ -908,6 +909,28 @@ ThemeDescriptor makeAnimatedPreset(const char *key, const char *name,
     };
 }
 
+/// A theme preset made from an interactive scene. Scenes have one fixed
+/// look, so light mode uses the same colours.
+ThemeDescriptor makeScenePreset(const scenes::SceneInfo &info)
+{
+    ThemeEffect effect{.kind = ThemeEffectKind::Scene};
+    effect.scene = info.key;
+    const ThemeSeed seed{
+        .light = info.light,
+        .surface = info.surface,
+        .ink = info.ink,
+        .accent = info.accent,
+    };
+    auto data = withThemeEffect(makeSeedThemeJson(seed), effect);
+    return {
+        .key = QStringLiteral("scene.") + info.key,
+        .name = info.name,
+        .animated = true,
+        .data = data,
+        .lightData = data,
+    };
+}
+
 /// Whether a theme was generated from base colours alone, so the opposite
 /// mode can be regenerated from them instead of inverting every colour.
 bool hasPlainSeed(const QJsonObject &theme)
@@ -923,7 +946,8 @@ bool hasPlainSeed(const QJsonObject &theme)
 
 namespace chatterino {
 
-const std::vector<ThemeDescriptor> Theme::builtInThemes{
+const std::vector<ThemeDescriptor> Theme::builtInThemes = [] {
+    std::vector<ThemeDescriptor> themes{
     {
         .key = "Light",
         .path = ":/themes/Light.json",
@@ -981,7 +1005,16 @@ const std::vector<ThemeDescriptor> Theme::builtInThemes{
                        {"#0a0d18", "#e1e5f2", "#8fb2ff"},
                        ThemeEffectKind::Starfield,
                        {"#f4f6ff", "#8fb2ff", "#ffd59a"}),
-};
+    };
+
+    // Interactive themes: a scene behind the whole window that reacts to
+    // chat and to what you do
+    for (const auto &info : scenes::sceneCatalog())
+    {
+        themes.push_back(makeScenePreset(info));
+    }
+    return themes;
+}();
 
 // Dark is our default & fallback theme
 const ThemeDescriptor Theme::fallbackTheme = Theme::builtInThemes.at(1);
@@ -1006,6 +1039,11 @@ bool Theme::useLightMode() const
 
 QJsonObject Theme::applyMode(const QJsonObject &theme, bool light)
 {
+    if (themeEffectFromTheme(theme).isScene())
+    {
+        // Interactive scenes keep their own look in both modes
+        return theme;
+    }
     const auto originalMetadata = theme.value("metadata").toObject();
     if ((originalMetadata.value("iconTheme").toString() == "dark") == light)
     {

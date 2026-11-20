@@ -82,6 +82,8 @@ public:
 
 class TwitchIrcServer final : public ITwitchIrcServer, public QObject
 {
+    friend class TwitchIrcServerTestAccess;
+
 public:
     enum class ConnectionType {
         Read,

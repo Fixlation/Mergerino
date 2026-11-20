@@ -26,6 +26,7 @@ public:
     void setShowJoinMessages(bool enabled);
 
     bool isLive() const;
+    uint64_t liveViewerCount() const;
     const QString &roomId() const;
     const QString &statusText() const;
     const QString &liveTitle() const;
@@ -59,6 +60,8 @@ private:
     void handleBrowserSnapshot(const QByteArray &payload);
     void scheduleBrowserTargetCheck(int delayMs);
     void scheduleBrowserSnapshot(int delayMs);
+    void scheduleBrowserHealthCheck();
+    void recoverBrowserSession(QString text);
     void scheduleRoomStatusCheck(int delayMs);
     void checkRoomStatus(std::uint64_t generation);
 
@@ -76,6 +79,7 @@ private:
     QString ownerNickname_;
     QString ownerUniqueId_;
     QString joinedRoomId_;
+    uint64_t liveViewerCount_{0};
 
     bool running_{false};
     bool live_{false};

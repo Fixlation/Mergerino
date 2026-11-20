@@ -30,6 +30,7 @@
 #include <QLinearGradient>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QScreen>
 #include <QSignalBlocker>
@@ -56,10 +57,14 @@ using namespace chatterino;
 constexpr auto SHARE_CODE_PREFIX = "MGR1.";
 constexpr int THEME_PALETTE_ROLE = Qt::UserRole + 1;
 constexpr int THEME_PREVIEW_ROLE = Qt::UserRole + 2;
+constexpr int INTERACTIVE_THEME_ROLE = Qt::UserRole + 3;
 constexpr int THEME_PALETTE_SIZE = 20;
 constexpr int ANIMATED_PALETTE_WIDTH = 84;
 constexpr int ANIMATED_PALETTE_HEIGHT = 24;
 constexpr int THEME_PALETTE_MARGIN = 6;
+constexpr int INTERACTIVE_THEME_ICON_SIZE = 14;
+constexpr int INTERACTIVE_THEME_ICON_SPACE =
+    INTERACTIVE_THEME_ICON_SIZE + THEME_PALETTE_MARGIN;
 
 /// Black or white, whichever reads better on `background`
 QColor readableOn(const QColor &background)
@@ -168,6 +173,28 @@ void paintThemeSwatch(QPainter &painter, const QRect &rect,
     painter.restore();
 }
 
+void paintInteractiveThemeIcon(QPainter &painter, const QPoint &origin,
+                               const QColor &color)
+{
+    painter.save();
+    painter.translate(origin);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    QPainterPath pointer;
+    pointer.moveTo(5.5, 5.5);
+    pointer.lineTo(13, 8.5);
+    pointer.lineTo(9.75, 9.75);
+    pointer.lineTo(8.5, 13);
+    pointer.closeSubpath();
+    painter.fillPath(pointer, color);
+
+    painter.setPen(QPen(color, 1.25, Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(QPointF(1, 5.5), QPointF(2.75, 5.5));
+    painter.drawLine(QPointF(2, 2), QPointF(3.25, 3.25));
+    painter.drawLine(QPointF(5.5, 1), QPointF(5.5, 2.75));
+    painter.restore();
+}
+
 class ThemePaletteDelegate final : public QStyledItemDelegate
 {
 public:
@@ -203,12 +230,17 @@ public:
 
         const auto paletteRect = themePaletteRect(
             styledOption.rect, THEME_PALETTE_MARGIN, !preview.isEmpty());
+        const bool interactive = index.data(INTERACTIVE_THEME_ROLE).toBool();
+        const int iconSpace = interactive ? INTERACTIVE_THEME_ICON_SPACE : 0;
         const auto textRect = styledOption.rect.adjusted(
-            6, 0, -(paletteRect.width() + THEME_PALETTE_MARGIN * 2), 0);
+            6, 0, -(paletteRect.width() + THEME_PALETTE_MARGIN * 2 + iconSpace),
+            0);
         const auto selected =
             styledOption.state.testFlag(QStyle::State_Selected);
         const auto enabled =
             styledOption.state.testFlag(QStyle::State_Enabled);
+        const auto textRole =
+            selected ? QPalette::HighlightedText : QPalette::Text;
         const auto text = styledOption.fontMetrics.elidedText(
             styledOption.text, Qt::ElideRight, textRect.width());
 
@@ -216,9 +248,18 @@ public:
         painter->setFont(styledOption.font);
         style->drawItemText(painter, textRect,
                             Qt::AlignLeft | Qt::AlignVCenter,
-                            styledOption.palette, enabled, text,
-                            selected ? QPalette::HighlightedText
-                                     : QPalette::Text);
+                            styledOption.palette, enabled, text, textRole);
+        if (interactive)
+        {
+            const QPoint origin(
+                paletteRect.left() - INTERACTIVE_THEME_ICON_SPACE,
+                styledOption.rect.center().y() - INTERACTIVE_THEME_ICON_SIZE / 2);
+            const auto group = enabled
+                                   ? styledOption.palette.currentColorGroup()
+                                   : QPalette::Disabled;
+            paintInteractiveThemeIcon(*painter, origin,
+                                      styledOption.palette.color(group, textRole));
+        }
         auto &backdrop = this->backdrops_[index.data(Qt::UserRole).toString()];
         paintThemeSwatch(*painter, paletteRect, colors,
                          styledOption.palette.color(QPalette::Mid), preview,
@@ -235,6 +276,10 @@ public:
             const auto palette = themePaletteSize(
                 !index.data(THEME_PREVIEW_ROLE).toJsonObject().isEmpty());
             size.rwidth() += palette.width() + THEME_PALETTE_MARGIN * 2;
+            if (index.data(INTERACTIVE_THEME_ROLE).toBool())
+            {
+                size.rwidth() += INTERACTIVE_THEME_ICON_SPACE;
+            }
             size.setHeight(std::max(size.height(), palette.height() + 4));
         }
         return size;
@@ -553,14 +598,23 @@ QWidget *themePickerRow(QWidget *parent, const QString &label, Theme &themes,
             const auto swatch = themeSwatch(themes, themeKey);
             if (!swatch.isEmpty())
             {
-                combo->setItemData(combo->count() - 1, swatch,
-                                   THEME_PALETTE_ROLE);
+                const auto row = combo->count() - 1;
+                combo->setItemData(row, swatch, THEME_PALETTE_ROLE);
                 if (animated)
                 {
                     if (const auto resolved = themes.resolvedThemeJson(themeKey))
                     {
-                        combo->setItemData(combo->count() - 1, *resolved,
-                                           THEME_PREVIEW_ROLE);
+                        combo->setItemData(row, *resolved, THEME_PREVIEW_ROLE);
+                        if (themeEffectFromTheme(*resolved).isScene())
+                        {
+                            const auto description =
+                                QStringLiteral("Interactive theme");
+                            combo->setItemData(row, true,
+                                               INTERACTIVE_THEME_ROLE);
+                            combo->setItemData(row, description, Qt::ToolTipRole);
+                            combo->setItemData(row, description,
+                                               Qt::AccessibleDescriptionRole);
+                        }
                     }
                 }
             }
@@ -691,6 +745,7 @@ std::array<const char *, 3> defaultEffectColors(ThemeEffectKind kind)
         case ThemeEffectKind::Rain:
             return {"#a9c4e0", "#5d87b3", "#e6f0fa"};
         case ThemeEffectKind::Aurora:
+        case ThemeEffectKind::Scene:
         case ThemeEffectKind::None:
             break;
     }

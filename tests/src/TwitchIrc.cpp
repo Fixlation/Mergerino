@@ -5,12 +5,23 @@
 #include "providers/twitch/TwitchIrc.hpp"
 
 #include "messages/Image.hpp"
+#include "controllers/accounts/AccountController.hpp"
 #include "mocks/BaseApplication.hpp"
 #include "mocks/EmoteController.hpp"
+#include "mocks/Helix.hpp"
+#include "mocks/TwitchIrcServer.hpp"
+#include "providers/irc/IrcConnection2.hpp"
+#include "providers/twitch/TwitchAccount.hpp"
+#include "providers/twitch/TwitchChannel.hpp"
+#include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/twitch/TwitchCommon.hpp"
 #include "providers/twitch/TwitchBadge.hpp"
 #include "providers/twitch/TwitchEmotes.hpp"
 #include "Test.hpp"
 #include "util/IrcHelpers.hpp"
+
+#include <QEventLoop>
+#include <QTimer>
 
 using namespace chatterino;
 
@@ -27,9 +38,161 @@ public:
     }
 
     mock::EmoteController emotes;
+    AccountController accounts;
+    AccountController *getAccounts() override { return &this->accounts; }
+    mock::MockTwitchIrcServer twitch;
+    ITwitchIrcServer *getTwitch() override { return &this->twitch; }
 };
 
 }  // namespace
+
+namespace chatterino {
+class TwitchIrcServerTestAccess
+{
+public:
+    static void connections(TwitchIrcServer &server, IrcConnection *read, IrcConnection *write)
+    {
+        server.readConnection_.reset(read);
+        server.writeConnection_.reset(write);
+    }
+    static void send(TwitchIrcServer &server, const std::shared_ptr<TwitchChannel> &channel, bool &sent)
+    {
+        server.onMessageSendRequested(channel, "test message", sent);
+    }
+    static void reply(TwitchIrcServer &server, const std::shared_ptr<TwitchChannel> &channel, bool &sent)
+    {
+        server.onReplySendRequested(channel, "test reply", "parent-id", sent);
+    }
+};
+}  // namespace chatterino
+
+namespace {
+class RecordingIrcConnection : public IrcConnection
+{
+public:
+    struct Login { QString name; QString nick; QString password; };
+    std::vector<Login> logins;
+    void open() override
+    {
+        this->logins.push_back({this->userName(), this->nickName(), this->password()});
+    }
+};
+
+class TwitchAnonymous : public ::testing::Test
+{
+public:
+    MockApplication app;
+    ::testing::NiceMock<mock::Helix> helix;
+    std::unique_ptr<TwitchIrcServer> server;
+    RecordingIrcConnection *read{};
+    RecordingIrcConnection *write{};
+    void SetUp() override
+    {
+        initializeHelix(&this->helix);
+        this->app.accounts.twitch.currentUserChanged.disconnect_all_slots();
+        EXPECT_CALL(this->helix, update(::testing::_, ::testing::_)).Times(::testing::AnyNumber());
+        this->app.accounts.twitch.accounts.append(std::make_shared<TwitchAccount>(
+            "anonymous_test_account", "fake_test_token", "fake_client", "123"));
+        this->app.accounts.twitch.currentUsername = "anonymous_test_account";
+        this->app.accounts.twitch.load();
+        this->server = std::make_unique<TwitchIrcServer>();
+        this->read = new RecordingIrcConnection;
+        this->write = new RecordingIrcConnection;
+        TwitchIrcServerTestAccess::connections(*this->server, this->read, this->write);
+    }
+    void TearDown() override
+    {
+        this->server->disconnect();
+        this->server.reset();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        initializeHelix(nullptr);
+    }
+};
+}  // namespace
+
+TEST_F(TwitchAnonymous, SwitchingToAnonymousClearsBothCredentialsAndClosesTheWriter)
+{
+    server->connect();
+    ASSERT_EQ(read->logins.size(), 1);
+    ASSERT_EQ(write->logins.size(), 1);
+    EXPECT_EQ(read->password(), "oauth:fake_test_token");
+    app.accounts.twitch.currentUsername = "";
+    ASSERT_TRUE(app.accounts.twitch.getCurrent()->isAnon());
+    server->connect();
+    EXPECT_TRUE(read->password().isEmpty());
+    EXPECT_TRUE(write->password().isEmpty());
+    ASSERT_EQ(read->logins.size(), 2);
+    EXPECT_EQ(read->logins.back().name, ANONYMOUS_USERNAME);
+    EXPECT_EQ(read->logins.back().nick, ANONYMOUS_USERNAME);
+    EXPECT_TRUE(read->logins.back().password.isEmpty());
+    EXPECT_EQ(write->logins.size(), 1);
+    server->open(TwitchIrcServer::ConnectionType::Write);
+    EXPECT_EQ(write->logins.size(), 1);
+}
+
+TEST_F(TwitchAnonymous, ReconnectingOrReloadingSavedAccountsPreservesAnonymousSelection)
+{
+    server->connect();
+    app.accounts.twitch.currentUsername = "";
+    for (int i = 0; i < 3; ++i)
+    {
+        app.accounts.twitch.reloadUsers();
+        server->connect();
+        EXPECT_TRUE(app.accounts.twitch.getCurrent()->isAnon());
+        EXPECT_TRUE(app.accounts.twitch.currentUsername.getValue().isEmpty());
+        EXPECT_EQ(read->logins.back().name, ANONYMOUS_USERNAME);
+        EXPECT_TRUE(read->logins.back().password.isEmpty());
+    }
+    EXPECT_EQ(write->logins.size(), 1);
+    app.accounts.twitch.currentUsername = "anonymous_test_account";
+    server->connect();
+    ASSERT_EQ(write->logins.size(), 2);
+    EXPECT_EQ(write->logins.back().name, "anonymous_test_account");
+    EXPECT_EQ(write->logins.back().password, "oauth:fake_test_token");
+}
+
+TEST_F(TwitchAnonymous, ReloadingCurrentLoginRefreshesHelixCredentials)
+{
+    using AccountSetting = pajlada::Settings::Setting<QString>;
+    AccountSetting::set("/accounts/uid123/username", "anonymous_test_account");
+    AccountSetting::set("/accounts/uid123/userID", "123");
+    AccountSetting::set("/accounts/uid123/clientID", "new_client");
+    AccountSetting::set("/accounts/uid123/oauthToken", "new_token");
+
+    EXPECT_CALL(helix, update(QStringLiteral("new_client"),
+                              QStringLiteral("new_token")))
+        .Times(1);
+    app.accounts.twitch.reloadUsers();
+
+    EXPECT_EQ(app.accounts.twitch.getCurrent()->getOAuthToken(),
+              QStringLiteral("new_token"));
+    EXPECT_EQ(app.accounts.twitch.currentUsername.getValue(),
+              QStringLiteral("anonymous_test_account"));
+}
+
+TEST_F(TwitchAnonymous, NormalMessagesAndRepliesStayBlockedWhileAnonymous)
+{
+    app.accounts.twitch.currentUsername = "";
+    auto channel = std::make_shared<TwitchChannel>("anonymous_test_channel");
+    bool sent = true;
+    TwitchIrcServerTestAccess::send(*server, channel, sent);
+    EXPECT_FALSE(sent);
+    sent = true;
+    TwitchIrcServerTestAccess::reply(*server, channel, sent);
+    EXPECT_FALSE(sent);
+    EXPECT_TRUE(write->logins.empty());
+}
+
+TEST(TwitchAnonymousConnection, IntentionalCloseCancelsAnAlreadyScheduledReconnect)
+{
+    RecordingIrcConnection connection;
+    connection.smartReconnect();
+    connection.close();
+    QEventLoop loop;
+    QTimer::singleShot(1200, &loop, &QEventLoop::quit);
+    loop.exec();
+    EXPECT_TRUE(connection.logins.empty());
+}
 
 class TestTwitchIrc : public ::testing::Test
 {

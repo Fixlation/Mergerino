@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -80,6 +81,7 @@ using SteadyClock = std::chrono::steady_clock;
 class ChannelView final : public BaseWidget
 {
     Q_OBJECT
+    friend class ChannelViewTestAccess;
 
 public:
     enum class Context {
@@ -87,6 +89,7 @@ public:
         UserCard,
         ReplyThread,
         Search,
+        PriorityChat,
     };
 
     /// Creates a channel view without a split.
@@ -173,6 +176,11 @@ public:
     /// @see #underlyingChannel()
     void setChannel(const ChannelPtr &underlyingChannel);
     void refreshMessages();
+    // Retained filtered views rotate according to their own message limit,
+    // including when the predicate or display settings are refreshed.
+    void setMessagePredicate(std::function<bool(const MessagePtr &)> predicate,
+                             bool retainHistory = false);
+    void refreshMessagePredicate();
     void refreshSlowerChatSettings();
     int pendingSlowChatMessageCount() const;
 
@@ -296,6 +304,7 @@ private:
     void messageAddedAtStart(std::vector<MessagePtr> &messages);
     void messageRemoveFromStart(MessagePtr &message);
     void messageRemoved(size_t hint, const MessagePtr &message);
+    MessagePtr findProxyMessage(const MessagePtr &message) const;
     void messageReplaced(size_t hint, const MessagePtr &prev,
                          const MessagePtr &replacement);
     void messagesUpdated();
@@ -439,6 +448,7 @@ private:
 
     ThreadGuard snapshotGuard_;
     std::vector<MessageLayoutPtr> snapshot_;
+    bool snapshotDirty_ = true;
 
     /// @brief The backing (internal) channel
     ///
@@ -473,6 +483,8 @@ private:
     bool showScrollBar_ = false;
 
     FilterSetPtr channelFilters_;
+    std::function<bool(const MessagePtr &)> messagePredicate_;
+    bool retainFilteredHistory_ = false;
 
     // Returns true if message should be included
     bool shouldIncludeMessage(const MessagePtr &message) const;

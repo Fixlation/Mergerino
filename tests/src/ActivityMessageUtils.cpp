@@ -25,7 +25,7 @@ TEST(ActivityMessageUtils, AllowsNativeAlertMessages)
     EXPECT_TRUE(shouldShowMessageInActivityPane(message));
 }
 
-TEST(ActivityMessageUtils, RaidsAndWatchStreaksShareDefaultEnabledSetting)
+TEST(ActivityMessageUtils, RaidsDefaultOnAndWatchStreaksDefaultOffIndependently)
 {
     for (const auto flag : {MessageFlag::Raid, MessageFlag::WatchStreak})
     {
@@ -34,9 +34,17 @@ TEST(ActivityMessageUtils, RaidsAndWatchStreaksShareDefaultEnabledSetting)
         message.flags.set(flag);
 
         EXPECT_TRUE(isActivityAlertMessage(message));
-        EXPECT_TRUE(shouldShowMessageInActivityPane(message));
-        EXPECT_FALSE(shouldShowMessageInActivityPane(message, 100, 100, 0, false));
-        EXPECT_TRUE(shouldShowMessageInActivityPane(message, 100, 100, 0, true));
+        EXPECT_EQ(shouldShowMessageInActivityPane(message),
+                  flag == MessageFlag::Raid);
+        for (const bool raids : {false, true})
+        {
+            for (const bool streaks : {false, true})
+            {
+                EXPECT_EQ(shouldShowMessageInActivityPane(
+                              message, 100, 100, 0, raids, streaks),
+                          flag == MessageFlag::Raid ? raids : streaks);
+            }
+        }
     }
 
     Message kickHost;
@@ -58,20 +66,23 @@ TEST(ActivityMessageUtils, RaidsAndWatchStreaksStillRespectHistoryAndBotExclusio
         Message message;
         message.flags.set(flag);
         message.flags.set(MessageFlag::RecentMessage);
-        EXPECT_FALSE(shouldShowMessageInActivityPane(message));
+        EXPECT_FALSE(
+            shouldShowMessageInActivityPane(message, 100, 100, 0, true, true));
 
         message.flags.unset(MessageFlag::RecentMessage);
         message.twitchBadges.emplace_back("bot", "1");
-        EXPECT_FALSE(shouldShowMessageInActivityPane(message));
+        EXPECT_FALSE(
+            shouldShowMessageInActivityPane(message, 100, 100, 0, true, true));
     }
 }
 
-TEST(ActivityMessageUtils, ActivityEventSettingDefaultsOnAndRestoresSavedValue)
+TEST(ActivityMessageUtils, OldLayoutsKeepTheirRaidChoiceButDisableWatchStreaks)
 {
     const QJsonObject data{{"type", "twitch"}, {"name", "pajlada"}};
     SplitDescriptor legacy;
     SplitDescriptor::loadFromJSON(legacy, {}, data);
-    EXPECT_TRUE(legacy.showRaidsAndWatchStreaks_);
+    EXPECT_TRUE(legacy.showRaids_);
+    EXPECT_FALSE(legacy.showWatchStreaks_);
 
     for (const bool enabled : {false, true})
     {
@@ -80,7 +91,28 @@ TEST(ActivityMessageUtils, ActivityEventSettingDefaultsOnAndRestoresSavedValue)
             QJsonDocument::fromJson(QJsonDocument(saved).toJson()).object();
         SplitDescriptor descriptor;
         SplitDescriptor::loadFromJSON(descriptor, restored, data);
-        EXPECT_EQ(descriptor.showRaidsAndWatchStreaks_, enabled);
+        EXPECT_EQ(descriptor.showRaids_, enabled);
+        EXPECT_FALSE(descriptor.showWatchStreaks_);
+    }
+}
+
+TEST(ActivityMessageUtils, ExplicitEventChoicesSurviveReloadingIndependently)
+{
+    const QJsonObject data{{"type", "twitch"}, {"name", "test-channel"}};
+    for (const bool raids : {false, true})
+    {
+        for (const bool streaks : {false, true})
+        {
+            const QJsonObject saved{{"showRaids", raids},
+                                    {"showWatchStreaks", streaks},
+                                    {"showRaidsAndWatchStreaks", !raids}};
+            const auto restored =
+                QJsonDocument::fromJson(QJsonDocument(saved).toJson()).object();
+            SplitDescriptor descriptor;
+            SplitDescriptor::loadFromJSON(descriptor, restored, data);
+            EXPECT_EQ(descriptor.showRaids_, raids);
+            EXPECT_EQ(descriptor.showWatchStreaks_, streaks);
+        }
     }
 }
 

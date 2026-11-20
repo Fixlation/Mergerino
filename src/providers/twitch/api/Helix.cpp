@@ -238,6 +238,53 @@ void Helix::getChannelFollowers(
         .execute();
 }
 
+void Helix::getChannelFollowDate(QString broadcasterID, QString userID,
+                                 const QObject *caller,
+                                 ResultCallback<QDateTime> successCallback,
+                                 FailureCallback<QString> failureCallback)
+{
+    this->makeGet("channels/followers", {{u"broadcaster_id"_s, broadcasterID},
+                                        {u"user_id"_s, userID}})
+        .caller(caller)
+        .onSuccess([userID, successCallback, failureCallback](const auto &result) {
+            const auto data = result.parseJson().value("data"_L1);
+            if (!data.isArray())
+            {
+                failureCallback(
+                    u"Twitch returned an invalid follower response."_s);
+                return;
+            }
+
+            const auto followers = data.toArray();
+            if (followers.isEmpty())
+            {
+                successCallback({});
+                return;
+            }
+
+            const auto follower = followers.at(0).toObject();
+            const auto followedAt = QDateTime::fromString(
+                follower["followed_at"_L1].toString(), Qt::ISODate);
+            if (follower["user_id"_L1].toString() != userID ||
+                !followedAt.isValid())
+            {
+                failureCallback(
+                    u"Twitch returned an invalid follower response."_s);
+                return;
+            }
+            successCallback(followedAt);
+        })
+        .onError([failureCallback](const auto &result) {
+            if (result.status() == 401 || result.status() == 403)
+            {
+                failureCallback({});
+                return;
+            }
+            failureCallback(u"Twitch could not load the follow date."_s);
+        })
+        .execute();
+}
+
 void Helix::fetchStreams(
     QStringList userIds, QStringList userLogins,
     ResultCallback<std::vector<HelixStream>> successCallback,
@@ -4288,18 +4335,41 @@ QString moderationAuthClipboardText()
 
 QString moderationAuthClipboardScript()
 {
-    return QStringLiteral(R"MERGERINO_JS(copy(await (async () => {
+    return QStringLiteral(R"MERGERINO_JS((async () => {
+  if (location.protocol !== 'https:' ||
+      (location.hostname !== 'twitch.tv' && !location.hostname.endsWith('.twitch.tv'))) {
+    throw new Error('Run this helper on https://www.twitch.tv while signed in.');
+  }
+  document.getElementById('mergerino-twitch-auth-copy')?.remove();
+
   const normalize = value => {
     if (!value) {
       return '';
     }
 
     let text = String(value).trim();
-    return String(text || '')
-      .replace(/^(OAuth|Bearer)\s+/i, '')
-      .replace(/^oauth:/i, '')
-      .trim()
-      .match(/^[A-Za-z0-9._~+/=-]{20,4096}$/)?.[0] || '';
+    for (let pass = 0; pass < 8; ++pass) {
+      const previous = text;
+      if ((text.startsWith('"') && text.endsWith('"')) ||
+          (text.startsWith("'") && text.endsWith("'"))) {
+        text = text.slice(1, -1).trim();
+      }
+      text = text.replace(/^(OAuth|Bearer)\s+/i, '')
+        .replace(/^oauth:/i, '').trim();
+      if (text === previous) {
+        break;
+      }
+    }
+    return text.match(/^[A-Za-z0-9._~+/=-]{20,4096}$/)?.[0] || '';
+  };
+
+  const isAuthTokenKey = key => {
+    const name = key.toLowerCase().replace(/[^a-z]/g, '');
+    if (name.includes('refresh') || name.includes('integrity')) {
+      return false;
+    }
+    return name === 'token' || name === 'oauth' ||
+      /(?:auth|oauth|access).*token|token.*(?:auth|oauth|access)/.test(name);
   };
 
   const extractFromObject = (value, depth = 0) => {
@@ -4309,7 +4379,7 @@ QString moderationAuthClipboardScript()
 
     if (typeof value === 'string') {
       const text = value.trim();
-      if (text.startsWith('{') || text.startsWith('[')) {
+      if (text.startsWith('{') || text.startsWith('[') || text.startsWith('"')) {
         try {
           const token = extractFromObject(JSON.parse(text), depth + 1);
           if (token) {
@@ -4333,18 +4403,23 @@ QString moderationAuthClipboardScript()
     }
 
     if (typeof value === 'object') {
-      const keys = Object.keys(value).sort((a, b) => {
-        const score = key => {
-          const lower = key.toLowerCase();
-          return (lower.includes('token') ? 4 : 0) +
-            (lower.includes('auth') || lower.includes('oauth') ? 3 : 0) +
-            (lower.includes('access') ? 2 : 0);
-        };
-        return score(b) - score(a);
-      });
-
+      const keys = Object.keys(value);
       for (const key of keys) {
+        if (!isAuthTokenKey(key)) {
+          continue;
+        }
         const token = extractFromObject(value[key], depth + 1);
+        if (token) {
+          return token;
+        }
+      }
+      for (const key of keys) {
+        const nested = value[key];
+        if (typeof nested !== 'object' &&
+            !(typeof nested === 'string' && /^\s*[\[{]/.test(nested))) {
+          continue;
+        }
+        const token = extractFromObject(nested, depth + 1);
         if (token) {
           return token;
         }
@@ -4431,45 +4506,22 @@ QString moderationAuthClipboardScript()
       clearTimeout(timeout);
     }
   };
-  const cookieToken = () => {
-    const cookies = String(document.cookie || '').split(';');
-    const preferred = [
-      'auth-token',
-      'api_token',
-      'twilight-user',
-      'persistent',
-    ];
-
-    for (const name of preferred) {
-      const prefix = `${name}=`;
-      const entry = cookies.map(cookie => cookie.trim())
-        .find(cookie => cookie.startsWith(prefix));
-      if (!entry) {
+  const cookies = new Map();
+  try {
+    for (const cookie of String(document.cookie || '').split(';')) {
+      const separator = cookie.indexOf('=');
+      if (separator < 0) {
         continue;
       }
-
-      const token = clean(decodeURIComponent(entry.slice(prefix.length)));
-      if (token) {
-        return token;
+      const name = cookie.slice(0, separator).trim();
+      try {
+        cookies.set(name, decodeURIComponent(cookie.slice(separator + 1)));
+      } catch (_) {
+        // A malformed cookie must not prevent checking other token sources.
       }
     }
-
-    for (const cookie of cookies) {
-      const [name, ...parts] = cookie.trim().split('=');
-      const lower = String(name || '').toLowerCase();
-      if (!lower.includes('token') && !lower.includes('auth') &&
-          !lower.includes('twilight')) {
-        continue;
-      }
-
-      const token = clean(decodeURIComponent(parts.join('=')));
-      if (token) {
-        return token;
-      }
-    }
-
-    return '';
-  };
+  } catch (_) {
+  }
 
   const safeStorageGet = (storage, key) => {
     try {
@@ -4489,24 +4541,35 @@ QString moderationAuthClipboardScript()
   } catch (_) {
   }
 
-  let token = cookieToken();
-  if (!token) {
-    const preferredKeys = [
-      'twilight.authToken',
-      'twilight-user',
-      'auth-token',
-      'token',
-      'access_token',
-    ];
+  let token = '';
+  const preferredKeys = [
+    'auth-token',
+    'twilight.authToken',
+    'access_token',
+    'twilight-user',
+    'api_token',
+    'token',
+    'persistent',
+  ];
+  for (const key of preferredKeys) {
+    token = clean(cookies.get(key));
     for (const storage of storages) {
-      for (const key of preferredKeys) {
-        token = clean(safeStorageGet(storage, key));
+      if (token) {
+        break;
+      }
+      token = clean(safeStorageGet(storage, key));
+    }
+    if (token) {
+      break;
+    }
+  }
+  if (!token) {
+    for (const [key, value] of cookies) {
+      if (isAuthTokenKey(key)) {
+        token = clean(value);
         if (token) {
           break;
         }
-      }
-      if (token) {
-        break;
       }
     }
   }
@@ -4525,10 +4588,7 @@ QString moderationAuthClipboardScript()
           key = storage.key(i) || '';
         } catch (_) {
         }
-        const lower = key.toLowerCase();
-        if (lower.includes('token') &&
-            (lower.includes('auth') || lower.includes('oauth') ||
-             lower.includes('access') || lower.includes('twilight'))) {
+        if (isAuthTokenKey(key)) {
           token = clean(safeStorageGet(storage, key));
           if (token) {
             break;
@@ -4542,8 +4602,7 @@ QString moderationAuthClipboardScript()
   }
 
   if (!token) {
-    alert('Mergerino could not find a Twitch auth token in cookies or browser storage. Make sure you are logged in on twitch.tv, refresh, and try again.');
-    throw new Error('Mergerino could not find a Twitch auth token.');
+    throw new Error('No Twitch auth token found. Make sure you are logged in on twitch.tv, refresh, and try again.');
   }
 
   const integrityToken = await fetchIntegrity(token);
@@ -4555,9 +4614,54 @@ QString moderationAuthClipboardScript()
     deviceId,
     clientIntegrity: integrityToken,
   });
-  return payload;
-})());
-console.log('Mergerino token copied. Return to Mergerino and click Paste Token.');)MERGERINO_JS");
+  const copied = () => console.log('Mergerino token copied. Return to Mergerino and click Paste Token.');
+  try {
+    // Firefox only captures console copy() requests during the initial evaluation.
+    // Use the Clipboard API after asynchronous integrity work instead.
+    await navigator.clipboard.writeText(payload);
+    copied();
+    return;
+  } catch (_) {
+  }
+
+  // Clipboard permissions or DevTools focus can block automatic copying.
+  // A page button gives the Clipboard API a fresh user gesture in every browser.
+  const panel = document.createElement('div');
+  panel.id = 'mergerino-twitch-auth-copy';
+  panel.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483647;max-width:360px;padding:18px;border:1px solid #555;background:#18181b;color:#fff;font:14px/1.5 system-ui;box-shadow:0 4px 24px #0008';
+  const message = document.createElement('p');
+  message.textContent = 'Mergerino: click Copy Token, then return to Mergerino and click Paste Token.';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'Copy Token';
+  button.style.cssText = 'padding:8px 16px;border:1px solid #777;background:#333;color:#fff;cursor:pointer;font:inherit';
+  const manual = document.createElement('textarea');
+  manual.readOnly = true;
+  manual.hidden = true;
+  manual.setAttribute('aria-label', 'Mergerino Twitch token');
+  manual.style.cssText = 'width:100%;margin-top:12px;color:#fff;background:#222;font:inherit';
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(payload);
+      copied();
+      panel.remove();
+    } catch (_) {
+      manual.value = payload;
+      manual.hidden = false;
+      manual.focus();
+      manual.select();
+      message.textContent = 'Your browser blocked copying. Copy the selected text with Ctrl+C (Command+C on Mac), then return to Mergerino and click Paste Token.';
+    }
+  });
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = 'Close';
+  close.style.cssText = button.style.cssText + ';margin-left:8px';
+  close.addEventListener('click', () => panel.remove());
+  panel.append(message, button, close, manual);
+  document.body.append(panel);
+  console.log('Mergerino: click Copy Token in the Twitch page to finish copying.');
+})().catch(error => console.error('Mergerino:', error.message));)MERGERINO_JS");
 }
 
 void saveModerationAccount(const TwitchModerationAuth::Account &account)

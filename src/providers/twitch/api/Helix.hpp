@@ -1060,6 +1060,11 @@ public:
         QString broadcasterID,
         ResultCallback<HelixGetChannelFollowersResponse> successCallback,
         std::function<void(QString)> failureCallback) = 0;
+    // An invalid date on success means Twitch confirmed there is no follow.
+    virtual void getChannelFollowDate(
+        QString broadcasterID, QString userID, const QObject *caller,
+        ResultCallback<QDateTime> successCallback,
+        FailureCallback<QString> failureCallback) = 0;
 
     // https://dev.twitch.tv/docs/api/reference#get-streams
     virtual void fetchStreams(
@@ -1488,6 +1493,10 @@ public:
         QString broadcasterID,
         ResultCallback<HelixGetChannelFollowersResponse> successCallback,
         std::function<void(QString)> failureCallback) final;
+    void getChannelFollowDate(QString broadcasterID, QString userID,
+                              const QObject *caller,
+                              ResultCallback<QDateTime> successCallback,
+                              FailureCallback<QString> failureCallback) final;
 
     // https://dev.twitch.tv/docs/api/reference#get-streams
     void fetchStreams(QStringList userIds, QStringList userLogins,

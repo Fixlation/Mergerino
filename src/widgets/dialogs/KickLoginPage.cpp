@@ -1,6 +1,7 @@
 #include "widgets/dialogs/KickLoginPage.hpp"
 
 #include "Application.hpp"
+#include "common/AccountAccess.hpp"
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
@@ -860,7 +861,7 @@ async function pollStatus() {
     }
 
     if (data.state === 'error') {
-      detailNode.textContent = 'Kick login did not finish successfully.';
+      detailNode.textContent = data.message === 'Error' ? '' : 'Kick login did not finish successfully.';
       retryLink.hidden = false;
       returnButton.hidden = true;
       return;
@@ -1332,6 +1333,15 @@ private:
                     const auto error =
                         u"Kick returned incomplete user information."_s;
                     qCWarning(chatterinoKick) << error << obj;
+                    this->setBrowserState(u"error"_s, error);
+                    return;
+                }
+
+                if (const auto error =
+                        accountAccessError(ProviderId::Kick, username);
+                    !error.isEmpty())
+                {
+                    this->clearPendingTimeout();
                     this->setBrowserState(u"error"_s, error);
                     return;
                 }

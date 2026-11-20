@@ -19,6 +19,8 @@
 
 #include <cstdint>
 
+class QJsonObject;
+
 namespace chatterino {
 
 class ChannelView;
@@ -31,6 +33,10 @@ class SplitContainer;
 class SplitOverlay;
 class SelectChannelDialog;
 class OverlayWindow;
+class BasePopup;
+class ModView;
+class PriorityChat;
+namespace priority { enum class Choice; }
 class SplitSettingsDialog;
 enum class ActivityTimeDisplayMode : std::uint8_t;
 enum class PlatformIndicatorMode : std::uint8_t;
@@ -49,6 +55,7 @@ enum class PlatformIndicatorMode : std::uint8_t;
 class Split : public BaseWidget
 {
     friend class SplitInput;
+    friend class PriorityChatTestAccess;
 
     Q_OBJECT
 
@@ -66,10 +73,14 @@ public:
     bool inputEnabled() const;
     bool isActivityPane() const;
     bool hasLinkedActivityPane();
+    Split *activityOwner();
+    void normalizeLinkedActivityPanes();
+    static QJsonObject activityChannelSignature(IndirectChannel channel);
     QString activityPaneTitle() const;
     qreal activityMessageScale() const;
     bool collapseGiftedSubscriptions() const;
-    bool showRaidsAndWatchStreaks() const;
+    bool showRaids() const;
+    bool showWatchStreaks() const;
     ActivityTimeDisplayMode activityTimeDisplayMode() const;
     bool slowerChatEnabled() const;
     qreal slowerChatMessagesPerSecond() const;
@@ -95,12 +106,44 @@ public:
 
     void setModerationMode(bool value);
     bool getModerationMode() const;
+    bool moderationModeRequested() const;
+    bool isModViewPane() const;
+    bool isUtilityPane() const;
+    bool modViewStandalone() const;
+    QString modViewId() const;
+    QString modViewOwnerId() const;
+    Split *modViewOwner();
+    void restoreModViewState(bool pane, const QString &id,
+                             const QString &ownerId, bool standalone);
+    void normalizeModViewPanes();
+    void closeModViewPane();
+    void returnModViewToOwner();
+    void unlinkModViewPane();
+    bool canUsePriorityChat() const;
+    bool priorityChatRequested() const;
+    bool priorityChatEnabled() const;
+    bool isPriorityChatPane() const;
+    bool priorityChatStandalone() const;
+    QString priorityChatId() const;
+    QString priorityChatOwnerId() const;
+    QString priorityChatTitle() const;
+    Split *priorityChatOwner();
+    void restorePriorityChatState(bool pane, const QString &id,
+                                  const QString &ownerId, bool standalone);
+    void normalizePriorityChatPanes();
+    void setPriorityChatEnabled(bool enabled);
+    void setPriorityChatUserChoice(const MessagePtr &message, priority::Choice choice);
+    priority::Choice priorityChatUserChoice(const Message &message);
+    bool isPriorityChatUserIncluded(const Message &message);
+    bool showInlineModerationActions() const;
+    void inspectInModView(const MessagePtr &message);
     void setInputEnabled(bool enabled);
     bool hasHiddenPinnedMessage() const;
     void unhidePinnedMessages();
     void setActivityMessageScale(qreal value);
     void setCollapseGiftedSubscriptions(bool value);
-    void setShowRaidsAndWatchStreaks(bool value);
+    void setShowRaids(bool value);
+    void setShowWatchStreaks(bool value);
     void setActivityTimeDisplayMode(ActivityTimeDisplayMode value);
     void setSlowerChatEnabled(bool value);
     void setSlowerChatMessagesPerSecond(qreal value);
@@ -209,17 +252,32 @@ private:
      * moderation actions have been changed
      **/
     void refreshModerationMode();
+    void ensureModView();
+    void attachModView(ModView *view);
+    std::vector<Split *> linkedModViewPanes() const;
+    void toggleModViewPopOut();
+    void refreshPriorityChatAccess();
+    void ensurePriorityChat();
+    std::vector<Split *> linkedPriorityChatPanes() const;
 
     IndirectChannel channel_;
 
     bool moderationMode_{};
+    bool priorityChatEnabled_{false};
+    bool priorityChatPane_{false};
+    bool priorityChatStandalone_{false};
+    QString priorityChatId_;
+    QString priorityChatOwnerId_;
+    QPointer<Split> priorityChatOwner_;
     bool isTopRightSplit_{};
     bool inputEnabled_{true};
+    QPointer<Split> activityOwner_;
     bool filterActivity_{false};
     bool filterActivityExplicit_{false};
     qreal activityMessageScale_{0.9};
     bool collapseGiftedSubscriptions_{true};
-    bool showRaidsAndWatchStreaks_{true};
+    bool showRaids_{true};
+    bool showWatchStreaks_{false};
     ActivityTimeDisplayMode activityTimeDisplayMode_;
     bool slowerChatEnabled_{false};
     qreal slowerChatMessagesPerSecond_{5.0};
@@ -237,6 +295,14 @@ private:
     bool isDragging_{};
 
     QVBoxLayout *const vbox_;
+    QHBoxLayout *chatRow_{};
+    QPointer<ModView> modView_;
+    bool modViewPane_ = false;
+    bool modViewStandalone_ = false;
+    QString modViewId_;
+    QString modViewOwnerId_;
+    QPointer<Split> modViewOwner_;
+    PriorityChat *priorityChat_{};
     SplitHeader *const header_;
     StreamDatabaseBadgeBar *streamDatabaseBadgeBar_{};
     TwitchPollsAndPredictionsBar *const twitchPollsAndPredictionsBar_;
@@ -273,6 +339,7 @@ public Q_SLOTS:
     void showOverlayWindow();
     void clear();
     void openInBrowser();
+    void openModView();
     void openModViewInBrowser();
     void openWhispersInBrowser();
     void openBrowserPlayer();

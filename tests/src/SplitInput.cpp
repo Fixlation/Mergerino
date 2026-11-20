@@ -4,10 +4,12 @@
 
 #include "widgets/splits/SplitInput.hpp"
 
+#include "common/Channel.hpp"
 #include "common/Literals.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/Command.hpp"
 #include "controllers/commands/CommandController.hpp"
+#include "controllers/completion/TabCompletionModel.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
 #include "mocks/BaseApplication.hpp"
 #include "mocks/EmoteController.hpp"
@@ -20,10 +22,13 @@
 #include "singletons/WindowManager.hpp"
 #include "Test.hpp"
 #include "widgets/Notebook.hpp"
+#include "widgets/helper/ResizingTextEdit.hpp"
 #include "widgets/splits/Split.hpp"
 
 #include <QDebug>
 #include <QLabel>
+#include <QMouseEvent>
+#include <QFocusEvent>
 #include <QString>
 #include <QTextEdit>
 
@@ -91,7 +96,85 @@ public:
     SplitInput input;
 };
 
+// Record the focus traversal Qt attempts after a child ignores Tab. Keep the
+// entire widget tree hidden so this never interacts with desktop focus.
+class TabFocusProbe : public QWidget
+{
+public:
+    int traversals = 0;
+
+protected:
+    bool focusNextPrevChild(bool) override
+    {
+        ++this->traversals;
+        return true;
+    }
+};
+
 }  // namespace
+
+TEST(ChatInputTabFocus, EmptyShortAndUnmatchedInputCannotTriggerFocusTraversal)
+{
+    MockApplication app;
+    TabFocusProbe window;
+    Channel channel("completion-test", Channel::Type::None);
+    ResizingTextEdit editor;
+    editor.setParent(&window);
+    QCompleter completer;
+    completer.setModel(new TabCompletionModel(channel, &completer));
+
+    for (const bool withCompleter : {false, true})
+    {
+        editor.setCompleter(withCompleter ? &completer : nullptr);
+        for (const auto &text : {QString{}, QString("a"), QString("unmatched")})
+        {
+            SCOPED_TRACE(text.toStdString());
+            editor.setPlainText(text);
+            editor.moveCursor(QTextCursor::End);
+            for (const auto key : {Qt::Key_Tab, Qt::Key_Backtab})
+            {
+                QKeyEvent event(QEvent::KeyPress, key,
+                                key == Qt::Key_Backtab ? Qt::ShiftModifier
+                                                      : Qt::NoModifier);
+                QCoreApplication::sendEvent(&editor, &event);
+                EXPECT_EQ(window.traversals, 0);
+                EXPECT_EQ(editor.toPlainText(), text);
+            }
+        }
+    }
+    EXPECT_FALSE(window.isVisible());
+}
+
+TEST(ChatInputTabFocus, TabAndShiftTabStillCycleCompletions)
+{
+    MockApplication app;
+    TabFocusProbe window;
+    Channel channel("completion-test", Channel::Type::None);
+    ResizingTextEdit editor;
+    editor.setParent(&window);
+    QCompleter completer;
+    auto *model = new TabCompletionModel(channel, &completer);
+    // Supply deterministic results; this test exercises input dispatch and
+    // inline completion without depending on live channel/emote data.
+    model->setStringList({"PogOne", "PogTwo"});
+    completer.setModel(model);
+    editor.setCompleter(&completer);
+    editor.setPlainText("Pog");
+    editor.moveCursor(QTextCursor::End);
+
+    const auto press = [&](Qt::Key key, Qt::KeyboardModifiers modifiers) {
+        QKeyEvent event(QEvent::KeyPress, key, modifiers);
+        QCoreApplication::sendEvent(&editor, &event);
+        EXPECT_EQ(window.traversals, 0);
+    };
+    press(Qt::Key_Tab, Qt::NoModifier);
+    EXPECT_EQ(editor.toPlainText(), "PogOne");
+    press(Qt::Key_Tab, Qt::NoModifier);
+    EXPECT_EQ(editor.toPlainText(), "PogTwo");
+    press(Qt::Key_Backtab, Qt::ShiftModifier);
+    EXPECT_EQ(editor.toPlainText(), "PogOne");
+    EXPECT_FALSE(window.isVisible());
+}
 
 TEST_P(SplitInputTest, Reply)
 {
@@ -224,6 +307,40 @@ TEST(SplitInputAnonymous, BlockedBoxIsReadOnlyAndNamesWhereYouAreAnonymous)
         input.findChildren<QLabel *>(), [](const QLabel *label) {
             return label->toolTip().startsWith("Anonymous");
         }));
+}
+
+TEST(SplitInputAnonymous, ClickingOrFocusingTheComposerDoesNotSelectASavedAccount)
+{
+    MockApplication app;
+    Split split(nullptr);
+    SplitInput input(&split);
+    auto &accounts = app.accounts.twitch;
+    accounts.accounts.append(std::make_shared<TwitchAccount>(
+        "anonymous_input_test", "fake_token", "fake_client", "123"));
+    accounts.currentUsername = "";
+    input.setAnonymousState({"Twitch"});
+    auto *editor = input.findChild<QTextEdit *>();
+    ASSERT_TRUE(editor);
+    EXPECT_EQ(editor->viewport()->cursor().shape(), Qt::ArrowCursor);
+    QFocusEvent focus(QEvent::FocusIn);
+    QCoreApplication::sendEvent(editor, &focus);
+    QMouseEvent click(QEvent::MouseButtonRelease, QPointF(5, 5), QPointF(5, 5),
+                      Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(editor->viewport(), &click);
+    EXPECT_TRUE(accounts.currentUsername.getValue().isEmpty());
+    EXPECT_TRUE(editor->isReadOnly());
+    EXPECT_TRUE(input.isAnonymousBlocked());
+    input.insertText("must remain blocked");
+    EXPECT_TRUE(input.getInputText().isEmpty());
+
+    QLabel *ghost = nullptr;
+    for (auto *label : input.findChildren<QLabel *>())
+        if (label->toolTip() == "Anonymous on Twitch. Click to disable.") ghost = label;
+    ASSERT_TRUE(ghost);
+    QMouseEvent ghostClick(QEvent::MouseButtonRelease, QPointF(5, 5), QPointF(5, 5),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(ghost, &ghostClick);
+    EXPECT_EQ(accounts.currentUsername.getValue(), "anonymous_input_test");
 }
 
 TEST(SplitInputAppearance, DefaultDarkRestoresOriginalComposerPalette)

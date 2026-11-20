@@ -856,7 +856,19 @@ void WindowManager::encodeNodeRecursively(SplitNode *node, QJsonObject &obj)
     {
         case SplitNode::Type::Split: {
             obj.insert("type", "split");
-            obj.insert("moderationMode", node->getSplit()->getModerationMode());
+            obj.insert("moderationMode",
+                       node->getSplit()->moderationModeRequested());
+            obj.insert("modViewPane", node->getSplit()->isModViewPane());
+            obj.insert("modViewStandalone",
+                       node->getSplit()->modViewStandalone());
+            obj.insert("modViewId", node->getSplit()->modViewId());
+            obj.insert("modViewOwnerId", node->getSplit()->modViewOwnerId());
+            obj.insert("priorityChatEnabled",
+                       node->getSplit()->priorityChatRequested());
+            obj.insert("priorityChatPane", node->getSplit()->isPriorityChatPane());
+            obj.insert("priorityChatStandalone", node->getSplit()->priorityChatStandalone());
+            obj.insert("priorityChatId", node->getSplit()->priorityChatId());
+            obj.insert("priorityChatOwnerId", node->getSplit()->priorityChatOwnerId());
             obj.insert("activityPane", node->getSplit()->isActivityPane());
             obj.insert("inputEnabled", node->getSplit()->inputEnabled());
             obj.insert("filterActivity", node->getSplit()->filterActivity());
@@ -866,8 +878,8 @@ void WindowManager::encodeNodeRecursively(SplitNode *node, QJsonObject &obj)
                        node->getSplit()->activityMessageScale());
             obj.insert("collapseGiftedSubscriptions",
                        node->getSplit()->collapseGiftedSubscriptions());
-            obj.insert("showRaidsAndWatchStreaks",
-                       node->getSplit()->showRaidsAndWatchStreaks());
+            obj.insert("showRaids", node->getSplit()->showRaids());
+            obj.insert("showWatchStreaks", node->getSplit()->showWatchStreaks());
             obj.insert("activityTimeDisplayMode",
                        qmagicenum::enumNameString(
                            node->getSplit()->activityTimeDisplayMode())

@@ -154,6 +154,7 @@ void IrcConnection::smartReconnect()
 
 void IrcConnection::open()
 {
+    this->reconnectTimer_.stop();
     this->expectConnectionLoss_ = false;
     this->waitingForPong_ = false;
     this->recentlyReceivedMessage_ = false;
@@ -162,6 +163,9 @@ void IrcConnection::open()
 
 void IrcConnection::close()
 {
+    // An intentional disconnect must also cancel retries scheduled for the
+    // previous identity, including when switching to anonymous mode.
+    this->reconnectTimer_.stop();
     this->expectConnectionLoss_ = true;
     Communi::IrcConnection::close();
 }

@@ -1,0 +1,15 @@
+<!-- Lucide funnel icon. ISC license: ../licenses/lucide.txt -->
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <!-- Continuous tangents keep the rounded rim even at small pixel sizes. -->
+  <path d="M3 3H21C21.85 3 22.31 4.01 21.74 4.67L14.52 12.66C14.18 13.03 14 13.51 14 14V21C14 21.74 13.22 22.22 12.55 21.89L10.55 20.89C10.21 20.72 10 20.38 10 20V14C10 13.51 9.82 13.03 9.48 12.66L2.26 4.67C1.69 4.01 2.15 3 3 3Z" />
+</svg>

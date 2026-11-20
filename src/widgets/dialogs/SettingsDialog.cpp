@@ -449,7 +449,7 @@ void SettingsDialog::addTabs()
     this->addTab([]{return new HighlightingPage;},     "Highlights",     ":/settings/notifications.svg",
                  SettingsTabId::None, {"highlight", "messages", "users", "badges", "blacklisted users", "sound", "regex"});
     this->addTab([]{return new IgnoresPage;},          "Ignores",        ":/settings/ignore.svg",
-                 SettingsTabId::None, {"ignore", "blocked users", "block", "unblock", "messages", "users", "replacement", "regex"});
+                 SettingsTabId::None, {"ignore", "blocked users", "blocked accounts", "kick", "block", "unblock", "messages", "users", "replacement", "regex"});
     this->addTab([]{return new FiltersPage;},          "Filters",        ":/settings/filters.svg",
                  SettingsTabId::None, {"filter"});
     this->ui_.tabContainer->addSpacing(16);

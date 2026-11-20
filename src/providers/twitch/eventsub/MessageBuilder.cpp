@@ -946,4 +946,23 @@ MessagePtr makeUserMessageUpdateMessage(
     return builder.release();
 }
 
+MessagePtr makeShoutoutMessage(
+    TwitchChannel *channel, const QDateTime &time,
+    const lib::payload::channel_shoutout_create::v1::Event &event)
+{
+    EventSubMessageBuilder builder(channel, time);
+    builder->loginName = event.moderatorUserLogin.qt();
+
+    QString text;
+    builder.appendUser(event.moderatorUserName, event.moderatorUserLogin, text);
+    builder.emplaceSystemTextAndUpdate(u"gave a shoutout to"_s, text);
+    builder.appendUser(event.toBroadcasterUserName,
+                       event.toBroadcasterUserLogin, text, false);
+    builder.emplaceSystemTextAndUpdate(u"."_s, text);
+
+    builder.setMessageAndSearchText(text);
+
+    return builder.release();
+}
+
 }  // namespace chatterino::eventsub

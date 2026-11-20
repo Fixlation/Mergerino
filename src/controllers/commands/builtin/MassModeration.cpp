@@ -111,6 +111,14 @@ QString openDialog(const CommandContext &ctx, bool ban)
             "on the selected platform.");
         return {};
     }
+    openMassModerationDialog(channel, ban);
+    return {};
+}
+
+}  // namespace
+
+void openMassModerationDialog(const ChannelPtr &channel, bool ban)
+{
     auto *dialog = MassModerationDialog::find(channel, ban);
     if (!dialog)
     {
@@ -119,10 +127,7 @@ QString openDialog(const CommandContext &ctx, bool ban)
         dialog->setAttribute(Qt::WA_DeleteOnClose);
     }
     dialog->reopen();
-    return {};
 }
-
-}  // namespace
 
 ExpectedStr<Queue::Action> makeMassModerationAction(const ChannelPtr &channel,
                                                     bool ban,

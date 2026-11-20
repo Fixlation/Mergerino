@@ -785,6 +785,11 @@ YouTubeLiveChat *MergedChannel::youtubeLiveChat() const
     return this->youtubeLiveChat_.get();
 }
 
+TikTokLiveChat *MergedChannel::tiktokLiveChat() const
+{
+    return this->tiktokLiveChat_.get();
+}
+
 void MergedChannel::setYouTubeDiscoveryForeground(bool foreground)
 {
     this->youtubeDiscoveryForeground_ = foreground;

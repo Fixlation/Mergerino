@@ -11,6 +11,10 @@ namespace chatterino {
 
 struct CommandContext;
 
+/// Opens the mass ban or unban window for a Twitch or Kick channel, reusing
+/// one that is already open.
+void openMassModerationDialog(const ChannelPtr &channel, bool ban);
+
 ExpectedStr<MassModerationQueue::Action> makeMassModerationAction(
     const ChannelPtr &channel, bool ban, const QString &reason,
     QObject *receiver);

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/splits/Split.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/Common.hpp"
@@ -16,6 +17,7 @@
 #include "providers/kick/KickAccount.hpp"
 #include "providers/kick/KickChannel.hpp"
 #include "providers/merged/MergedChannel.hpp"
+#include "providers/tiktok/TikTokLiveChat.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
@@ -29,6 +31,7 @@
 #include "util/CustomPlayer.hpp"
 #include "util/StreamLink.hpp"
 #include "widgets/ChatterListWidget.hpp"
+#include "widgets/BasePopup.hpp"
 #include "widgets/dialogs/QualityPopup.hpp"
 #include "widgets/dialogs/SelectChannelDialog.hpp"
 #include "widgets/dialogs/SelectChannelFiltersDialog.hpp"
@@ -43,6 +46,8 @@
 #include "widgets/OverlayWindow.hpp"
 #include "widgets/Scrollbar.hpp"
 #include "widgets/splits/DraggedSplit.hpp"
+#include "widgets/splits/ModView.hpp"
+#include "widgets/splits/PriorityChat.hpp"
 #include "widgets/splits/PinnedMessageBar.hpp"
 #include "widgets/splits/SplitContainer.hpp"
 #include "widgets/splits/SplitHeader.hpp"
@@ -62,6 +67,7 @@
 #include <QListWidget>
 #include <QMimeData>
 #include <QMovie>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QSet>
 #include <QTextStream>
@@ -72,6 +78,8 @@
 
 namespace chatterino {
 namespace {
+// A layout-only chat column keeps ChannelView parented to Split. Several chat
+// input, rendering and focus paths deliberately depend on that relationship.
 constexpr qreal ALERTS_PRIMARY_RATIO = 0.7;
 constexpr qreal ALERTS_SECONDARY_RATIO = 0.3;
 constexpr qreal MIN_ACTIVITY_MESSAGE_SCALE = 0.75;
@@ -252,9 +260,7 @@ QStringList normalizedFilterIds(const QList<QUuid> &ids)
 
 QJsonObject encodeChannelSignature(IndirectChannel channel)
 {
-    QJsonObject obj;
-    WindowManager::encodeChannel(std::move(channel), obj);
-    return obj;
+    return Split::activityChannelSignature(std::move(channel));
 }
 
 const auto ALERTS_FILTER_TEXT = QStringLiteral(
@@ -345,90 +351,39 @@ bool splitMatchesChannelAndFilters(Split *split,
                normalizedFilterIds(filterIds);
 }
 
-Split *findLinkedActivityPane(Split *source)
+std::vector<Split *> findLinkedActivityPanes(Split *source)
 {
-    if (!source)
+    std::vector<Split *> panes;
+    if (!source || source->isUtilityPane())
     {
-        return nullptr;
+        return panes;
     }
 
-    const auto sourceChannel = source->getChannel();
     auto *container = dynamic_cast<SplitContainer *>(source->parentWidget());
-    if (!container || !sourceChannel || sourceChannel->isEmpty())
+    if (!container)
     {
-        return nullptr;
+        return panes;
     }
-
-    const auto alertFilterId = findAlertsFilterId();
-    if (!alertFilterId)
-    {
-        return nullptr;
-    }
-
-    auto filterIds = source->getFilters();
-    if (!filterIds.contains(*alertFilterId))
-    {
-        filterIds.append(*alertFilterId);
-    }
-
-    const auto channelSignature = encodeChannelSignature(
-        source->getIndirectChannel());
     for (auto *split : container->getSplits())
     {
-        if (split == source || !split->isActivityPane())
+        if (split != source && split->isActivityPane() &&
+            split->activityOwner() == source)
         {
-            continue;
-        }
-
-        if (splitMatchesChannelAndFilters(split, channelSignature, filterIds))
-        {
-            return split;
+            panes.push_back(split);
         }
     }
+    return panes;
+}
 
-    return nullptr;
+Split *findLinkedActivityPane(Split *source)
+{
+    const auto panes = findLinkedActivityPanes(source);
+    return panes.empty() ? nullptr : panes.front();
 }
 
 Split *findActivityOwnerSplit(Split *activitySplit)
 {
-    if (!activitySplit || !activitySplit->isActivityPane())
-    {
-        return activitySplit;
-    }
-
-    const auto activityChannel = activitySplit->getChannel();
-    auto *container =
-        dynamic_cast<SplitContainer *>(activitySplit->parentWidget());
-    if (!container || !activityChannel || activityChannel->isEmpty())
-    {
-        return nullptr;
-    }
-
-    const auto alertFilterId = findAlertsFilterId();
-    if (!alertFilterId)
-    {
-        return nullptr;
-    }
-
-    auto filterIds = activitySplit->getFilters();
-    filterIds.removeAll(*alertFilterId);
-
-    const auto channelSignature = encodeChannelSignature(
-        activitySplit->getIndirectChannel());
-    for (auto *split : container->getSplits())
-    {
-        if (split == activitySplit || split->isActivityPane())
-        {
-            continue;
-        }
-
-        if (splitMatchesChannelAndFilters(split, channelSignature, filterIds))
-        {
-            return split;
-        }
-    }
-
-    return nullptr;
+    return activitySplit ? activitySplit->activityOwner() : nullptr;
 }
 
 void refreshActivityIcons(SplitContainer *container)
@@ -478,7 +433,8 @@ bool areEquivalentIndirectChannels(const IndirectChannel &lhs,
 void syncLinkedActivityPane(Split *ownerSplit, Split *activitySplit,
                             bool enabled)
 {
-    auto *container = dynamic_cast<SplitContainer *>(ownerSplit->parentWidget());
+    auto *container =
+        dynamic_cast<SplitContainer *>(ownerSplit->parentWidget());
     if (!container)
     {
         return;
@@ -487,10 +443,14 @@ void syncLinkedActivityPane(Split *ownerSplit, Split *activitySplit,
     if (!enabled)
     {
         ownerSplit->setFilterActivity(false);
-        if (activitySplit)
+        auto panes = findLinkedActivityPanes(ownerSplit);
+        if (activitySplit && activitySplit->parentWidget() == container &&
+            std::find(panes.begin(), panes.end(), activitySplit) == panes.end())
         {
-            container->deleteSplit(activitySplit);
+            panes.push_back(activitySplit);
         }
+        for (auto *pane : panes)
+            container->deleteSplit(pane);
         refreshActivityIcons(container);
         return;
     }
@@ -504,8 +464,8 @@ void syncLinkedActivityPane(Split *ownerSplit, Split *activitySplit,
         const auto activityMessageScale = activitySplit->activityMessageScale();
         const auto collapseGiftedSubscriptions =
             activitySplit->collapseGiftedSubscriptions();
-        const auto showRaidsAndWatchStreaks =
-            activitySplit->showRaidsAndWatchStreaks();
+        const auto showRaids = activitySplit->showRaids();
+        const auto showWatchStreaks = activitySplit->showWatchStreaks();
         const auto tiktokActivityMinimumDiamonds =
             activitySplit->tiktokActivityMinimumDiamonds();
         const auto twitchActivityMinimumBits =
@@ -520,10 +480,10 @@ void syncLinkedActivityPane(Split *ownerSplit, Split *activitySplit,
         activitySplit->setActivityMessageScale(activityMessageScale);
         activitySplit->setCollapseGiftedSubscriptions(
             collapseGiftedSubscriptions);
-        activitySplit->setShowRaidsAndWatchStreaks(showRaidsAndWatchStreaks);
+        activitySplit->setShowRaids(showRaids);
+        activitySplit->setShowWatchStreaks(showWatchStreaks);
         activitySplit->setActivityTimeDisplayMode(activityTimeDisplayMode);
-        activitySplit->setTwitchActivityMinimumBits(
-            twitchActivityMinimumBits);
+        activitySplit->setTwitchActivityMinimumBits(twitchActivityMinimumBits);
         activitySplit->setKickActivityMinimumKicks(kickActivityMinimumKicks);
         activitySplit->setTikTokActivityMinimumDiamonds(
             tiktokActivityMinimumDiamonds);
@@ -532,9 +492,9 @@ void syncLinkedActivityPane(Split *ownerSplit, Split *activitySplit,
         ownerSplit->setKickActivityMinimumKicks(kickActivityMinimumKicks);
         ownerSplit->setTikTokActivityMinimumDiamonds(
             tiktokActivityMinimumDiamonds);
-        ownerSplit->setCollapseGiftedSubscriptions(
-            collapseGiftedSubscriptions);
-        ownerSplit->setShowRaidsAndWatchStreaks(showRaidsAndWatchStreaks);
+        ownerSplit->setCollapseGiftedSubscriptions(collapseGiftedSubscriptions);
+        ownerSplit->setShowRaids(showRaids);
+        ownerSplit->setShowWatchStreaks(showWatchStreaks);
         ownerSplit->setFilterActivity(true);
         refreshActivityIcons(container);
         return;
@@ -657,6 +617,7 @@ Qt::KeyboardModifiers Split::modifierStatus = Qt::NoModifier;
 Split::Split(QWidget *parent)
     : BaseWidget(parent)
     , channel_(createInitialSplitChannel())
+    , priorityChatId_(QUuid::createUuid().toString(QUuid::WithoutBraces))
     , activityTimeDisplayMode_(ActivityTimeDisplayMode::Relative)
     , platformIndicatorMode_(createInitialPlatformIndicatorMode())
     , vbox_(createSplitVBoxLayout(this))
@@ -668,6 +629,7 @@ Split::Split(QWidget *parent)
     , overlay_(createSplitOverlay(this))
 {
     splitCtorTrace(QStringLiteral("Split constructor body start"));
+    this->modViewId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     this->setMouseTracking(true);
     this->view_->setPausable(true);
     this->view_->setFocusProxy(this->input_->ui_.textEdit);
@@ -683,11 +645,17 @@ Split::Split(QWidget *parent)
         this->inputEnabled_ && this->streamDatabaseBadgeFeedVisible_);
 
     this->vbox_->addWidget(this->header_);
-    this->vbox_->addWidget(streamDatabaseBadgeBar);
-    this->vbox_->addWidget(this->twitchPollsAndPredictionsBar_);
-    this->vbox_->addWidget(this->pinnedMessageBar_);
-    this->vbox_->addWidget(this->view_, 1);
-    this->vbox_->addWidget(this->input_);
+    this->chatRow_ = new QHBoxLayout;
+    this->chatRow_->setSpacing(0);
+    auto *chatColumn = new QVBoxLayout;
+    chatColumn->setSpacing(0);
+    chatColumn->addWidget(streamDatabaseBadgeBar);
+    chatColumn->addWidget(this->twitchPollsAndPredictionsBar_);
+    chatColumn->addWidget(this->pinnedMessageBar_);
+    chatColumn->addWidget(this->view_, 1);
+    chatColumn->addWidget(this->input_);
+    this->chatRow_->addLayout(chatColumn, 1);
+    this->vbox_->addLayout(this->chatRow_, 1);
     this->pinnedMessageBar_->setChannel(this->getChannel());
     this->pinnedMessageBar_->setDisplayEnabled(
         this->inputEnabled_ && !disablePinnedMessagesSetting().getValue());
@@ -743,6 +711,7 @@ Split::Split(QWidget *parent)
                 this->pinnedMessageBar_->setChannel(this->getChannel());
                 this->input_->updatePlatformSelector();
                 this->updateInputPlaceholder();
+                this->refreshPriorityChatAccess();
             }));
     this->signalHolder_.managedConnect(this->channelChanged,
                                        [this, streamDatabaseBadgeBar] {
@@ -751,17 +720,29 @@ Split::Split(QWidget *parent)
         this->input_->updatePlatformSelector();
         this->updateInputPlaceholder();
         this->refreshYouTubeDiscoveryForeground();
+        if (this->modView_)
+        {
+            this->modView_->setChannel(this->getChannel());
+        }
+        if (this->priorityChat_)
+        {
+            this->priorityChat_->setChannel(this->getChannel());
+            if (this->isPriorityChatPane())
+                this->priorityChat_->setMonitoring(this->canUsePriorityChat());
+        }
     });
     this->signalHolder_.managedConnect(
         getApp()->getAccounts()->kick.currentUserChanged, [this] {
             this->pinnedMessageBar_->setChannel(this->getChannel());
             this->input_->updatePlatformSelector();
             this->updateInputPlaceholder();
+            this->refreshPriorityChatAccess();
         });
     this->signalHolder_.managedConnect(
         getApp()->getAccounts()->youtube.currentUserChanged, [this] {
             this->input_->updatePlatformSelector();
             this->updateInputPlaceholder();
+            this->refreshPriorityChatAccess();
         });
     // whether a click can leave anonymous mode depends on the saved accounts
     for (auto *userListUpdated :
@@ -1128,7 +1109,7 @@ void Split::addShortcuts()
          }},
         {"openModView",
          [this](const std::vector<QString> &) -> QString {
-             this->openModViewInBrowser();
+             this->openModView();
              return "";
          }},
         {"createClip",
@@ -1387,6 +1368,8 @@ void Split::addShortcuts()
 
 Split::~Split()
 {
+    if (this->modView_) this->modView_->setMonitoring(false);
+    if (this->priorityChat_) this->priorityChat_->setMonitoring(false);
     this->usermodeChangedConnection_.disconnect();
     this->roomModeChangedConnection_.disconnect();
     this->channelIDChangedConnection_.disconnect();
@@ -1400,6 +1383,11 @@ ChannelView &Split::getChannelView()
 
 SplitInput &Split::getInput()
 {
+    if (this->isPriorityChatPane())
+        if (auto *owner = this->priorityChatOwner()) return owner->getInput();
+    if (this->isModViewPane())
+        if (auto *owner = this->modViewOwner())
+            return owner->getInput();
     return *this->input_;
 }
 
@@ -1410,12 +1398,125 @@ bool Split::inputEnabled() const
 
 bool Split::isActivityPane() const
 {
-    return !this->inputEnabled_;
+    return !this->inputEnabled_ && !this->priorityChatPane_ &&
+           !this->modViewPane_;
 }
 
 bool Split::hasLinkedActivityPane()
 {
     return findLinkedActivityPane(this) != nullptr;
+}
+
+QJsonObject Split::activityChannelSignature(IndirectChannel channel)
+{
+    QJsonObject obj;
+    WindowManager::encodeChannel(channel, obj);
+    // Presentation preferences and asynchronously populated Kick IDs are not
+    // chat identity. Including them strands otherwise identical saved panes.
+    obj.remove("tiktokShowJoinMessages");
+    if (auto *merged = dynamic_cast<MergedChannel *>(channel.get().get()))
+    {
+        const auto &config = merged->config();
+        if (config.twitchEnabled || config.kickEnabled ||
+            config.youtubeEnabled || config.tiktokEnabled)
+            obj.remove("name");
+        obj.insert(
+            "twitchChannel",
+            config.twitchEnabled
+                ? config.effectiveTwitchChannelName().trimmed().toCaseFolded()
+                : QString());
+        obj.insert(
+            "kickChannel",
+            config.kickEnabled
+                ? config.effectiveKickChannelName().trimmed().toCaseFolded()
+                : QString());
+        obj.insert("youtubeStreamUrl", config.youtubeEnabled
+                                           ? config.youtubeStreamUrl.trimmed()
+                                           : QString());
+        auto tiktokSource =
+            TikTokLiveChat::normalizeSource(config.tiktokSource);
+        if (tiktokSource.isEmpty())
+            tiktokSource = config.tiktokSource.trimmed().toCaseFolded();
+        obj.insert("tiktokSource",
+                   config.tiktokEnabled ? tiktokSource : QString());
+    }
+    else if (channel.getType() == Channel::Type::Kick ||
+             channel.getType() == Channel::Type::Twitch)
+    {
+        obj.remove("roomID");
+        obj.remove("userID");
+        obj.remove("channelID");
+        obj.insert("name", channel.get()->getName().toCaseFolded());
+    }
+    return obj;
+}
+
+Split *Split::activityOwner()
+{
+    if (!this->isActivityPane())
+        return this;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    if (!container)
+        return nullptr;
+    if (this->activityOwner_ &&
+        this->activityOwner_->parentWidget() == container &&
+        !this->activityOwner_->isActivityPane() &&
+        !this->activityOwner_->isPriorityChatPane())
+        return this->activityOwner_;
+    this->activityOwner_.clear();
+    if (this->getChannel()->isEmpty())
+        return nullptr;
+    const auto alertFilterId = findAlertsFilterId();
+    if (!alertFilterId)
+        return nullptr;
+    auto filters = this->getFilters();
+    filters.removeAll(*alertFilterId);
+    const auto signature = encodeChannelSignature(this->getIndirectChannel());
+    Split *onlyChannelOwner = nullptr;
+    int matchingChannels = 0;
+    for (auto *candidate : container->getSplits())
+    {
+        if (candidate == this || candidate->isUtilityPane() ||
+            encodeChannelSignature(candidate->getIndirectChannel()) !=
+                signature)
+            continue;
+        ++matchingChannels;
+        onlyChannelOwner = candidate;
+        if (splitMatchesChannelAndFilters(candidate, signature, filters))
+        {
+            this->activityOwner_ = candidate;
+            return candidate;
+        }
+    }
+    // A pane may have additional filters of its own. Restore its unique chat
+    // owner without confusing it with another filtered view of that chat.
+    if (matchingChannels == 1)
+    {
+        this->activityOwner_ = onlyChannelOwner;
+        return onlyChannelOwner;
+    }
+    return nullptr;
+}
+
+void Split::normalizeLinkedActivityPanes()
+{
+    if (this->isUtilityPane())
+        return;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    if (!container)
+        return;
+    const auto panes = findLinkedActivityPanes(this);
+    // Old toggle failures could save several copies. Keep the first pane and
+    // its preferences, then use that same live relationship for icon state.
+    for (size_t i = 1; i < panes.size(); ++i)
+        container->deleteSplit(panes[i]);
+    if (!panes.empty())
+    {
+        // Route the main chat using the visible pane's saved event choices.
+        this->setShowRaids(panes.front()->showRaids());
+        this->setShowWatchStreaks(panes.front()->showWatchStreaks());
+    }
+    refreshActivityIcons(container);
 }
 
 bool Split::filterActivity() const
@@ -1430,12 +1531,8 @@ bool Split::filterActivityExplicit() const
 
 bool Split::viewerCountEnabled() const
 {
-    if (!getSettings()->headerViewerCount.getValue())
-    {
-        return false;
-    }
-
-    return this->viewerCountEnabledOverride_.value_or(true);
+    return this->viewerCountEnabledOverride_.value_or(
+        getSettings()->headerViewerCount.getValue());
 }
 
 std::optional<bool> Split::viewerCountEnabledOverride() const
@@ -1458,9 +1555,14 @@ bool Split::collapseGiftedSubscriptions() const
     return this->collapseGiftedSubscriptions_;
 }
 
-bool Split::showRaidsAndWatchStreaks() const
+bool Split::showRaids() const
 {
-    return this->showRaidsAndWatchStreaks_;
+    return this->showRaids_;
+}
+
+bool Split::showWatchStreaks() const
+{
+    return this->showWatchStreaks_;
 }
 
 ActivityTimeDisplayMode Split::activityTimeDisplayMode() const
@@ -1556,6 +1658,7 @@ bool Split::eventFilter(QObject *watched, QEvent *event)
 
 void Split::setInputEnabled(bool enabled)
 {
+    enabled = enabled && !this->priorityChatPane_ && !this->modViewPane_;
     auto updateStreamDatabaseBadgeFeedVisibility = [this, enabled] {
         if (this->streamDatabaseBadgeBar_ != nullptr)
         {
@@ -1576,10 +1679,19 @@ void Split::setInputEnabled(bool enabled)
         return;
     }
 
+    // Remove linked panes while this is still a chat owner.
+    if (!enabled && !this->priorityChatPane_ && !this->modViewPane_)
+    {
+        this->setModerationMode(false);
+        this->setPriorityChatEnabled(false);
+    }
     this->inputEnabled_ = enabled;
+    if (enabled) this->activityOwner_.clear();
+    if (!enabled && !this->isModViewPane())
+        this->setModerationMode(false);
     updateStreamDatabaseBadgeFeedVisibility();
 
-    if (!enabled)
+    if (!enabled && !this->priorityChatPane_ && !this->modViewPane_)
     {
         auto filters = this->getFilters();
         if (const auto alertFilterId = ensureAlertsFilter())
@@ -1627,14 +1739,26 @@ void Split::setCollapseGiftedSubscriptions(bool value)
     getApp()->getWindows()->queueSave();
 }
 
-void Split::setShowRaidsAndWatchStreaks(bool value)
+void Split::setShowRaids(bool value)
 {
-    if (this->showRaidsAndWatchStreaks_ == value)
+    if (this->showRaids_ == value)
     {
         return;
     }
 
-    this->showRaidsAndWatchStreaks_ = value;
+    this->showRaids_ = value;
+    this->view_->refreshMessages();
+    getApp()->getWindows()->queueSave();
+}
+
+void Split::setShowWatchStreaks(bool value)
+{
+    if (this->showWatchStreaks_ == value)
+    {
+        return;
+    }
+
+    this->showWatchStreaks_ = value;
     this->view_->refreshMessages();
     getApp()->getWindows()->queueSave();
 }
@@ -1829,6 +1953,13 @@ void Split::setFilterActivity(bool value, bool explicitPreference)
 
 void Split::updateInputVisibility()
 {
+    if (this->isModViewPane())
+    {
+        this->input_->setEnabled(false);
+        this->input_->hide();
+        this->setFocusProxy(this->modView_.data());
+        return;
+    }
     const auto channel = this->getChannel();
     const bool suppressInputForChannel =
         channel != nullptr &&
@@ -2044,9 +2175,13 @@ ChannelPtr Split::getChannel() const
 
 void Split::setChannel(IndirectChannel newChannel)
 {
+    const auto activityPanes = findLinkedActivityPanes(this);
+    const auto priorityPanes = this->linkedPriorityChatPanes();
+    const auto modPanes = this->linkedModViewPanes();
     this->channel_ = newChannel;
 
-    this->view_->setChannel(newChannel.get());
+    this->view_->setChannel(this->isModViewPane() ? Channel::getEmpty()
+                                                  : newChannel.get());
     this->twitchPollsAndPredictionsBar_->setChannel(
         this->inputEnabled_ ? newChannel.get() : Channel::getEmpty());
 
@@ -2066,7 +2201,7 @@ void Split::setChannel(IndirectChannel newChannel)
     if (tc != nullptr)
     {
         this->channelSignalHolder_.managedConnect(tc->userStateChanged, [this] {
-            this->header_->updateIcons();
+            this->refreshPriorityChatAccess();
             this->header_->updateRoomModes();
             this->input_->updatePollPredictionButtons();
         });
@@ -2084,7 +2219,7 @@ void Split::setChannel(IndirectChannel newChannel)
     if (kc != nullptr)
     {
         this->channelSignalHolder_.managedConnect(kc->userStateChanged, [this] {
-            this->header_->updateIcons();
+            this->refreshPriorityChatAccess();
             this->header_->updateRoomModes();
             this->input_->updatePollPredictionButtons();
         });
@@ -2102,6 +2237,10 @@ void Split::setChannel(IndirectChannel newChannel)
     if (yc != nullptr)
     {
         this->channelSignalHolder_.managedConnect(
+            yc->moderationStatusChanged, [this] {
+                this->refreshPriorityChatAccess();
+            });
+        this->channelSignalHolder_.managedConnect(
             yc->sendWaitUpdate, [this](int secondsRemaining) {
                 this->getInput().setSendWaitStatus(MessagePlatform::YouTube,
                                                    secondsRemaining);
@@ -2110,7 +2249,7 @@ void Split::setChannel(IndirectChannel newChannel)
 
     this->indirectChannelChangedConnection_ =
         newChannel.getChannelChanged().connect([this] {
-            QTimer::singleShot(0, [this] {
+            QTimer::singleShot(0, this, [this] {
                 this->setChannel(this->channel_);
             });
         });
@@ -2150,21 +2289,590 @@ void Split::setChannel(IndirectChannel newChannel)
         });
 
     this->channelChanged.invoke();
+    for (auto *pane : activityPanes) pane->setChannel(newChannel);
+    for (auto *pane : priorityPanes) pane->setChannel(newChannel);
+    for (auto *pane : modPanes)
+        pane->setChannel(newChannel);
+    if (this->isModViewPane())
+        QTimer::singleShot(0, this, [this] {
+            this->normalizeModViewPanes();
+        });
+    this->refreshPriorityChatAccess();
+    refreshActivityIcons(dynamic_cast<SplitContainer *>(this->parentWidget()));
     this->actionRequested.invoke(Action::RefreshTab);
 
     // Queue up save because: Split channel changed
     getApp()->getWindows()->queueSave();
 }
 
+bool Split::isModViewPane() const
+{
+    return this->modViewPane_;
+}
+bool Split::isUtilityPane() const
+{
+    return this->modViewPane_ || this->priorityChatPane_ ||
+           this->isActivityPane();
+}
+bool Split::modViewStandalone() const
+{
+    return this->modViewStandalone_;
+}
+QString Split::modViewId() const
+{
+    return this->modViewId_;
+}
+QString Split::modViewOwnerId() const
+{
+    return this->modViewOwnerId_;
+}
+bool Split::moderationModeRequested() const
+{
+    return !this->isUtilityPane() && this->moderationMode_;
+}
+Split *Split::modViewOwner()
+{
+    if (!this->isModViewPane() || this->modViewStandalone_)
+        return nullptr;
+    if (this->modViewOwner_)
+        return this->modViewOwner_;
+    if (auto *container = dynamic_cast<SplitContainer *>(this->parentWidget()))
+        for (auto *split : container->getSplits())
+            if (!split->isUtilityPane() &&
+                split->modViewId_ == this->modViewOwnerId_)
+            {
+                this->modViewOwner_ = split;
+                return split;
+            }
+    return nullptr;
+}
+std::vector<Split *> Split::linkedModViewPanes() const
+{
+    std::vector<Split *> panes;
+    if (this->isUtilityPane())
+        return panes;
+    if (auto *container = dynamic_cast<SplitContainer *>(this->parentWidget()))
+        for (auto *split : container->getSplits())
+            if (split != this && split->isModViewPane() &&
+                !split->modViewStandalone_ &&
+                split->modViewOwnerId_ == this->modViewId_)
+                panes.push_back(split);
+    return panes;
+}
+void Split::restoreModViewState(bool pane, const QString &id,
+                                const QString &ownerId, bool standalone)
+{
+    if (!id.isEmpty())
+        this->modViewId_ = id;
+    this->modViewPane_ = pane;
+    this->modViewOwnerId_ = ownerId;
+    this->modViewStandalone_ = standalone;
+    if (!pane)
+        return;
+    this->priorityChatPane_ = false;
+    this->moderationMode_ = false;
+    this->priorityChatEnabled_ = false;
+    this->setInputEnabled(false);
+    this->view_->setChannel(Channel::getEmpty());
+    this->view_->hide();
+    this->setTitleSettingsButtonVisible(true);
+}
+void Split::attachModView(ModView *view)
+{
+    if (!this->isModViewPane() || !view)
+        return;
+    if (this->modView_ && this->modView_ != view &&
+        this->modView_->parentWidget() == this)
+    {
+        this->modView_->setMonitoring(false);
+        this->modView_->deleteLater();
+    }
+    this->modView_ = view;
+    view->split_ = this;
+    view->setParent(this);
+    view->setMinimumWidth(0);
+    view->setMaximumWidth(QWIDGETSIZE_MAX);
+    view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    if (this->chatRow_->indexOf(view) < 0)
+        this->chatRow_->addWidget(view, 1);
+    // A Mod View split contains only its panel beneath the native header.
+    if (this->chatRow_->count() > 0 && this->chatRow_->itemAt(0)->layout())
+        delete this->chatRow_->takeAt(0);
+    this->streamDatabaseBadgeBar_->hide();
+    this->twitchPollsAndPredictionsBar_->hide();
+    this->pinnedMessageBar_->hide();
+    this->input_->hide();
+    this->view_->hide();
+    this->setFocusProxy(view);
+    view->setChannel(this->getChannel());
+    view->setMonitoring(true);
+    view->show();
+    this->header_->updateChannelText();
+    this->header_->updateIcons();
+}
+void Split::ensureModView()
+{
+    if (this->modView_)
+        return;
+    auto *view = new ModView(this, this);
+    this->modView_ = view;
+    view->setChannel(this->getChannel());
+    view->hide();
+    std::ignore = view->closeRequested.connect([view] {
+        if (!view->split_)
+            return;
+        if (view->split_->isModViewPane())
+            view->split_->closeModViewPane();
+        else
+            view->split_->setModerationMode(false);
+    });
+    std::ignore = view->popOutRequested.connect([view] {
+        if (view->split_)
+            view->split_->toggleModViewPopOut();
+    });
+    std::ignore = view->inlineActionsChanged.connect([view] {
+        if (!view->split_)
+            return;
+        auto *split = view->split_.data();
+        if (auto *owner = split->modViewOwner())
+            owner->refreshModerationMode();
+        else
+            split->refreshModerationMode();
+    });
+}
 void Split::setModerationMode(bool value)
 {
+    if (this->isModViewPane())
+        return;
+    value = value && !this->isUtilityPane();
     this->moderationMode_ = value;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    const auto splits =
+        container ? container->getSplits() : std::vector<Split *>{};
+    if (!container ||
+        std::find(splits.begin(), splits.end(), this) == splits.end())
+    {
+        if (value)
+            QTimer::singleShot(0, this, [this] {
+                this->normalizeModViewPanes();
+            });
+        this->refreshModerationMode();
+        return;
+    }
+    if (value)
+    {
+        this->ensureModView();
+        auto panes = this->linkedModViewPanes();
+        if (panes.empty())
+        {
+            auto *pane = container->cloneSplit(
+                this, this->getFilters(), SplitDirection::Right,
+                ALERTS_PRIMARY_RATIO, ALERTS_SECONDARY_RATIO, false);
+            if (pane)
+            {
+                pane->restoreModViewState(true, {}, this->modViewId_, false);
+                pane->modViewOwner_ = this;
+                panes.push_back(pane);
+            }
+        }
+        if (!panes.empty())
+            panes.front()->attachModView(this->modView_);
+    }
+    else
+    {
+        for (;;)
+        {
+            const auto panes = this->linkedModViewPanes();
+            if (panes.empty())
+                break;
+            container->deleteSplit(panes.front());
+        }
+        if (this->modView_)
+        {
+            this->modView_->setMonitoring(false);
+            this->modView_->hide();
+        }
+    }
     this->refreshModerationMode();
+    getApp()->getWindows()->queueSave();
 }
-
 bool Split::getModerationMode() const
 {
-    return this->moderationMode_;
+    if (this->isUtilityPane())
+        return false;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    const auto splits =
+        container ? container->getSplits() : std::vector<Split *>{};
+    return !container ||
+                   std::find(splits.begin(), splits.end(), this) == splits.end()
+               ? this->moderationMode_
+               : !this->linkedModViewPanes().empty();
+}
+bool Split::showInlineModerationActions() const
+{
+    return this->getModerationMode() && this->modView_ &&
+           this->modView_->inlineActionsEnabled();
+}
+void Split::normalizeModViewPanes()
+{
+    if (this->isModViewPane())
+    {
+        if (auto *owner = this->modViewOwner())
+            owner->normalizeModViewPanes();
+        else
+        {
+            this->modViewStandalone_ = true;
+            this->ensureModView();
+            this->attachModView(this->modView_);
+        }
+        return;
+    }
+    if (this->isUtilityPane())
+        return;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    if (!container)
+        return;
+    const auto splits = container->getSplits();
+    if (std::find(splits.begin(), splits.end(), this) == splits.end())
+        return;
+    const auto panes = this->linkedModViewPanes();
+    for (size_t i = 1; i < panes.size(); ++i)
+        container->deleteSplit(panes[i]);
+    if (!panes.empty() || this->moderationMode_)
+        this->setModerationMode(true);
+}
+void Split::returnModViewToOwner()
+{
+    auto *owner = this->modViewOwner();
+    if (!owner)
+        return;
+    if (this->modView_ && owner->modView_ == this->modView_)
+    {
+        auto *view = this->modView_.data();
+        view->setMonitoring(false);
+        view->hide();
+        this->chatRow_->removeWidget(view);
+        view->setParent(owner);
+        view->split_ = owner;
+        this->modView_.clear();
+    }
+    owner->moderationMode_ = false;
+    owner->refreshModerationMode();
+}
+void Split::unlinkModViewPane()
+{
+    if (!this->isModViewPane() || this->modViewStandalone_)
+        return;
+    if (auto *owner = this->modViewOwner())
+    {
+        if (owner->modView_ == this->modView_)
+            owner->modView_.clear();
+        owner->moderationMode_ = false;
+        owner->refreshModerationMode();
+    }
+    this->modViewStandalone_ = true;
+    this->modViewOwner_.clear();
+    this->modViewOwnerId_.clear();
+}
+void Split::closeModViewPane()
+{
+    if (auto *container = dynamic_cast<SplitContainer *>(this->parentWidget()))
+        container->deleteSplit(this);
+}
+void Split::openModView()
+{
+    if (!this->isUtilityPane())
+        this->setModerationMode(true);
+}
+void Split::inspectInModView(const MessagePtr &message)
+{
+    if (!message || this->isUtilityPane())
+        return;
+    this->openModView();
+    if (this->modView_)
+        this->modView_->inspectMessage(message);
+}
+void Split::toggleModViewPopOut()
+{
+    if (!this->isModViewPane())
+    {
+        const auto panes = this->linkedModViewPanes();
+        if (!panes.empty())
+            panes.front()->toggleModViewPopOut();
+        return;
+    }
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    if (!container)
+        return;
+    Window &window = getApp()->getWindows()->createWindow(WindowType::Popup);
+    auto *target = window.getNotebook().getOrAddSelectedPage();
+    container->releaseSplit(this);
+    target->insertSplit(this);
+    window.show();
+}
+
+bool Split::canUsePriorityChat() const
+{
+    if (this->isActivityPane() || this->isModViewPane())
+        return false;
+    const auto channel = this->getChannel();
+    return channel &&
+           (channel->isTwitchOrKickChannel() || channel->isMergedChannel());
+}
+
+bool Split::priorityChatRequested() const
+{
+    return !this->isUtilityPane() && this->priorityChatEnabled_;
+}
+
+void Split::refreshPriorityChatAccess()
+{
+    this->header_->updateIcons();
+    if (this->isPriorityChatPane() && this->priorityChat_)
+        this->priorityChat_->setMonitoring(this->canUsePriorityChat());
+    // Role/account signals can arrive while layouts or sibling panes change.
+    QTimer::singleShot(0, this, [this] {
+        auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+        if (!container)
+            return;
+        const auto splits = container->getSplits();
+        if (std::find(splits.begin(), splits.end(), this) == splits.end())
+            return;
+        if (!this->isPriorityChatPane())
+            this->normalizePriorityChatPanes();
+        else if (!this->canUsePriorityChat())
+        {
+            if (auto *owner = this->priorityChatOwner();
+                owner && !this->priorityChatStandalone_)
+                owner->normalizePriorityChatPanes();
+            else
+                container->deleteSplit(this);
+        }
+    });
+}
+
+bool Split::priorityChatEnabled() const
+{
+    if (this->isPriorityChatPane() || this->isActivityPane() ||
+        !this->canUsePriorityChat())
+        return false;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    const auto splits =
+        container ? container->getSplits() : std::vector<Split *>{};
+    if (!container ||
+        std::find(splits.begin(), splits.end(), this) == splits.end())
+        return this->priorityChatEnabled_;
+    return !this->linkedPriorityChatPanes().empty();
+}
+
+bool Split::isPriorityChatPane() const
+{
+    return this->priorityChatPane_;
+}
+bool Split::priorityChatStandalone() const
+{
+    return this->priorityChatStandalone_;
+}
+QString Split::priorityChatId() const
+{
+    return this->priorityChatId_;
+}
+QString Split::priorityChatOwnerId() const
+{
+    return this->priorityChatOwnerId_;
+}
+QString Split::priorityChatTitle() const
+{
+    return this->priorityChat_ ? this->priorityChat_->title()
+                               : QStringLiteral("Priority Chat");
+}
+
+Split *Split::priorityChatOwner()
+{
+    if (!this->priorityChatPane_)
+        return this;
+    if (this->priorityChatOwner_)
+        return this->priorityChatOwner_;
+    if (this->priorityChatOwnerId_.isEmpty())
+        return nullptr;
+    if (auto *container = dynamic_cast<SplitContainer *>(this->parentWidget()))
+        for (auto *split : container->getSplits())
+            if (!split->isUtilityPane() &&
+                split->priorityChatId_ == this->priorityChatOwnerId_)
+            {
+                this->priorityChatOwner_ = split;
+                return split;
+            }
+    for (auto *widget : QApplication::allWidgets())
+        if (auto *split = qobject_cast<Split *>(widget);
+            split && split != this && !split->isPriorityChatPane() &&
+            !split->isActivityPane() &&
+            split->priorityChatId_ == this->priorityChatOwnerId_ &&
+            dynamic_cast<SplitContainer *>(split->parentWidget()))
+        {
+            this->priorityChatOwner_ = split;
+            return split;
+        }
+    return nullptr;
+}
+
+std::vector<Split *> Split::linkedPriorityChatPanes() const
+{
+    std::vector<Split *> panes;
+    if (this->isPriorityChatPane() || this->isActivityPane())
+        return panes;
+    if (auto *container = dynamic_cast<SplitContainer *>(this->parentWidget()))
+        for (auto *split : container->getSplits())
+            if (split != this && split->isPriorityChatPane() &&
+                !split->priorityChatStandalone_ &&
+                split->priorityChatOwnerId_ == this->priorityChatId_)
+                panes.push_back(split);
+    return panes;
+}
+
+void Split::restorePriorityChatState(bool pane, const QString &id,
+                                     const QString &ownerId, bool standalone)
+{
+    if (!id.isEmpty())
+        this->priorityChatId_ = id;
+    this->priorityChatPane_ = pane;
+    this->priorityChatStandalone_ = standalone;
+    this->priorityChatOwnerId_ = ownerId;
+    if (pane)
+    {
+        this->priorityChatEnabled_ = false;
+        this->setModerationMode(false);
+        this->setInputEnabled(false);
+        this->setFilterActivity(false);
+        this->setSlowerChatEnabled(false);
+        this->ensurePriorityChat();
+        this->priorityChat_->setMonitoring(this->canUsePriorityChat());
+    }
+}
+
+void Split::normalizePriorityChatPanes()
+{
+    if (this->isUtilityPane())
+        return;
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    if (!container)
+        return;
+    const auto splits = container->getSplits();
+    if (std::find(splits.begin(), splits.end(), this) == splits.end())
+        return;
+    const auto panes = this->linkedPriorityChatPanes();
+    if (!this->canUsePriorityChat())
+    {
+        const bool requested = this->priorityChatEnabled_ || !panes.empty();
+        this->setPriorityChatEnabled(false);
+        // Keep restored activation while the source channel is unavailable.
+        this->priorityChatEnabled_ = requested;
+        return;
+    }
+    for (size_t i = 1; i < panes.size(); ++i)
+        container->deleteSplit(panes[i]);
+    if (!panes.empty())
+        this->priorityChatEnabled_ = true;
+    else if (this->priorityChatEnabled_)
+        this->setPriorityChatEnabled(true);
+    this->updateHeaderIcons();
+}
+
+void Split::ensurePriorityChat()
+{
+    if (this->priorityChat_)
+        return;
+    this->priorityChat_ = new PriorityChat(
+        this, this, this->priorityChatPane_ ? this->view_ : nullptr);
+    this->priorityChat_->hide();
+    this->signalHolder_.managedConnect(
+        this->priorityChat_->titleChanged, [this] {
+            if (this->priorityChatPane_)
+            {
+                this->header_->updateChannelText();
+                this->actionRequested.invoke(Action::RefreshTab);
+            }
+        });
+    this->priorityChat_->setChannel(this->getChannel());
+}
+
+void Split::setPriorityChatEnabled(bool enabled)
+{
+    if (this->isPriorityChatPane() || this->isModViewPane())
+        return;
+    enabled = enabled && !this->isActivityPane();
+    auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
+    const auto splits =
+        container ? container->getSplits() : std::vector<Split *>{};
+    if (!container ||
+        std::find(splits.begin(), splits.end(), this) == splits.end())
+    {
+        this->priorityChatEnabled_ = enabled;
+        if (enabled)
+            QTimer::singleShot(0, this, [this] {
+                this->normalizePriorityChatPanes();
+            });
+        return;
+    }
+    if (enabled && !this->canUsePriorityChat())
+        return;
+    this->priorityChatEnabled_ = enabled;
+    const auto panes = this->linkedPriorityChatPanes();
+    if (!enabled)
+    {
+        // releaseSplit also updates the owner; re-read after each removal.
+        for (;;)
+        {
+            const auto remaining = this->linkedPriorityChatPanes();
+            if (remaining.empty())
+                break;
+            container->deleteSplit(remaining.front());
+        }
+    }
+    else if (panes.empty())
+    {
+        auto *pane = container->cloneSplit(
+            this, this->getFilters(), SplitDirection::Right,
+            ALERTS_PRIMARY_RATIO, ALERTS_SECONDARY_RATIO, false);
+        if (pane)
+        {
+            pane->restorePriorityChatState(true, {}, this->priorityChatId_,
+                                           false);
+            pane->priorityChatOwner_ = this;
+            pane->setTitleSettingsButtonVisible(true);
+        }
+    }
+    this->header_->updateIcons();
+    getApp()->getWindows()->queueSave();
+}
+
+void Split::setPriorityChatUserChoice(const MessagePtr &message,
+                                      priority::Choice choice)
+{
+    if (this->isActivityPane() || !this->canUsePriorityChat())
+        return;
+    this->ensurePriorityChat();
+    this->priorityChat_->setUserChoice(message, choice);
+    if (choice == priority::Choice::Include && !this->isPriorityChatPane())
+        this->setPriorityChatEnabled(true);
+}
+
+priority::Choice Split::priorityChatUserChoice(const Message &message)
+{
+    if (!this->canUsePriorityChat())
+        return priority::Choice::Automatic;
+    this->ensurePriorityChat();
+    return this->priorityChat_->userChoice(message);
+}
+
+bool Split::isPriorityChatUserIncluded(const Message &message)
+{
+    if (!this->canUsePriorityChat())
+        return false;
+    const auto panes = this->linkedPriorityChatPanes();
+    auto *split = panes.empty() ? this : panes.front();
+    split->ensurePriorityChat();
+    return split->priorityChat_->includesUser(message);
 }
 
 std::optional<bool> Split::checkSpellingOverride() const
@@ -2179,6 +2887,17 @@ void Split::setCheckSpellingOverride(std::optional<bool> override)
 
 void Split::insertTextToInput(const QString &text)
 {
+    if (this->isModViewPane())
+    {
+        if (auto *owner = this->modViewOwner())
+            owner->insertTextToInput(text);
+        return;
+    }
+    if (this->isPriorityChatPane())
+    {
+        if (auto *owner = this->priorityChatOwner()) owner->insertTextToInput(text);
+        return;
+    }
     this->input_->insertText(text);
 }
 
@@ -2308,6 +3027,21 @@ void Split::showChangeChannelPopup(const char *dialogTitle, bool empty,
 
 void Split::showSettingsDialog()
 {
+    if (this->isModViewPane())
+    {
+        this->normalizeModViewPanes();
+        if (this->modView_)
+            this->modView_->showRules();
+        return;
+    }
+    if (this->isPriorityChatPane())
+    {
+        if (!this->canUsePriorityChat())
+            return;
+        this->ensurePriorityChat();
+        this->priorityChat_->showSettings();
+        return;
+    }
     if (!this->splitSettingsDialog_.isNull())
     {
         this->splitSettingsDialog_->raise();
@@ -2333,7 +3067,8 @@ void Split::showSettingsDialog()
     dialog->setActivityMessageScale(this->activityMessageScale());
     dialog->setCollapseGiftedSubscriptions(
         this->collapseGiftedSubscriptions());
-    dialog->setShowRaidsAndWatchStreaks(this->showRaidsAndWatchStreaks());
+    dialog->setShowRaids(this->showRaids());
+    dialog->setShowWatchStreaks(this->showWatchStreaks());
     dialog->setActivityTimeDisplayMode(this->activityTimeDisplayMode());
     dialog->setSlowerChatEnabled(this->slowerChatEnabled());
     dialog->setSlowerChatMessagesPerSecond(
@@ -2363,7 +3098,8 @@ void Split::showSettingsDialog()
         const auto activityMessageScale = dialog->activityMessageScale();
         const auto collapseGiftedSubscriptions =
             dialog->collapseGiftedSubscriptions();
-        const auto showRaidsAndWatchStreaks = dialog->showRaidsAndWatchStreaks();
+        const auto showRaids = dialog->showRaids();
+        const auto showWatchStreaks = dialog->showWatchStreaks();
         const auto activityTimeDisplayMode =
             dialog->activityTimeDisplayMode();
         const auto activityMinimum = dialog->activityMinimum();
@@ -2381,7 +3117,8 @@ void Split::showSettingsDialog()
             this->setActivityMessageScale(activityMessageScale);
             this->setCollapseGiftedSubscriptions(
                 collapseGiftedSubscriptions);
-            this->setShowRaidsAndWatchStreaks(showRaidsAndWatchStreaks);
+            this->setShowRaids(showRaids);
+            this->setShowWatchStreaks(showWatchStreaks);
             this->setActivityTimeDisplayMode(activityTimeDisplayMode);
             this->setTwitchActivityMinimumBits(activityMinimum);
             this->setKickActivityMinimumKicks(activityMinimum);
@@ -2390,7 +3127,8 @@ void Split::showSettingsDialog()
             {
                 ownerSplit->setCollapseGiftedSubscriptions(
                     collapseGiftedSubscriptions);
-                ownerSplit->setShowRaidsAndWatchStreaks(showRaidsAndWatchStreaks);
+                ownerSplit->setShowRaids(showRaids);
+                ownerSplit->setShowWatchStreaks(showWatchStreaks);
                 ownerSplit->setTwitchActivityMinimumBits(
                     activityMinimum);
                 ownerSplit->setKickActivityMinimumKicks(
@@ -2433,6 +3171,13 @@ void Split::updateHeaderIcons()
 void Split::paintEvent(QPaintEvent *)
 {
     // color the background of the chat
+    if (this->theme->effect().isScene() &&
+        scenes::ThemeSceneHost::instance().showsScene(this))
+    {
+        // The window paints the scene; gaps between panels show it
+        return;
+    }
+
     QPainter painter(this);
 
     painter.fillRect(this->rect(), this->theme->splits.background);
@@ -2520,13 +3265,6 @@ void Split::addSibling()
 
 void Split::deleteFromContainer()
 {
-    if (this->isActivityPane())
-    {
-        if (auto *ownerSplit = findActivityOwnerSplit(this))
-        {
-            ownerSplit->setFilterActivity(false);
-        }
-    }
     this->actionRequested.invoke(Action::Delete);
 }
 
@@ -2550,8 +3288,10 @@ void Split::changeChannel()
 
 void Split::openAlertsPane()
 {
+    if (this->isPriorityChatPane() || this->isModViewPane())
+        return;
     auto *container = dynamic_cast<SplitContainer *>(this->parentWidget());
-    if (!container || this->getChannel()->isEmpty())
+    if (!container)
     {
         return;
     }
@@ -2560,7 +3300,8 @@ void Split::openAlertsPane()
     {
         if (auto *ownerSplit = findActivityOwnerSplit(this))
         {
-            ownerSplit->setFilterActivity(false);
+            ownerSplit->openAlertsPane();
+            return;
         }
         container->deleteSplit(this);
         for (auto *split : container->getSplits())
@@ -2570,49 +3311,34 @@ void Split::openAlertsPane()
         return;
     }
 
-    const auto alertFilterId = ensureAlertsFilter();
-    if (!alertFilterId)
+    const auto linkedPanes = findLinkedActivityPanes(this);
+    if (!linkedPanes.empty())
     {
+        this->setFilterActivity(false);
+        for (auto *pane : linkedPanes)
+            container->deleteSplit(pane);
+        refreshActivityIcons(container);
         return;
     }
-
+    if (this->getChannel()->isEmpty())
+        return;
+    const auto alertFilterId = ensureAlertsFilter();
+    if (!alertFilterId)
+        return;
     auto filterIds = this->getFilters();
     if (!filterIds.contains(*alertFilterId))
-    {
         filterIds.append(*alertFilterId);
-    }
-
-    const auto channelSignature = encodeChannelSignature(
-        this->getIndirectChannel());
-    for (auto *split : container->getSplits())
-    {
-        if (split == this)
-        {
-            continue;
-        }
-
-        if (splitMatchesChannelAndFilters(split, channelSignature, filterIds) &&
-            split->isActivityPane())
-        {
-            this->setFilterActivity(false);
-            container->deleteSplit(split);
-            for (auto *other : container->getSplits())
-            {
-                other->header_->updateIcons();
-            }
-            return;
-        }
-    }
 
     auto *alertsSplit = container->cloneSplit(
         this, filterIds, SplitDirection::Right, ALERTS_PRIMARY_RATIO,
-        ALERTS_SECONDARY_RATIO);
+        ALERTS_SECONDARY_RATIO, false);
     if (!alertsSplit)
     {
         return;
     }
 
     alertsSplit->setInputEnabled(false);
+    alertsSplit->activityOwner_ = this;
     alertsSplit->setFilterActivity(false);
     alertsSplit->setSlowerChatEnabled(false);
     alertsSplit->setPlatformIndicatorMode(defaultPlatformIndicatorMode(true));
@@ -2639,13 +3365,21 @@ void Split::explainSplitting()
 
 void Split::popup()
 {
+    if (this->isModViewPane())
+    {
+        this->toggleModViewPopOut();
+        return;
+    }
     auto *app = getApp();
     Window &window = app->getWindows()->createWindow(WindowType::Popup);
 
     auto *split = new Split(window.getNotebook().getOrAddSelectedPage());
 
+    if (this->isPriorityChatPane())
+        split->restorePriorityChatState(true, {}, this->priorityChatOwnerId_, true);
     split->setChannel(this->getIndirectChannel());
     split->setModerationMode(this->getModerationMode());
+    split->setPriorityChatEnabled(this->priorityChatRequested());
     split->setFilters(this->getFilters());
     split->setInputEnabled(this->inputEnabled());
     split->setFilterActivity(this->filterActivity(),
@@ -2653,7 +3387,8 @@ void Split::popup()
     split->setActivityMessageScale(this->activityMessageScale());
     split->setCollapseGiftedSubscriptions(
         this->collapseGiftedSubscriptions());
-    split->setShowRaidsAndWatchStreaks(this->showRaidsAndWatchStreaks());
+    split->setShowRaids(this->showRaids());
+    split->setShowWatchStreaks(this->showWatchStreaks());
     split->setActivityTimeDisplayMode(this->activityTimeDisplayMode());
     split->setSlowerChatEnabled(this->slowerChatEnabled());
     split->setSlowerChatMessagesPerSecond(
@@ -2875,8 +3610,10 @@ void Split::setFiltersDialog()
 
 void Split::setFilters(const QList<QUuid> ids)
 {
+    const auto activityPanes = findLinkedActivityPanes(this);
+    const auto priorityPanes = this->linkedPriorityChatPanes();
     auto filterIds = ids;
-    if (!this->inputEnabled_)
+    if (this->isActivityPane())
     {
         if (const auto alertFilterId = ensureAlertsFilter())
         {
@@ -2888,7 +3625,12 @@ void Split::setFilters(const QList<QUuid> ids)
     }
 
     this->view_->setFilters(filterIds);
+    if (this->priorityChat_) this->priorityChat_->refreshFilters();
     this->header_->updateChannelText();
+    for (auto *pane : activityPanes)
+        pane->setFilters(ids);
+    for (auto *pane : priorityPanes) pane->setFilters(ids);
+    refreshActivityIcons(dynamic_cast<SplitContainer *>(this->parentWidget()));
 }
 
 QList<QUuid> Split::getFilters() const
@@ -2998,6 +3740,17 @@ void Split::drag()
 
 void Split::setInputReply(const MessagePtr &reply)
 {
+    if (this->isModViewPane())
+    {
+        if (auto *owner = this->modViewOwner())
+            owner->setInputReply(reply);
+        return;
+    }
+    if (this->isPriorityChatPane())
+    {
+        if (auto *owner = this->priorityChatOwner()) owner->setInputReply(reply);
+        return;
+    }
     this->input_->setReply(reply);
 }
 

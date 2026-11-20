@@ -9,12 +9,16 @@
 #include "common/websockets/WebSocketPool.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "messages/MessageElement.hpp"
+#include "util/BoundedUniqueSet.hpp"
 #include "util/PostToThread.hpp"
+#include "util/QStringHash.hpp"
 
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QDir>
-#include <QHostAddress>
+#include <QElapsedTimer>
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -24,15 +28,17 @@
 #include <QStringList>
 #include <QTcpServer>
 #include <QTemporaryDir>
-#include <QTimeZone>
 #include <QTimer>
+#include <QTimeZone>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QUuid>
 #include <QVector>
+#include <QtConcurrent>
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace {
 
@@ -48,11 +54,30 @@ constexpr int TIKTOK_ROOM_STATUS_POLL_DELAY_MS = 15000;
 constexpr int TIKTOK_BROWSER_TARGET_POLL_LIMIT = 40;
 constexpr int TIKTOK_LIVE_CONFIRMATION_SNAPSHOTS = 2;
 constexpr int TIKTOK_UNCONFIRMED_STATUS_LIMIT = 3;
+constexpr int TIKTOK_BROWSER_HEALTH_CHECK_MS = 5000;
+constexpr int TIKTOK_BROWSER_SNAPSHOT_TIMEOUT_MS = 15000;
+constexpr int TIKTOK_EVENT_START_TIMEOUT_MS = 45000;
+constexpr int TIKTOK_EVENT_STALL_TIMEOUT_MS = 120000;
+constexpr int TIKTOK_REQUEST_TIMEOUT_MS = 10000;
+
+struct RetiredBrowserResources {
+    std::unique_ptr<QTemporaryDir> profile;
+    std::unique_ptr<WebSocketPool> socketPool;
+};
+
+void releaseBrowserResources(std::shared_ptr<RetiredBrowserResources> resources)
+{
+    // Socket shutdown can wait for its IO thread, and Chrome profiles contain
+    // many cache files. Neither operation belongs on the interface thread.
+    std::ignore = QtConcurrent::run([resources = std::move(resources)] {});
+}
 
 struct BrowserChatMessage {
     QString owner;
     QString text;
     QString fullText;
+    QString id;
+    QString uniqueId;
 };
 
 struct BrowserGiftEvent {
@@ -378,16 +403,19 @@ MessagePtr makeChatMessage(const BrowserChatMessage &message,
         return nullptr;
     }
 
-    const auto profile = cachedTikTokProfile(message.owner, {});
-    const auto loginName = !profile.uniqueId.isEmpty() ? profile.uniqueId
-                                                       : message.owner;
+    const auto profile = cachedTikTokProfile(message.owner, message.uniqueId);
+    const auto uniqueId =
+        message.uniqueId.isEmpty() ? profile.uniqueId : message.uniqueId;
+    const auto loginName = uniqueId.isEmpty() ? message.owner : uniqueId;
     MessageBuilder builder;
     builder->platform = MessagePlatform::TikTok;
-    builder->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    builder->id = message.id.isEmpty()
+                      ? QUuid::createUuid().toString(QUuid::WithoutBraces)
+                      : message.id;
     builder->loginName = loginName;
     builder->displayName = message.owner;
     builder->localizedName = message.owner;
-    builder->userID = profile.uniqueId;
+    builder->userID = uniqueId;
     builder->channelName = channelName;
     builder->usernameColor = TIKTOK_USERNAME_COLOR;
     builder->messageText = message.text;
@@ -665,6 +693,10 @@ QString browserSnapshotScript()
     showLiveChat: false,
     enableChat: false,
     messages: [],
+    chatEvents: [],
+    chatTapInstalled: false,
+    viewerCount: null,
+    eventAgeMs: null,
     giftEvents: [],
     joinEvents: [],
     profileUpdates: []
@@ -747,7 +779,9 @@ QString browserSnapshotScript()
         installed: false,
         queue: [],
         joinQueue: [],
-        profileQueue: []
+        profileQueue: [],
+        chatQueue: [],
+        viewerCount: null
       };
     }
 
@@ -758,19 +792,32 @@ QString browserSnapshotScript()
       window.__mergerinoTikTokGiftTap.profileQueue = [];
     }
 
-    if (window.__mergerinoTikTokGiftTap.installed) {
-      return;
+    if (!Array.isArray(window.__mergerinoTikTokGiftTap.chatQueue)) {
+      window.__mergerinoTikTokGiftTap.chatQueue = [];
     }
 
     const ctx = findImContext();
     const events = ctx?.imInstance?._messageEvents;
     if (!events || typeof events.runCallbackByMethod !== 'function' ||
         typeof events.pbReader?.decodePayload !== 'function') {
+      window.__mergerinoTikTokGiftTap.installed = false;
       return;
     }
 
+    const tap = window.__mergerinoTikTokGiftTap;
+    if (tap.installed && tap.events === events && tap.version === 2) {
+      return;
+    }
+    tap.events = events;
+    tap.version = 2;
+    tap.chatReady = false;
+    const generation = tap.generation = (tap.generation || 0) + 1;
     const originalRunCallbackByMethod = events.runCallbackByMethod;
     events.runCallbackByMethod = function(method, message, extra) {
+      if (generation !== tap.generation) {
+        return originalRunCallbackByMethod.call(this, method, message, extra);
+      }
+      tap.lastEventAt = Date.now();
       if (method === 'WebcastGiftMessage' && message?.payload) {
         try {
           const decoded = this.pbReader.decodePayload('GiftMessage', message.payload);
@@ -846,9 +893,40 @@ QString browserSnapshotScript()
           Promise.resolve(decoded).then((payload) => {
             try {
               queueProfile(payload?.user);
+              const owner = String(payload?.user?.nickname || payload?.user?.unique_id || '');
+              const text = String(payload?.content || '').trim();
+              if (owner && text) {
+                tap.chatReady = true;
+                tap.chatQueue.push({
+                  id: String(message.msg_id || payload?.common?.msg_id || ''),
+                  owner,
+                  uniqueId: String(payload?.user?.unique_id || payload?.user?.display_id || ''),
+                  text
+                });
+                if (tap.chatQueue.length > 500) {
+                  tap.chatQueue.splice(0, tap.chatQueue.length - 500);
+                }
+              }
             } catch {
+              tap.chatReady = false;
             }
-          }).catch(() => {});
+          }).catch(() => { tap.chatReady = false; });
+        } catch {
+          tap.chatReady = false;
+        }
+      }
+
+      if (method === 'WebcastRoomUserSeqMessage' && message?.payload) {
+        try {
+          Promise.resolve(this.pbReader.decodePayload('RoomUserSeqMessage', message.payload))
+            .then((payload) => {
+              if (payload?.total != null) {
+                const count = Number(payload.total);
+                if (Number.isFinite(count) && count >= 0) {
+                  tap.viewerCount = count;
+                }
+              }
+            }).catch(() => {});
         } catch {
         }
       }
@@ -880,11 +958,18 @@ QString browserSnapshotScript()
       result.ownerUniqueId = String(currentRoom.anchorUniqueId || userData.uniqueId || '');
       result.ownerNickname = String(userData.nickname || '');
       result.liveTitle = String(liveRoomData.title || '');
-      result.liveRoomStatus = Number(
-        liveRoom.liveRoomStatus ?? liveRoomData.status ?? -1
-      );
+      const roomStatus = Number(liveRoomData.status ?? -1);
+      const pageStatus = Number(liveRoom.liveRoomStatus ?? -1);
+      // The page-level placeholder can remain zero while the room is live.
+      result.liveRoomStatus = roomStatus > 0 ? roomStatus : pageStatus;
       result.showLiveChat = Boolean(currentRoom.showLiveChat);
       result.enableChat = Boolean(currentRoom.enableChat);
+      const count = liveRoomData.liveRoomStats?.userCount ??
+        liveRoomData.userCount ?? liveRoomData.user_count ??
+        roomInfo.stats?.userCount;
+      if (count != null && Number.isFinite(Number(count)) && Number(count) >= 0) {
+        result.viewerCount = Number(count);
+      }
     }
   } catch {
   }
@@ -920,6 +1005,15 @@ QString browserSnapshotScript()
   }).filter((message) => message.owner && message.text);
 
   installGiftTap();
+  const tap = window.__mergerinoTikTokGiftTap;
+  result.chatTapInstalled = Boolean(tap?.installed && tap?.chatReady);
+  result.eventAgeMs = tap?.lastEventAt ? Date.now() - tap.lastEventAt : null;
+  if (tap?.viewerCount != null) {
+    result.viewerCount = tap.viewerCount;
+  }
+  if (tap?.chatQueue?.length) {
+    result.chatEvents = tap.chatQueue.splice(0, tap.chatQueue.length);
+  }
   if (window.__mergerinoTikTokGiftTap?.queue?.length) {
     result.giftEvents = window.__mergerinoTikTokGiftTap.queue.splice(
       0,
@@ -1045,6 +1139,15 @@ struct TikTokLiveChat::BrowserSession {
 
     bool socketOpen = false;
     bool snapshotInFlight = false;
+    bool chatTapInstalled = false;
+    bool pageLiveConfirmed = false;
+    int lastEventAgeMs = -1;
+    QElapsedTimer snapshotProgress;
+    QElapsedTimer connectionProgress;
+    BoundedUniqueSet<QString> seenChatEvents{4096};
+    QJsonArray pendingChatEvents;
+    QJsonArray pendingGiftEvents;
+    QJsonArray pendingJoinEvents;
 
     std::vector<BrowserChatMessage> visibleMessages;
 
@@ -1095,6 +1198,7 @@ void TikTokLiveChat::start()
     this->ownerNickname_.clear();
     this->ownerUniqueId_.clear();
     this->joinedRoomId_.clear();
+    this->liveViewerCount_ = 0;
     this->setLive(false);
     this->stopBrowserSession();
 
@@ -1129,6 +1233,11 @@ void TikTokLiveChat::stop()
 bool TikTokLiveChat::isLive() const
 {
     return this->live_;
+}
+
+uint64_t TikTokLiveChat::liveViewerCount() const
+{
+    return this->liveViewerCount_;
 }
 
 const QString &TikTokLiveChat::roomId() const
@@ -1170,12 +1279,15 @@ void TikTokLiveChat::resolveRoom()
     }
 
     const auto uniqueId = this->resolvedSource_.mid(1);
+    const auto generation = this->roomStatusGeneration_;
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
     NetworkRequest(makeRoomInfoUrl(uniqueId))
         .headerList(tiktokHeaders())
+        .timeout(TIKTOK_REQUEST_TIMEOUT_MS)
         .followRedirects(true)
-        .onSuccess([this, weak](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([this, weak, generation](const NetworkResult &result) {
+            if (!weak.lock() || !this->running_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1237,8 +1349,9 @@ void TikTokLiveChat::resolveRoom()
             this->failureReported_ = false;
             this->startBrowserSession();
         })
-        .onError([this, weak](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([this, weak, generation](NetworkResult) {
+            if (!weak.lock() || !this->running_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1255,12 +1368,15 @@ void TikTokLiveChat::resolveRoomFromHtml()
         return;
     }
 
+    const auto generation = this->roomStatusGeneration_;
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
     NetworkRequest(makeLivePageUrl(this->resolvedSource_))
         .headerList(tiktokHeaders())
+        .timeout(TIKTOK_REQUEST_TIMEOUT_MS)
         .followRedirects(true)
-        .onSuccess([this, weak](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_)
+        .onSuccess([this, weak, generation](const NetworkResult &result) {
+            if (!weak.lock() || !this->running_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1300,8 +1416,9 @@ void TikTokLiveChat::resolveRoomFromHtml()
             this->failureReported_ = false;
             this->startBrowserSession();
         })
-        .onError([this, weak](NetworkResult) {
-            if (!weak.lock() || !this->running_)
+        .onError([this, weak, generation](NetworkResult) {
+            if (!weak.lock() || !this->running_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1389,12 +1506,14 @@ void TikTokLiveChat::startBrowserSession()
     browser->process->setProcessChannelMode(QProcess::MergedChannels);
 
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    const auto generation = this->roomStatusGeneration_;
     QObject::connect(
         browser->process.get(),
         static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(
             &QProcess::finished),
-        [this, weak](int, QProcess::ExitStatus) {
-            if (!weak.lock() || !this->running_ || !this->browser_)
+        [this, weak, generation](int, QProcess::ExitStatus) {
+            if (!weak.lock() || !this->running_ || !this->browser_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1408,8 +1527,10 @@ void TikTokLiveChat::startBrowserSession()
             this->scheduleResolve(TIKTOK_RECONNECT_DELAY_MS);
         });
     QObject::connect(browser->process.get(), &QProcess::errorOccurred,
-                     [this, weak](QProcess::ProcessError error) {
-                         if (!weak.lock() || !this->running_ || !this->browser_)
+                     [this, weak, generation](QProcess::ProcessError error) {
+                         if (!weak.lock() || !this->running_ ||
+                             !this->browser_ ||
+                             generation != this->roomStatusGeneration_)
                          {
                              return;
                          }
@@ -1436,24 +1557,47 @@ void TikTokLiveChat::startBrowserSession()
 void TikTokLiveChat::stopBrowserSession()
 {
     ++this->roomStatusGeneration_;
-    if (!this->browser_)
+    auto browser = std::move(this->browser_);
+    if (!browser)
     {
         return;
     }
 
-    this->browser_->socket.close();
-    if (this->browser_->process &&
-        this->browser_->process->state() != QProcess::NotRunning)
+    browser->socket.close();
+    auto resources = std::make_shared<RetiredBrowserResources>();
+    resources->profile = std::move(browser->profileDir);
+    resources->socketPool = std::move(browser->socketPool);
+    auto *process = browser->process.release();
+    if (process == nullptr)
     {
-        this->browser_->process->terminate();
-        if (!this->browser_->process->waitForFinished(1500))
-        {
-            this->browser_->process->kill();
-            this->browser_->process->waitForFinished(1500);
-        }
+        releaseBrowserResources(std::move(resources));
+        return;
     }
 
-    this->browser_.reset();
+    QObject::disconnect(process, nullptr, nullptr, nullptr);
+    process->setParent(QCoreApplication::instance());
+    if (process->state() == QProcess::NotRunning)
+    {
+        process->deleteLater();
+        releaseBrowserResources(std::move(resources));
+        return;
+    }
+    QObject::connect(
+        process,
+        static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(
+            &QProcess::finished),
+        process,
+        [process, resources = std::move(resources)](int, QProcess::ExitStatus) mutable {
+            releaseBrowserResources(std::move(resources));
+            process->deleteLater();
+        });
+    QTimer::singleShot(1500, process, [process] {
+        if (process->state() != QProcess::NotRunning)
+        {
+            process->kill();
+        }
+    });
+    process->terminate();
 }
 
 void TikTokLiveChat::ensureBrowserTarget()
@@ -1464,12 +1608,14 @@ void TikTokLiveChat::ensureBrowserTarget()
     }
 
     const auto devToolsPort = this->browser_->devToolsPort;
+    const auto generation = this->roomStatusGeneration_;
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
-    NetworkRequest(QUrl(
-        QString("http://127.0.0.1:%1/json/list").arg(devToolsPort)))
+    NetworkRequest(
+        QUrl(QString("http://127.0.0.1:%1/json/list").arg(devToolsPort)))
         .timeout(2000)
-        .onSuccess([this, weak](const NetworkResult &result) {
-            if (!weak.lock() || !this->running_ || !this->browser_)
+        .onSuccess([this, weak, generation](const NetworkResult &result) {
+            if (!weak.lock() || !this->running_ || !this->browser_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1499,8 +1645,9 @@ void TikTokLiveChat::ensureBrowserTarget()
             this->failureReported_ = false;
             this->connectBrowserTarget(debuggerUrl);
         })
-        .onError([this, weak](NetworkResult) {
-            if (!weak.lock() || !this->running_ || !this->browser_)
+        .onError([this, weak, generation](NetworkResult) {
+            if (!weak.lock() || !this->running_ || !this->browser_ ||
+                generation != this->roomStatusGeneration_)
             {
                 return;
             }
@@ -1530,17 +1677,31 @@ void TikTokLiveChat::connectBrowserTarget(const QUrl &devtoolsUrl)
         return;
     }
 
+    const auto generation = this->roomStatusGeneration_;
     this->browser_->socketPool =
         std::make_unique<WebSocketPool>("TikTokLiveChat");
     this->browser_->socket = this->browser_->socketPool->createSocket(
         {.url = devtoolsUrl},
         std::make_unique<BrowserDevToolsListener>(
             std::weak_ptr<bool>(this->lifetimeGuard_),
-            [this] { this->handleBrowserSocketOpened(); },
-            [this](QByteArray data) {
-                this->handleBrowserSocketMessage(std::move(data));
+            [this, generation] {
+                if (generation == this->roomStatusGeneration_)
+                {
+                    this->handleBrowserSocketOpened();
+                }
             },
-            [this] { this->handleBrowserSocketClosed(); }));
+            [this, generation](QByteArray data) {
+                if (generation == this->roomStatusGeneration_)
+                {
+                    this->handleBrowserSocketMessage(std::move(data));
+                }
+            },
+            [this, generation] {
+                if (generation == this->roomStatusGeneration_)
+                {
+                    this->handleBrowserSocketClosed();
+                }
+            }));
 
     this->setStatusText(
         QString("Connecting to the TikTok LIVE browser session for %1.")
@@ -1581,12 +1742,15 @@ void TikTokLiveChat::handleBrowserSocketOpened()
 
     this->browser_->socketOpen = true;
     this->browser_->snapshotInFlight = false;
+    this->browser_->snapshotProgress.start();
+    this->browser_->connectionProgress.start();
     this->failureReported_ = false;
     this->setStatusText(
         QString("Connected to the TikTok LIVE browser session for %1. Reading "
                 "chat.")
             .arg(this->sourceLabel()));
     this->scheduleBrowserSnapshot(1000);
+    this->scheduleBrowserHealthCheck();
 }
 
 void TikTokLiveChat::handleBrowserSocketClosed()
@@ -1675,6 +1839,22 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
 
     const auto root = document.object();
     const auto roomId = root.value("roomId").toString().trimmed();
+    this->browser_->snapshotProgress.restart();
+    // Keep events collected while LIVE status is being confirmed. The browser
+    // queues are drained by each snapshot, even before we can display messages.
+    const auto retainEvents = [&root](const char *key, QJsonArray &pending) {
+        for (const auto &event : root.value(QLatin1String(key)).toArray())
+        {
+            pending.append(event);
+        }
+        while (pending.size() > 1000)
+        {
+            pending.removeAt(0);
+        }
+    };
+    retainEvents("chatEvents", this->browser_->pendingChatEvents);
+    retainEvents("giftEvents", this->browser_->pendingGiftEvents);
+    retainEvents("joinEvents", this->browser_->pendingJoinEvents);
     const auto ownerUniqueId = root.value("ownerUniqueId").toString().trimmed();
     const auto ownerNickname = root.value("ownerNickname").toString().trimmed();
     const auto liveTitle = root.value("liveTitle").toString().trimmed();
@@ -1700,8 +1880,15 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
 
     const auto pageLiveEvidence =
         liveRoomStatus == 2 && (showLiveChat || enableChat);
-    const auto liveCandidate = !this->roomId_.isEmpty() &&
-                               (this->apiLiveConfirmed_ || pageLiveEvidence);
+    const auto eventAge = root.value("eventAgeMs");
+    this->browser_->lastEventAgeMs =
+        eventAge.isDouble() ? eventAge.toInt(-1) : -1;
+    const bool recentEvents = this->browser_->lastEventAgeMs >= 0 &&
+                              this->browser_->lastEventAgeMs < 30000;
+    this->browser_->pageLiveConfirmed = pageLiveEvidence || recentEvents;
+    const auto liveCandidate =
+        !this->roomId_.isEmpty() &&
+        (this->apiLiveConfirmed_ || pageLiveEvidence || recentEvents);
     if (!liveCandidate)
     {
         this->consecutiveLiveSnapshots_ = 0;
@@ -1757,8 +1944,26 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
                                    object.value("full").toString().trimmed()});
     }
 
+    const bool hadChatTap = this->browser_->chatTapInstalled;
+    this->browser_->chatTapInstalled = root.value("chatTapInstalled").toBool();
+    const auto chatEvents =
+        std::exchange(this->browser_->pendingChatEvents, QJsonArray{});
+    const auto count = root.value("viewerCount");
+    if (count.isDouble() && count.toDouble() >= 0)
+    {
+        const auto viewers = static_cast<uint64_t>(std::min(
+            count.toDouble(),
+            static_cast<double>(std::numeric_limits<unsigned>::max())));
+        if (this->liveViewerCount_ != viewers)
+        {
+            this->liveViewerCount_ = viewers;
+            this->liveStatusChanged.invoke();
+        }
+    }
+
     std::vector<BrowserGiftEvent> giftEvents;
-    const auto giftEventArray = root.value("giftEvents").toArray();
+    const auto giftEventArray =
+        std::exchange(this->browser_->pendingGiftEvents, QJsonArray{});
     giftEvents.reserve(giftEventArray.size());
     for (const auto &value : giftEventArray)
     {
@@ -1784,9 +1989,10 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
     }
 
     std::vector<BrowserJoinEvent> joinEvents;
+    const auto joinEventArray =
+        std::exchange(this->browser_->pendingJoinEvents, QJsonArray{});
     if (this->showJoinMessages_)
     {
-        const auto joinEventArray = root.value("joinEvents").toArray();
         joinEvents.reserve(joinEventArray.size());
         for (const auto &value : joinEventArray)
         {
@@ -1861,9 +2067,35 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
         }
     }
 
-    for (size_t index = emitIndex; index < currentMessages.size(); ++index)
+    // Once the event tap is installed, messages no longer depend on TikTok's
+    // rendered chat list. Use that list only for backlog or as a fallback.
+    const bool useDomMessages =
+        !this->browser_->chatTapInstalled || !hadChatTap;
+    if (useDomMessages && chatEvents.isEmpty())
     {
-        auto message = makeChatMessage(currentMessages[index], channelName);
+        for (size_t index = emitIndex; index < currentMessages.size(); ++index)
+        {
+            auto message = makeChatMessage(currentMessages[index], channelName);
+            if (message)
+            {
+                this->messageReceived.invoke(message);
+            }
+        }
+    }
+    for (const auto &value : chatEvents)
+    {
+        const auto event = value.toObject();
+        const auto id = event.value("id").toString();
+        if (!id.isEmpty() && !this->browser_->seenChatEvents.insert(id))
+        {
+            continue;
+        }
+        auto message = makeChatMessage({event.value("owner").toString(),
+                                        event.value("text").toString(),
+                                        {},
+                                        id,
+                                        event.value("uniqueId").toString()},
+                                       channelName);
         if (message)
         {
             this->messageReceived.invoke(message);
@@ -1900,9 +2132,11 @@ void TikTokLiveChat::handleBrowserSnapshot(const QByteArray &payload)
 
 void TikTokLiveChat::scheduleBrowserTargetCheck(int delayMs)
 {
+    const auto generation = this->roomStatusGeneration_;
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
-    QTimer::singleShot(delayMs, [this, weak] {
-        if (!weak.lock() || !this->running_)
+    QTimer::singleShot(delayMs, [this, weak, generation] {
+        if (!weak.lock() || !this->running_ ||
+            generation != this->roomStatusGeneration_)
         {
             return;
         }
@@ -1913,15 +2147,67 @@ void TikTokLiveChat::scheduleBrowserTargetCheck(int delayMs)
 
 void TikTokLiveChat::scheduleBrowserSnapshot(int delayMs)
 {
+    const auto generation = this->roomStatusGeneration_;
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
-    QTimer::singleShot(delayMs, [this, weak] {
-        if (!weak.lock() || !this->running_)
+    QTimer::singleShot(delayMs, [this, weak, generation] {
+        if (!weak.lock() || !this->running_ ||
+            generation != this->roomStatusGeneration_)
         {
             return;
         }
 
         this->requestBrowserSnapshot();
     });
+}
+
+void TikTokLiveChat::scheduleBrowserHealthCheck()
+{
+    const auto generation = this->roomStatusGeneration_;
+    auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
+    QTimer::singleShot(
+        TIKTOK_BROWSER_HEALTH_CHECK_MS, [this, weak, generation] {
+            if (!weak.lock() || !this->running_ || !this->browser_ ||
+                generation != this->roomStatusGeneration_)
+            {
+                return;
+            }
+            if (this->browser_->snapshotProgress.isValid() &&
+                this->browser_->snapshotProgress.elapsed() >=
+                    TIKTOK_BROWSER_SNAPSHOT_TIMEOUT_MS)
+            {
+                this->recoverBrowserSession(
+                    "TikTok LIVE reader stopped responding. Reconnecting.");
+                return;
+            }
+            if (this->browser_->lastEventAgeMs >= TIKTOK_EVENT_STALL_TIMEOUT_MS)
+            {
+                this->recoverBrowserSession(
+                    "TikTok LIVE event stream stalled. Reconnecting.");
+                return;
+            }
+            if ((this->apiLiveConfirmed_ ||
+                 this->browser_->pageLiveConfirmed) &&
+                this->browser_->lastEventAgeMs < 0 &&
+                this->browser_->visibleMessages.empty() &&
+                this->browser_->connectionProgress.isValid() &&
+                this->browser_->connectionProgress.elapsed() >=
+                    TIKTOK_EVENT_START_TIMEOUT_MS)
+            {
+                this->recoverBrowserSession(
+                    "TikTok LIVE chat connection did not start. Reconnecting.");
+                return;
+            }
+            this->scheduleBrowserHealthCheck();
+        });
+}
+
+void TikTokLiveChat::recoverBrowserSession(QString text)
+{
+    this->setLive(false);
+    this->setStatusText(std::move(text), !this->failureReported_);
+    this->failureReported_ = true;
+    this->stopBrowserSession();
+    this->scheduleResolve(TIKTOK_RECONNECT_DELAY_MS);
 }
 
 void TikTokLiveChat::scheduleRoomStatusCheck(int delayMs)
@@ -1957,6 +2243,7 @@ void TikTokLiveChat::checkRoomStatus(std::uint64_t generation)
 
     NetworkRequest(makeRoomInfoUrl(uniqueId))
         .headerList(tiktokHeaders())
+        .timeout(TIKTOK_REQUEST_TIMEOUT_MS)
         .followRedirects(true)
         .onSuccess([this, stillCurrent](const NetworkResult &result) {
             if (!stillCurrent())
@@ -1968,7 +2255,8 @@ void TikTokLiveChat::checkRoomStatus(std::uint64_t generation)
             if (json.value("statusCode").toInt(-1) != 0)
             {
                 if (++this->consecutiveUnconfirmedStatusChecks_ >=
-                    TIKTOK_UNCONFIRMED_STATUS_LIMIT)
+                        TIKTOK_UNCONFIRMED_STATUS_LIMIT &&
+                    !this->browser_->pageLiveConfirmed)
                 {
                     this->apiLiveConfirmed_ = false;
                     this->waitForNextLive(
@@ -2009,7 +2297,8 @@ void TikTokLiveChat::checkRoomStatus(std::uint64_t generation)
             }
 
             if (++this->consecutiveUnconfirmedStatusChecks_ >=
-                TIKTOK_UNCONFIRMED_STATUS_LIMIT)
+                    TIKTOK_UNCONFIRMED_STATUS_LIMIT &&
+                !this->browser_->pageLiveConfirmed)
             {
                 this->apiLiveConfirmed_ = false;
                 this->waitForNextLive(
@@ -2029,7 +2318,8 @@ void TikTokLiveChat::checkRoomStatus(std::uint64_t generation)
             }
 
             if (++this->consecutiveUnconfirmedStatusChecks_ >=
-                TIKTOK_UNCONFIRMED_STATUS_LIMIT)
+                    TIKTOK_UNCONFIRMED_STATUS_LIMIT &&
+                !this->browser_->pageLiveConfirmed)
             {
                 this->apiLiveConfirmed_ = false;
                 this->waitForNextLive(
@@ -2047,9 +2337,11 @@ void TikTokLiveChat::checkRoomStatus(std::uint64_t generation)
 
 void TikTokLiveChat::scheduleResolve(int delayMs)
 {
+    const auto generation = this->roomStatusGeneration_;
     auto weak = std::weak_ptr<bool>(this->lifetimeGuard_);
-    QTimer::singleShot(delayMs, [this, weak] {
-        if (!weak.lock() || !this->running_)
+    QTimer::singleShot(delayMs, [this, weak, generation] {
+        if (!weak.lock() || !this->running_ ||
+            generation != this->roomStatusGeneration_)
         {
             return;
         }
@@ -2062,6 +2354,7 @@ void TikTokLiveChat::waitForNextLive(QString text, int retryDelayMs)
 {
     this->setLive(false);
     this->roomId_.clear();
+    this->liveViewerCount_ = 0;
     this->liveTitle_.clear();
     this->browserSnapshotReceived_ = false;
     this->apiLiveConfirmed_ = false;

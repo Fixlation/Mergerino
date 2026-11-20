@@ -82,6 +82,7 @@ public:
     ChannelPtr twitchChannel() const;
     ChannelPtr kickChannel() const;
     YouTubeLiveChat *youtubeLiveChat() const;
+    TikTokLiveChat *tiktokLiveChat() const;
     void setYouTubeDiscoveryForeground(bool foreground);
     void setTikTokShowJoinMessages(bool enabled);
     static EmotePtr platformBadge(MessagePlatform platform);

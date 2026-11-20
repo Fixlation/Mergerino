@@ -42,9 +42,11 @@ public:
     void setActivityMessageScale(qreal scale);
     qreal activityMessageScale() const;
     void setCollapseGiftedSubscriptions(bool enabled);
-    void setShowRaidsAndWatchStreaks(bool enabled);
+    void setShowRaids(bool enabled);
+    void setShowWatchStreaks(bool enabled);
     bool collapseGiftedSubscriptions() const;
-    bool showRaidsAndWatchStreaks() const;
+    bool showRaids() const;
+    bool showWatchStreaks() const;
     void setActivityTimeDisplayMode(ActivityTimeDisplayMode mode);
     ActivityTimeDisplayMode activityTimeDisplayMode() const;
     void setSlowerChatEnabled(bool enabled);
@@ -73,7 +75,8 @@ private:
         QCheckBox *filterActivity{};
         QComboBox *activityScale{};
         QCheckBox *collapseGiftedSubscriptions{};
-        QCheckBox *showRaidsAndWatchStreaks{};
+        QCheckBox *showRaids{};
+        QCheckBox *showWatchStreaks{};
         QComboBox *activityTimeDisplayMode{};
         QCheckBox *slowerChat{};
         QDoubleSpinBox *slowerChatRate{};

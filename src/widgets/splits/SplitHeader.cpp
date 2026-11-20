@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "widgets/splits/SplitHeader.hpp"
+#include "widgets/scenes/ThemeSceneHost.hpp"
 
 #include "Application.hpp"
 #include "common/network/NetworkCommon.hpp"
@@ -16,12 +17,13 @@
 #include "controllers/notifications/NotificationController.hpp"
 #include "providers/kick/KickChannel.hpp"
 #include "providers/merged/MergedChannel.hpp"
+#include "providers/tiktok/TikTokLiveChat.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/youtube/YouTubeLiveChat.hpp"
-#include "singletons/Settings.hpp"
 #include "singletons/Resources.hpp"
+#include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
 #include "singletons/Theme.hpp"
 #include "singletons/WindowManager.hpp"
@@ -33,17 +35,17 @@
 #include "widgets/buttons/SvgButton.hpp"
 #include "widgets/ChatterListWidget.hpp"
 #include "widgets/dialogs/SettingsDialog.hpp"
-#include "widgets/helper/CommonTexts.hpp"
 #include "widgets/helper/ChannelView.hpp"
+#include "widgets/helper/CommonTexts.hpp"
 #include "widgets/Label.hpp"
 #include "widgets/splits/Split.hpp"
 #include "widgets/splits/SplitContainer.hpp"
 #include "widgets/TooltipWidget.hpp"
 
-#include <QDrag>
-#include <QDateTime>
 #include <QCursor>
+#include <QDateTime>
 #include <QDesktopServices>
+#include <QDrag>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -613,6 +615,13 @@ std::vector<ViewerCountEntry> viewerCountEntries(Channel *channel)
         addKickViewerCount(
             entries, dynamic_cast<KickChannel *>(merged->kickChannel().get()));
         addYouTubeViewerCount(entries, merged->youtubeLiveChat());
+        if (const auto *tiktok = merged->tiktokLiveChat();
+            tiktok != nullptr && tiktok->isLive())
+        {
+            entries.push_back({SplitHeaderViewerCountMode::TikTok,
+                               QStringLiteral("TikTok"),
+                               tiktok->liveViewerCount()});
+        }
     }
 
     return entries;
@@ -967,6 +976,15 @@ void SplitHeader::initializeLayout()
         },
         this, {4, 4});
 
+    this->priorityChatButton_ =
+        new SvgButton({.dark = ":/buttons/priorityChat.svg",
+                       .light = ":/buttons/priorityChat.svg"},
+                      this, {5, 5});
+    this->priorityChatButton_->setContentSize(QSize(18, 18));
+    this->priorityChatButton_->setObjectName("PriorityChatToggle");
+    this->priorityChatButton_->setAccessibleName("Toggle Priority Chat");
+    this->priorityChatButton_->setToolTip("Toggle Priority Chat");
+
     this->addButton_ = new DrawnButton(DrawnButton::Symbol::Plus,
                                        {
                                            .padding = 3,
@@ -1062,6 +1080,7 @@ void SplitHeader::initializeLayout()
         }),
         // alerts
         this->alertsButton_,
+        this->priorityChatButton_,
         // moderator
         this->moderationButton_,
         // viewer list
@@ -1080,20 +1099,7 @@ void SplitHeader::initializeLayout()
             switch (button)
             {
                 case Qt::LeftButton:
-                    if (getSettings()->moderationActions.empty())
-                    {
-                        getApp()->getWindows()->showSettingsDialog(
-                            this, SettingsDialogPreference::ModerationActions);
-                        this->split_->setModerationMode(true);
-                    }
-                    else
-                    {
-                        auto moderationMode = this->split_->getModerationMode();
-
-                        this->split_->setModerationMode(!moderationMode);
-                        // w->setDim(moderationMode ? DimButton::Dim::Some
-                        //                          : DimButton::Dim::None);
-                    }
+                    this->split_->setModerationMode(!this->split_->getModerationMode());
                     break;
 
                 case Qt::RightButton:
@@ -1114,6 +1120,9 @@ void SplitHeader::initializeLayout()
 
     QObject::connect(this->alertsButton_, &Button::leftClicked, this, [this]() {
         this->split_->openAlertsPane();
+    });
+    QObject::connect(this->priorityChatButton_, &Button::leftClicked, this, [this] {
+        this->split_->setPriorityChatEnabled(!this->split_->priorityChatEnabled());
     });
 
     QObject::connect(this->clearActivityButton_, &Button::leftClicked, this,
@@ -1149,6 +1158,7 @@ void SplitHeader::initializeLayout()
     this->modeButton_->installEventFilter(this);
     this->queuedSlowChatCountLabel_->installEventFilter(this);
     this->alertsButton_->installEventFilter(this);
+    this->priorityChatButton_->installEventFilter(this);
     this->moderationButton_->installEventFilter(this);
 
     this->setAddButtonVisible(false);
@@ -1244,10 +1254,15 @@ bool SplitHeader::eventFilter(QObject *watched, QEvent *event)
                 this->showHoverTooltip(target, "Toggle the activity tab.",
                                        false);
             }
+            else if (watched == this->priorityChatButton_ &&
+                     this->priorityChatButton_->isVisible())
+            {
+                this->showHoverTooltip(target, "Toggle Priority Chat: custom rules and selected users.", false);
+            }
             else if (watched == this->moderationButton_ &&
                      this->moderationButton_->isVisible())
             {
-                this->showHoverTooltip(target, "Toggle moderation mode.", false);
+                this->showHoverTooltip(target, "Toggle Mod View. Right-click to configure inline buttons.", false);
             }
         }
         else if ((watched == this->titleLabel_ ||
@@ -1414,6 +1429,23 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
     // top level menu
     const auto &h = getApp()->getHotkeys();
     auto menu = std::make_unique<QMenu>();
+    if (this->split_->isModViewPane())
+    {
+        menu->addAction("Rules", this->split_, &Split::showSettingsDialog);
+        menu->addAction("Pop out", this->split_, &Split::popup);
+        menu->addSeparator();
+        menu->addAction("Close", this->split_, &Split::deleteFromContainer);
+        return menu;
+    }
+    if (this->split_->isPriorityChatPane())
+    {
+        menu->addAction("Settings", this->split_, &Split::showSettingsDialog);
+        menu->addAction("Clear messages", this->split_, &Split::clear);
+        menu->addAction("Pop out", this->split_, &Split::popup);
+        menu->addSeparator();
+        menu->addAction("Close", this->split_, &Split::deleteFromContainer);
+        return menu;
+    }
     menu->addAction(
         "Change channel",
         h->getDisplaySequence(HotkeyCategory::Split, "changeChannel"),
@@ -1483,7 +1515,7 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
                         this->split_->showSearch(true);
                     });
     menu->addAction("Export chat", this, &SplitHeader::exportChat);
-    if (this->split_->isActivityPane())
+    if (this->split_->isUtilityPane())
     {
         menu->addAction("Settings", this->split_, &Split::showSettingsDialog);
     }
@@ -1603,7 +1635,6 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
         {
             menu->addAction(
                 OPEN_MOD_VIEW_IN_BROWSER,
-                h->getDisplaySequence(HotkeyCategory::Split, "openModView"),
                 this->split_, &Split::openModViewInBrowser);
         }
 
@@ -1689,6 +1720,17 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
 
     // sub menu
     auto *moreMenu = new QMenu("More", this);
+    if (this->split_->canUsePriorityChat() &&
+        !this->split_->isPriorityChatPane())
+    {
+        auto *priorityAction = moreMenu->addAction("Priority Chat");
+        priorityAction->setCheckable(true);
+        priorityAction->setChecked(this->split_->priorityChatEnabled());
+        QObject::connect(priorityAction, &QAction::triggered, this, [this] {
+            this->split_->setPriorityChatEnabled(
+                !this->split_->priorityChatEnabled());
+        });
+    }
 
     auto modModeSeq = h->getDisplaySequence(HotkeyCategory::Split,
                                             "setModerationMode", {{"toggle"}});
@@ -1700,9 +1742,13 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
         // this makes a full std::optional<> with an empty vector inside
     }
     moreMenu->addAction(
-        "Toggle moderation mode", modModeSeq, this->split_, [this]() {
+        "Toggle Mod View", modModeSeq, this->split_, [this]() {
             this->split_->setModerationMode(!this->split_->getModerationMode());
         });
+
+    moreMenu->addAction("Open Mod View",
+                       h->getDisplaySequence(HotkeyCategory::Split, "openModView"),
+                       this->split_, &Split::openModView);
 
     if (this->split_->getChannel()->getType() == Channel::Type::TwitchMentions)
     {
@@ -1929,7 +1975,7 @@ void SplitHeader::popupMainMenu(const QPoint &globalPosition)
 void SplitHeader::openTabSettings()
 {
     QPointer<Split> split = this->split_;
-    const bool isActivityPane = this->split_->isActivityPane();
+    const bool isActivityPane = this->split_->isUtilityPane();
     QTimer::singleShot(0, this, [split, isActivityPane] {
         if (split == nullptr)
         {
@@ -2006,7 +2052,7 @@ void SplitHeader::positionTitleSettingsButton()
     const int minX = labelRect.x() + leftPadding;
     const int maxX = std::max(minX, labelRect.right() - buttonWidth + 1);
     int x = textLeft + visibleTextWidth + gap;
-    if (this->split_->isActivityPane())
+    if (this->split_->isUtilityPane())
     {
         x += static_cast<int>(std::round(9 * this->scale()));
     }
@@ -2070,7 +2116,7 @@ void SplitHeader::updateRoomModes()
         }
     };
 
-    if (this->split_->isActivityPane() ||
+    if (this->split_->isUtilityPane() ||
         !getSettings()->headerChatModeIndicator ||
         !this->split_->chatModeIndicatorVisible())
     {
@@ -2148,6 +2194,7 @@ void SplitHeader::scaleChangedEvent(float scale)
     this->titleSettingsButton_->setFixedSize(
         int(TITLE_SETTINGS_BUTTON_WIDTH * scale), w);
     this->alertsButton_->setFixedWidth(w);
+    this->priorityChatButton_->setFixedWidth(w);
     this->moderationButton_->setFixedWidth(w);
     this->chattersButton_->setFixedWidth(w);
     this->viewerCountContainer_->setFixedHeight(w);
@@ -2168,19 +2215,19 @@ void SplitHeader::scaleChangedEvent(float scale)
 
 void SplitHeader::setAddButtonVisible(bool value)
 {
-    this->addButton_->setVisible(value && !this->split_->isActivityPane());
+    this->addButton_->setVisible(value && !this->split_->isUtilityPane());
 }
 
 void SplitHeader::updateChannelText()
 {
     auto indirectChannel = this->split_->getIndirectChannel();
     auto channel = this->split_->getChannel();
-    this->titleLabel_->setPadding(
-        this->split_->isActivityPane()
-            ? QMargins(TITLE_LABEL_LEFT_PADDING + 22, -1,
-                       TITLE_LABEL_RIGHT_PADDING, 1)
-            : QMargins(TITLE_LABEL_LEFT_PADDING, -1,
-                       TITLE_LABEL_RIGHT_PADDING, 1));
+    this->titleLabel_->setPadding((this->split_->isUtilityPane())
+                                      ? QMargins(TITLE_LABEL_LEFT_PADDING + 22,
+                                                 -1, TITLE_LABEL_RIGHT_PADDING,
+                                                 1)
+                                      : QMargins(TITLE_LABEL_LEFT_PADDING, -1,
+                                                 TITLE_LABEL_RIGHT_PADDING, 1));
     this->isLive_ = false;
     this->tooltipText_ = QString();
     this->viewerCountTooltipText_ = QString();
@@ -2192,12 +2239,16 @@ void SplitHeader::updateChannelText()
         title = "watching: " + (title.isEmpty() ? "none" : title);
     }
 
-    if (this->split_->isActivityPane())
+    if (this->split_->isUtilityPane())
     {
         this->resetThumbnail();
         this->viewerCountContainer_->hide();
         this->viewerCountLabel_->setText(QString());
-        this->titleLabel_->setText(this->split_->activityPaneTitle());
+        this->titleLabel_->setText(this->split_->isModViewPane()
+                                       ? QStringLiteral("Mod View")
+                                   : this->split_->isPriorityChatPane()
+                                       ? this->split_->priorityChatTitle()
+                                       : this->split_->activityPaneTitle());
         this->positionTitleSettingsButton();
         return;
     }
@@ -2299,16 +2350,17 @@ void SplitHeader::updateIcons()
                                     ? QColor(24, 24, 24)
                                     : QColor(255, 255, 255);
 
-    if (this->split_->isActivityPane())
+    if (this->split_->isUtilityPane())
     {
         this->viewerCountContainer_->hide();
         this->viewerCountLabel_->setText(QString());
         this->queuedSlowChatCountLabel_->hide();
         this->queuedSlowChatCountLabel_->setText(QString());
         this->alertsButton_->hide();
+        this->priorityChatButton_->hide();
         this->moderationButton_->hide();
         this->chattersButton_->hide();
-        this->clearActivityButton_->show();
+        this->clearActivityButton_->setVisible(!this->split_->isModViewPane());
 
         return;
     }
@@ -2328,38 +2380,22 @@ void SplitHeader::updateIcons()
     this->queuedSlowChatCountLabel_->setVisible(!queuedSlowChatText.isEmpty());
 
     this->alertsButton_->show();
+    this->priorityChatButton_->setVisible(this->split_->canUsePriorityChat());
+    this->priorityChatButton_->setColor(this->split_->priorityChatEnabled()
+        ? std::optional<QColor>(activityActive) : std::optional<QColor>(activityInactive));
     this->alertsButton_->setColor(this->split_->hasLinkedActivityPane()
                                       ? std::optional<QColor>(activityActive)
                                       : std::optional<QColor>(activityInactive));
 
     if (channel->isTwitchOrKickChannel() || channel->isMergedChannel())
     {
-        auto moderationMode = this->split_->getModerationMode() &&
-                              !getSettings()->moderationActions.empty();
+        auto moderationMode = this->split_->getModerationMode();
 
-        if (moderationMode)
-        {
-            this->moderationButton_->setSource({
-                .dark = ":/buttons/moderationEnabled-darkMode.svg",
-                .light = ":/buttons/moderationEnabled-lightMode.svg",
-            });
-        }
-        else
-        {
-            this->moderationButton_->setSource({
-                .dark = ":/buttons/moderationDisabled-darkMode.svg",
-                .light = ":/buttons/moderationDisabled-lightMode.svg",
-            });
-        }
+        this->moderationButton_->setColor(
+            moderationMode ? std::optional<QColor>(activityActive)
+                           : std::optional<QColor>(activityInactive));
 
-        if (channel->hasModRights() || moderationMode)
-        {
-            this->moderationButton_->show();
-        }
-        else
-        {
-            this->moderationButton_->hide();
-        }
+        this->moderationButton_->show();
 
         if (auto *viewerListChannel = viewerListTwitchChannel(channel.get());
             viewerListChannel && viewerListChannel->hasModRights())
@@ -2399,10 +2435,21 @@ void SplitHeader::paintEvent(QPaintEvent * /*event*/)
         border = this->theme->splits.header.focusedBorder;
     }
 
-    painter.fillRect(this->rect(), background);
+    const bool sceneShown =
+        this->theme->effect().isScene() &&
+        scenes::ThemeSceneHost::instance().paintSurface(
+            this, painter, this->rect(), scenes::SceneSurface::Header,
+            background);
+    if (!sceneShown)
+    {
+        painter.fillRect(this->rect(), background);
+    }
     painter.setPen(border);
     painter.drawRect(0, 0, this->width() - 1, this->height() - 2);
-    painter.fillRect(0, this->height() - 1, this->width(), 1, background);
+    if (!sceneShown)
+    {
+        painter.fillRect(0, this->height() - 1, this->width(), 1, background);
+    }
 }
 
 void SplitHeader::mousePressEvent(QMouseEvent *event)
