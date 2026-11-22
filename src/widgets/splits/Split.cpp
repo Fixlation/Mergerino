@@ -846,6 +846,17 @@ Split::Split(QWidget *parent)
         getSettings()->moderationActions.delayedItemsChanged, [this] {
             this->refreshModerationMode();
         });
+    getSettings()->modViewPreferences.connect(
+        [this](const auto &, const auto &) {
+            const auto preference =
+                ModView::inlineActionsPreference(this->getChannel());
+            if (this->inlineModerationActionsOverride_ != preference)
+            {
+                this->inlineModerationActionsOverride_ = preference;
+                this->refreshModerationMode();
+            }
+        },
+        this->signalHolder_, false);
 
     this->signalHolder_.managedConnect(modifierStatusChanged, [this](
                                                                   Qt::KeyboardModifiers
@@ -2179,6 +2190,8 @@ void Split::setChannel(IndirectChannel newChannel)
     const auto priorityPanes = this->linkedPriorityChatPanes();
     const auto modPanes = this->linkedModViewPanes();
     this->channel_ = newChannel;
+    this->inlineModerationActionsOverride_ =
+        ModView::inlineActionsPreference(newChannel.get());
 
     this->view_->setChannel(this->isModViewPane() ? Channel::getEmpty()
                                                   : newChannel.get());
@@ -2430,15 +2443,6 @@ void Split::ensureModView()
         if (view->split_)
             view->split_->toggleModViewPopOut();
     });
-    std::ignore = view->inlineActionsChanged.connect([view] {
-        if (!view->split_)
-            return;
-        auto *split = view->split_.data();
-        if (auto *owner = split->modViewOwner())
-            owner->refreshModerationMode();
-        else
-            split->refreshModerationMode();
-    });
 }
 void Split::setModerationMode(bool value)
 {
@@ -2510,8 +2514,23 @@ bool Split::getModerationMode() const
 }
 bool Split::showInlineModerationActions() const
 {
-    return this->getModerationMode() && this->modView_ &&
-           this->modView_->inlineActionsEnabled();
+    if (this->isUtilityPane())
+    {
+        return false;
+    }
+    if (this->inlineModerationActionsOverride_.has_value())
+    {
+        return *this->inlineModerationActionsOverride_;
+    }
+    return this->modView_ && this->getModerationMode();
+}
+
+void Split::setInlineModerationActionsEnabled(bool enabled)
+{
+    if (!this->isUtilityPane())
+    {
+        ModView::setInlineActionsPreference(this->getChannel(), enabled);
+    }
 }
 void Split::normalizeModViewPanes()
 {

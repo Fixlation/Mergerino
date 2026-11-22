@@ -136,6 +136,7 @@ public:
     priority::Choice priorityChatUserChoice(const Message &message);
     bool isPriorityChatUserIncluded(const Message &message);
     bool showInlineModerationActions() const;
+    void setInlineModerationActionsEnabled(bool enabled);
     void inspectInModView(const MessagePtr &message);
     void setInputEnabled(bool enabled);
     bool hasHiddenPinnedMessage() const;
@@ -263,6 +264,7 @@ private:
     IndirectChannel channel_;
 
     bool moderationMode_{};
+    std::optional<bool> inlineModerationActionsOverride_;
     bool priorityChatEnabled_{false};
     bool priorityChatPane_{false};
     bool priorityChatStandalone_{false};

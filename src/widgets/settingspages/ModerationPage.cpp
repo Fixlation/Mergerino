@@ -315,7 +315,7 @@ ModerationPage::ModerationPage()
     {
         // clang-format off
         auto label = modMode.emplace<QLabel>(
-            "Click the moderation icon in a chat header to open Mod View. Its Rules tab controls whether these optional buttons also appear beside chat messages.<br><br>"
+            "Use the chat header menu or the Rules tab in Mod View to toggle the buttons beside chat messages.<br><br>"
             "Moderation buttons can be bound to chat commands such as \"/ban {user.name}\", \"/timeout {user.name} 1000\", \"/w someusername !report {user.name} was bad in channel {channel.name}\" or any other custom text commands.<br>"
             "For deleting messages use /delete {msg.id}.");
         label->setWordWrap(true);

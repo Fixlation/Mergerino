@@ -792,9 +792,7 @@ QWidget *ModView::buildRulesPage()
         this->setPlatformActive(platform, active);
     };
     editor->inlineActionsToggled = [this](bool enabled) {
-        this->inlineActions_ = enabled;
-        this->savePreferences();
-        this->inlineActionsChanged.invoke();
+        setInlineActionsPreference(this->channel_, enabled);
     };
     editor->testRequested = [this] {
         this->testRules();
@@ -1251,6 +1249,7 @@ void ModView::connectControls()
     // Other chats can change a shared profile
     getSettings()->modViewPreferences.connect(
         [this](const auto &, const auto &) {
+            this->rulesEditor_->setInlineActions(this->inlineActionsEnabled());
             this->profilesChanged();
         },
         this->signalHolder_, false);
@@ -1309,7 +1308,44 @@ qint64 ModView::now() const
 }
 bool ModView::inlineActionsEnabled() const
 {
-    return this->inlineActions_;
+    return inlineActionsPreference(this->channel_).value_or(true);
+}
+
+std::optional<bool> ModView::inlineActionsPreference(const ChannelPtr &channel)
+{
+    if (!hasChat(channel))
+    {
+        return std::nullopt;
+    }
+    const auto chat = ModerationProfiles(preferences()).chat(scopeFor(channel));
+    const auto enabled = chat.value("inlineActions");
+    if (enabled.isBool())
+    {
+        return enabled.toBool();
+    }
+    const auto legacy = chat.value("rules").toObject().value("inlineActions");
+    return legacy.isBool() ? std::optional<bool>(legacy.toBool()) : std::nullopt;
+}
+
+void ModView::setInlineActionsPreference(const ChannelPtr &channel,
+                                          bool enabled)
+{
+    if (!hasChat(channel))
+    {
+        return;
+    }
+    const auto scope = scopeFor(channel);
+    ModerationProfiles store(preferences());
+    auto chat = store.chat(scope);
+    if (chat.value("inlineActions") == QJsonValue(enabled))
+    {
+        return;
+    }
+    chat.insert("inlineActions", enabled);
+    store.setChat(scope, chat);
+    getSettings()->modViewPreferences = QString::fromUtf8(
+        QJsonDocument(store.toJson()).toJson(QJsonDocument::Compact));
+    getSettings()->requestSave();
 }
 int ModView::preferredWidth() const
 {
@@ -2178,7 +2214,6 @@ void ModView::loadPreferences()
     this->profileName_ = profile ? profile->name : QString("Default");
     this->profileRules_ = profile ? profile->rules : ReviewRules();
     const auto chat = store.chat(this->scope_);
-    this->inlineActions_ = chat.value("inlineActions").toBool(true);
     this->mutedPlatforms_.clear();
     for (const auto &value : chat.value("mutedPlatforms").toArray())
         if (const auto platform = moderation::platformFromName(value.toString()))
@@ -2205,7 +2240,6 @@ void ModView::savePreferences()
     chat.insert("profile", this->profileID_);
     chat.insert("tracked", this->review_.trackedJson());
     chat.insert("width", this->preferredWidth_);
-    chat.insert("inlineActions", this->inlineActions_);
     chat.insert("mutedPlatforms", muted);
     store.setChat(this->scope_, chat);
     this->writeProfiles(store);
@@ -2466,7 +2500,7 @@ void ModView::loadRulesEditor()
 {
     this->loadingRules_ = true;
     this->rulesEditor_->setRules(this->profileRules_);
-    this->rulesEditor_->setInlineActions(this->inlineActions_);
+    this->rulesEditor_->setInlineActions(this->inlineActionsEnabled());
     const auto available = this->availablePlatforms();
     QSet<MessagePlatform> active;
     for (const auto platform : available)

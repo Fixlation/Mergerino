@@ -1605,6 +1605,17 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
     auto *kickChannel =
         dynamic_cast<KickChannel *>(this->split_->getChannel().get());
 
+    if (!this->split_->isUtilityPane() &&
+        (twitchChannel || kickChannel ||
+         this->split_->getChannel()->isMergedChannel()))
+    {
+        auto *inlineButtons = menu->addAction("Inline moderation buttons");
+        inlineButtons->setCheckable(true);
+        inlineButtons->setChecked(this->split_->showInlineModerationActions());
+        QObject::connect(inlineButtons, &QAction::triggered, this->split_,
+                         &Split::setInlineModerationActionsEnabled);
+    }
+
     if (twitchChannel || kickChannel)
     {
         menu->addAction(

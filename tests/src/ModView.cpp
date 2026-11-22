@@ -1347,6 +1347,7 @@ TEST_F(ModViewPaneState, NativePanePreservesChatAndReviewAcrossToggles)
     EXPECT_FALSE(panel->isActivityPane());
     EXPECT_FALSE(panel->isPriorityChatPane());
     EXPECT_TRUE(owner->getModerationMode());
+    EXPECT_TRUE(owner->showInlineModerationActions());
     EXPECT_EQ(panel->getChannelView().underlyingChannel(), Channel::getEmpty());
     click(*view, "ModViewMark");
     click(*view, "ModViewTrack");
@@ -1368,6 +1369,42 @@ TEST_F(ModViewPaneState, NativePanePreservesChatAndReviewAcrossToggles)
     EXPECT_EQ(container.getSplits().size(), 1);
     EXPECT_EQ(view->parentWidget(), owner);
 }
+
+TEST_F(ModViewPaneState, InlineButtonsAndModViewCanBeToggledIndependently)
+{
+    auto *owner = addChat();
+    EXPECT_FALSE(owner->showInlineModerationActions());
+    owner->setInlineModerationActionsEnabled(true);
+    EXPECT_TRUE(owner->showInlineModerationActions());
+    EXPECT_EQ(pane(owner), nullptr);
+
+    owner->openModView();
+    auto *panel = pane(owner);
+    ASSERT_NE(panel, nullptr);
+    auto *toggle = panel->findChild<QCheckBox *>("ModViewInlineActions");
+    ASSERT_NE(toggle, nullptr);
+    EXPECT_TRUE(toggle->isChecked());
+    toggle->setChecked(false);
+    EXPECT_FALSE(owner->showInlineModerationActions());
+    EXPECT_TRUE(owner->getModerationMode());
+    EXPECT_EQ(pane(owner), panel);
+
+    owner->setInlineModerationActionsEnabled(true);
+    EXPECT_TRUE(toggle->isChecked());
+    EXPECT_FALSE(panel->showInlineModerationActions());
+    container.deleteSplit(panel);
+    EXPECT_FALSE(owner->getModerationMode());
+    EXPECT_TRUE(owner->showInlineModerationActions());
+
+    SplitContainer restored(nullptr);
+    restored.applyFromDescriptor(container.buildDescriptor());
+    ASSERT_EQ(restored.getSplits().size(), 1);
+    auto *restoredOwner = restored.getSplits().front();
+    EXPECT_TRUE(restoredOwner->showInlineModerationActions());
+    owner->setInlineModerationActionsEnabled(false);
+    EXPECT_FALSE(restoredOwner->showInlineModerationActions());
+}
+
 TEST_F(ModViewPaneState, LayoutRestoresOneLinkedPaneAndMigratesInlineActivation)
 {
     auto *owner = addChat();

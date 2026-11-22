@@ -14,6 +14,7 @@
 
 #include <deque>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QCheckBox;
@@ -67,12 +68,15 @@ public:
     void inspectMessage(const MessagePtr &message);
     void showRules();
     bool inlineActionsEnabled() const;
+    static std::optional<bool> inlineActionsPreference(
+        const ChannelPtr &channel);
+    static void setInlineActionsPreference(const ChannelPtr &channel,
+                                           bool enabled);
     int preferredWidth() const;
     void setPreferredWidth(int width);
 
     pajlada::Signals::NoArgSignal closeRequested;
     pajlada::Signals::NoArgSignal popOutRequested;
-    pajlada::Signals::NoArgSignal inlineActionsChanged;
 
 protected:
     void themeChangedEvent() override;
@@ -226,7 +230,6 @@ private:
     QString profileID_;
     QString profileName_;
     moderation::ReviewRules profileRules_;
-    bool inlineActions_ = true;
     QSet<MessagePlatform> mutedPlatforms_;
     std::deque<ActionRequest> actionQueue_;
     QStringList ageKeys_;
